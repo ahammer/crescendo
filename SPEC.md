@@ -1282,6 +1282,9 @@ Adapter output MUST satisfy Section 4.1.1. In addition:
 - Preserve provider spelling in `state`, but trim and lowercase only for scheduler comparisons.
 - `blocked_by` is best-effort metadata; adapters MUST NOT invent blocker semantics they cannot
   represent reliably.
+- The GitHub Issues adapter checks native `blocked_by` relationships for otherwise routable open
+  issues at polling and ID refresh. Open blockers and `not_planned` closures make them
+  `dispatchable=false`; failed or malformed dependency reads fail closed.
 - `dispatchable` MUST be explicit. It is `true` only when provider-specific eligibility checks
   pass; the generic scheduler never tries to reconstruct those checks from `native_ref`.
 - `native_ref` MUST be null or a JSON-safe object containing only non-secret values safe to expose

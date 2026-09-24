@@ -82,8 +82,9 @@ defmodule SymphonyElixir.GitHub.Client do
         {:ok, []}
 
       state_query ->
-        with {:ok, github_settings} <- settings(tracker_settings) do
-          do_fetch_pages(github_settings, state_query, normalized_states, 1, request_fun, [])
+        with {:ok, github_settings} <- settings(tracker_settings),
+             {:ok, issues} <- do_fetch_pages(github_settings, state_query, normalized_states, 1, request_fun, []) do
+          fetch_dependencies(issues, tracker_settings, github_settings, request_fun)
         end
     end
   end
@@ -96,8 +97,9 @@ defmodule SymphonyElixir.GitHub.Client do
         {:ok, []}
 
       ids ->
-        with {:ok, github_settings} <- settings(tracker_settings) do
-          fetch_issue_ids(ids, github_settings, request_fun, [])
+        with {:ok, github_settings} <- settings(tracker_settings),
+             {:ok, issues} <- fetch_issue_ids(ids, github_settings, request_fun, []) do
+          fetch_dependencies(issues, tracker_settings, github_settings, request_fun)
         end
     end
   end
@@ -204,6 +206,66 @@ defmodule SymphonyElixir.GitHub.Client do
   end
 
   defp normalize_issue(_issue, _repo), do: nil
+
+  defp fetch_dependencies(issues, tracker_settings, settings, request_fun) do
+    required_labels = Map.get(tracker_settings, :required_labels, [])
+
+    Enum.reduce_while(issues, {:ok, []}, fn issue, {:ok, acc} ->
+      case fetch_dependencies_for_issue(issue, required_labels, settings, request_fun) do
+        {:ok, updated_issue} -> {:cont, {:ok, [updated_issue | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, reversed} -> {:ok, Enum.reverse(reversed)}
+      error -> error
+    end
+  end
+
+  defp fetch_dependencies_for_issue(issue, required_labels, settings, request_fun) do
+    if Issue.routable?(issue, required_labels) and issue.state == "open" do
+      with {:ok, blockers} <- fetch_blockers(settings, issue.id, request_fun, 1, []) do
+        dispatchable = Enum.all?(blockers, &satisfied_blocker?/1)
+        {:ok, %{issue | blocked_by: blockers, dispatchable: dispatchable}}
+      end
+    else
+      {:ok, issue}
+    end
+  end
+
+  defp fetch_blockers(settings, issue_id, request_fun, page, acc) do
+    path = "#{repository_issue_path(settings, issue_id)}/dependencies/blocked_by"
+    params = %{"per_page" => @page_size, "page" => page}
+
+    with {:ok, payload} <- request_with_settings("GET", path, params, nil, settings, request_fun, false),
+         true <- is_list(payload) or {:error, :github_unknown_payload},
+         {:ok, blockers} <- normalize_blockers(payload) do
+      acc = [blockers | acc]
+
+      if length(payload) < @page_size do
+        {:ok, acc |> Enum.reverse() |> List.flatten()}
+      else
+        fetch_blockers(settings, issue_id, request_fun, page + 1, acc)
+      end
+    end
+  end
+
+  defp normalize_blockers(payload) do
+    blockers =
+      Enum.map(payload, fn
+        %{"id" => id, "number" => number, "state" => state} = blocker
+        when is_integer(id) and is_integer(number) and number > 0 and state in ["open", "closed"] ->
+          %{id: Integer.to_string(id), identifier: "GH-#{number}", state: state, state_reason: blocker["state_reason"]}
+
+        _ ->
+          nil
+      end)
+
+    if Enum.any?(blockers, &is_nil/1), do: {:error, :github_unknown_payload}, else: {:ok, blockers}
+  end
+
+  defp satisfied_blocker?(%{state: "closed", state_reason: reason}), do: reason != "not_planned"
+  defp satisfied_blocker?(_), do: false
 
   defp native_ref(issue, repo) do
     %{

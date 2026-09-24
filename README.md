@@ -33,6 +33,7 @@ help with the setup:
 
 The Elixir implementation can route Codex model and reasoning effort from explicit issue labels;
 see its `codex.routing` workflow setting.
+Its GitHub Issues adapter also respects native issue dependencies before dispatch.
 
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
