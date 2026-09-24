@@ -40,6 +40,28 @@ defmodule SymphonyElixir.GitHub.Client do
     fetch_issues_by_ids(issue_ids, Config.settings!().tracker, &perform_request/5)
   end
 
+  @spec fetch_open_pull_requests() :: {:ok, [map()]} | {:error, term()}
+  def fetch_open_pull_requests do
+    fetch_open_pull_requests_for_test(Config.settings!().tracker, &perform_request/5)
+  end
+
+  @spec fetch_pull_status(pos_integer()) :: {:ok, String.t()} | {:error, term()}
+  def fetch_pull_status(number) when is_integer(number) and number > 0 do
+    with {:ok, settings} <- settings(Config.settings!().tracker),
+         {:ok, payload} <- request_with_settings("GET", "/repos/#{encoded_repo(settings.repo)}/pulls/#{number}", %{}, nil, settings, &perform_request/5, false),
+         true <- is_map(payload) or {:error, :github_unknown_payload} do
+      {:ok, if(payload["merged_at"], do: "merged", else: payload["state"] || "unknown")}
+    end
+  end
+
+  @doc false
+  @spec fetch_open_pull_requests_for_test(map(), function()) :: {:ok, [map()]} | {:error, term()}
+  def fetch_open_pull_requests_for_test(tracker_settings, request_fun) do
+    with {:ok, github_settings} <- settings(tracker_settings) do
+      do_fetch_pull_pages(github_settings, request_fun, 1, [])
+    end
+  end
+
   @spec request(String.t(), String.t(), map(), term(), keyword()) ::
           {:ok, %{status: integer(), body: term()}} | {:error, term()}
   def request(method, path, params, body, opts \\ [])
@@ -135,6 +157,31 @@ defmodule SymphonyElixir.GitHub.Client do
     end
   end
 
+  defp do_fetch_pull_pages(settings, request_fun, page, acc) do
+    params = %{"state" => "open", "per_page" => @page_size, "page" => page, "sort" => "updated", "direction" => "asc"}
+    path = "/repos/#{encoded_repo(settings.repo)}/pulls"
+
+    with {:ok, payload} <- request_with_settings("GET", path, params, nil, settings, request_fun, false),
+         true <- is_list(payload) or {:error, :github_unknown_payload},
+         pulls <- Enum.map(payload, &normalize_pull/1),
+         true <- Enum.all?(pulls, &is_map/1) or {:error, :github_unknown_payload} do
+      acc = [pulls | acc]
+
+      if length(payload) < @page_size do
+        {:ok, acc |> Enum.reverse() |> List.flatten()}
+      else
+        do_fetch_pull_pages(settings, request_fun, page + 1, acc)
+      end
+    end
+  end
+
+  defp normalize_pull(%{"number" => number, "title" => title, "html_url" => url, "draft" => draft, "updated_at" => updated_at})
+       when is_integer(number) and number > 0 and is_binary(title) and is_binary(url) and is_boolean(draft) do
+    %{number: number, title: title, url: url, draft: draft, updated_at: updated_at}
+  end
+
+  defp normalize_pull(_), do: nil
+
   defp fetch_issue_ids([], _settings, _request_fun, acc), do: {:ok, Enum.reverse(acc)}
 
   defp fetch_issue_ids([id | rest], settings, request_fun, acc) do
@@ -169,7 +216,7 @@ defmodule SymphonyElixir.GitHub.Client do
   end
 
   defp normalize_state_page(payload, repo, requested_states) do
-    issues = Enum.map(payload, &normalize_issue(&1, repo))
+    issues = payload |> Enum.reject(&(is_map(&1) and Map.has_key?(&1, "pull_request"))) |> Enum.map(&normalize_issue(&1, repo))
     malformed_count = Enum.count(issues, &is_nil/1)
 
     if malformed_count > 0 do

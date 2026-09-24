@@ -22,6 +22,7 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.SpecsCheck,
           SymphonyElixir.Orchestrator,
           SymphonyElixir.Orchestrator.State,
+          SymphonyElixir.Operations,
           SymphonyElixir.AgentRunner,
           SymphonyElixir.Application,
           SymphonyElixir.CLI,

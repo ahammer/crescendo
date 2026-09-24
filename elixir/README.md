@@ -311,6 +311,14 @@ The observability UI now runs on a minimal Phoenix stack:
 - Bandit as the HTTP server
 - Phoenix dependency static assets for the LiveView client bootstrap
 - Tracker issue identifiers link to the tracker-provided URL when it uses `http` or `https`
+- The dashboard shows the last issue poll in dispatch order, dependency/retry blockers, and (for
+  GitHub trackers) an independently refreshed, read-only inventory of open pull requests.
+- A local `operations.dets` file beside the rotating log keeps model usage and the latest 2,000
+  lifecycle events across restarts. `/api/v1/state` exposes these as `usage`, `upcoming`, and
+  `pull_requests`; a failed poll leaves the last good inventory visible with its timestamp and an error.
+- Dollar figures compare recorded tokens with standard short-context API prices dated
+  September 24, 2026. They are estimates, not actual ChatGPT billing; unknown models remain
+  unpriced. Recording starts with the first run after this version is deployed.
 
 ## Project Layout
 

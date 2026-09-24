@@ -167,11 +167,11 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
                    request_fun
                  )
 
-        assert length(issues) == 99
+        assert length(issues) == 98
         assert hd(issues).id == "1"
         assert List.last(issues).id == "101"
         refute Enum.any?(issues, &(&1.id == "99"))
-        assert Enum.find(issues, &(&1.id == "98")).dispatchable == false
+        refute Enum.any?(issues, &(&1.id == "98"))
       end)
 
     assert log =~ "Dropping malformed GitHub issue records count=1"
@@ -195,6 +195,25 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
                  flunk("unsupported GitHub states should not make an HTTP request")
                end
              )
+  end
+
+  test "client reads the open pull request inventory in update order" do
+    request_fun = fn "GET", "/repos/octo/repo/pulls", params, nil, _settings ->
+      send(self(), {:pull_params, params})
+
+      {:ok,
+       %{
+         status: 200,
+         body: [
+           %{"number" => 12, "title" => "Finish water", "html_url" => "https://github.test/pull/12", "draft" => true, "updated_at" => "2026-09-01T00:00:00Z"}
+         ]
+       }}
+    end
+
+    assert {:ok, [%{number: 12, draft: true}]} =
+             GitHubClient.fetch_open_pull_requests_for_test(tracker_settings(), request_fun)
+
+    assert_receive {:pull_params, %{"state" => "open", "sort" => "updated", "direction" => "asc"}}
   end
 
   test "client refreshes numeric IDs in order, omits 404s, and rejects malformed refreshes" do

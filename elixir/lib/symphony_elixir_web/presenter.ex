@@ -3,7 +3,7 @@ defmodule SymphonyElixirWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias SymphonyElixir.{Config, Orchestrator, StatusDashboard, Workspace}
+  alias SymphonyElixir.{Config, Operations, Orchestrator, StatusDashboard, Workspace}
 
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
@@ -16,13 +16,20 @@ defmodule SymphonyElixirWeb.Presenter do
           counts: %{
             running: length(snapshot.running),
             retrying: length(snapshot.retrying),
-            blocked: length(Map.get(snapshot, :blocked, []))
+            blocked: length(Map.get(snapshot, :blocked, [])),
+            ready: length(get_in(snapshot, [:upcoming, :ready]) || []),
+            waiting: length(get_in(snapshot, [:upcoming, :waiting]) || []),
+            open_prs: length(get_in(snapshot, [:pull_requests, :items]) || [])
           },
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
           codex_totals: snapshot.codex_totals,
-          rate_limits: snapshot.rate_limits
+          rate_limits: snapshot.rate_limits,
+          usage: Map.get(snapshot, :operations) || Operations.snapshot(nil),
+          usage_error: Map.get(snapshot, :operations_error),
+          upcoming: upcoming_payload(Map.get(snapshot, :upcoming)),
+          pull_requests: pulls_payload(Map.get(snapshot, :pull_requests))
         }
 
       :timeout ->
@@ -109,6 +116,7 @@ defmodule SymphonyElixirWeb.Presenter do
       workspace_path: Map.get(entry, :workspace_path),
       session_id: entry.session_id,
       turn_count: Map.get(entry, :turn_count, 0),
+      model: Map.get(entry, :model),
       last_event: entry.last_codex_event,
       last_message: summarize_message(entry.last_codex_message),
       started_at: iso8601(entry.started_at),
@@ -157,6 +165,7 @@ defmodule SymphonyElixirWeb.Presenter do
       workspace_path: Map.get(running, :workspace_path),
       session_id: running.session_id,
       turn_count: Map.get(running, :turn_count, 0),
+      model: Map.get(running, :model),
       state: running.state,
       started_at: iso8601(running.started_at),
       last_event: running.last_codex_event,
@@ -239,4 +248,10 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp iso8601(_datetime), do: nil
+
+  defp upcoming_payload(nil), do: %{ready: [], waiting: [], observed_at: nil, error: nil, available_slots: nil}
+  defp upcoming_payload(value), do: Map.update(value, :observed_at, nil, &iso8601/1)
+
+  defp pulls_payload(nil), do: %{items: [], observed_at: nil, error: nil, enabled: false}
+  defp pulls_payload(value), do: Map.update(value, :observed_at, nil, &iso8601/1)
 end

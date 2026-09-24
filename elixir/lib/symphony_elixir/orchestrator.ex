@@ -7,7 +7,8 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, Operations, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.GitHub.Client, as: GitHubClient
   alias SymphonyElixir.Tracker.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -33,12 +34,24 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      :operations,
+      :operations_error,
+      :operations_last_sync_ms,
       task_supervisor: SymphonyElixir.TaskSupervisor,
       running: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
       blocked: %{},
       retry_attempts: %{},
+      polled_issues: [],
+      issues_observed_at: nil,
+      issues_error: nil,
+      pull_requests: [],
+      pulls_observed_at: nil,
+      pulls_error: nil,
+      pulls_fetching: false,
+      pulls_task_ref: nil,
+      next_pulls_due_at_ms: 0,
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -56,6 +69,8 @@ defmodule SymphonyElixir.Orchestrator do
     case Config.settings() do
       {:ok, config} ->
         now_ms = System.monotonic_time(:millisecond)
+        {operations, operations_error} = open_operations(opts, Keyword.get(opts, :name, __MODULE__))
+        {pull_requests, pulls_observed_at} = Operations.pull_inventory(operations)
 
         state = %State{
           poll_interval_ms: config.polling.interval_ms,
@@ -65,6 +80,11 @@ defmodule SymphonyElixir.Orchestrator do
           tick_timer_ref: nil,
           tick_token: nil,
           task_supervisor: Keyword.get(opts, :task_supervisor, SymphonyElixir.TaskSupervisor),
+          operations: operations,
+          operations_error: operations_error,
+          operations_last_sync_ms: now_ms,
+          pull_requests: pull_requests,
+          pulls_observed_at: pulls_observed_at,
           codex_totals: @empty_codex_totals,
           codex_rate_limits: nil
         }
@@ -117,7 +137,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info(:run_poll_cycle, state) do
     state = refresh_runtime_config(state)
+    state = maybe_fetch_pull_requests(state)
     state = maybe_dispatch(state)
+    state = maybe_sync_operations(state)
     state = schedule_tick(state, state.poll_interval_ms)
     state = %{state | poll_check_in_progress: false}
 
@@ -129,21 +151,12 @@ defmodule SymphonyElixir.Orchestrator do
         {:DOWN, ref, :process, _pid, reason},
         %{running: running} = state
       ) do
-    case find_issue_id_for_ref(running, ref) do
-      nil ->
-        {:noreply, state}
-
-      issue_id ->
-        {running_entry, state} = pop_running_entry(state, issue_id)
-        state = record_session_completion_totals(state, running_entry)
-        session_id = running_entry_session_id(running_entry)
-
-        state = handle_agent_down(reason, state, issue_id, running_entry, session_id)
-
-        Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
-
-        notify_dashboard()
-        {:noreply, state}
+    if ref == state.pulls_task_ref do
+      Logger.warning("GitHub pull request inventory task exited: #{inspect(reason)}")
+      notify_dashboard()
+      {:noreply, %{state | pulls_fetching: false, pulls_task_ref: nil, pulls_error: "GitHub inventory task exited"}}
+    else
+      handle_worker_down(ref, reason, running, state)
     end
   end
 
@@ -164,6 +177,44 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  def handle_info({:worker_model_route, issue_id, route}, %{running: running} = state) do
+    case Map.get(running, issue_id) do
+      nil ->
+        {:noreply, state}
+
+      entry ->
+        model = route && route["model"]
+        {:noreply, %{state | running: Map.put(running, issue_id, Map.put(entry, :model, model))}}
+    end
+  end
+
+  def handle_info({:pull_requests_fetched, result}, state) do
+    if state.pulls_task_ref, do: Process.demonitor(state.pulls_task_ref, [:flush])
+    state = %{state | pulls_fetching: false, pulls_task_ref: nil}
+
+    state =
+      case result do
+        {:ok, pulls, statuses} ->
+          record_pull_changes(state.operations, state.pull_requests, pulls, state.pulls_observed_at, statuses)
+          observed_at = DateTime.utc_now()
+          Operations.save_pull_inventory(state.operations, pulls, observed_at)
+          %{state | pull_requests: pulls, pulls_observed_at: observed_at, pulls_error: nil}
+
+        {:ok, pulls} ->
+          record_pull_changes(state.operations, state.pull_requests, pulls, state.pulls_observed_at, %{})
+          observed_at = DateTime.utc_now()
+          Operations.save_pull_inventory(state.operations, pulls, observed_at)
+          %{state | pull_requests: pulls, pulls_observed_at: observed_at, pulls_error: nil}
+
+        {:error, reason} ->
+          Logger.warning("GitHub pull request inventory failed: #{inspect(reason)}")
+          %{state | pulls_error: safe_pull_error(reason)}
+      end
+
+    notify_dashboard()
+    {:noreply, state}
+  end
+
   def handle_info(
         {:codex_worker_update, issue_id, %{event: _, timestamp: _} = update},
         %{running: running} = state
@@ -179,6 +230,9 @@ defmodule SymphonyElixir.Orchestrator do
           state
           |> apply_codex_token_delta(token_delta)
           |> apply_codex_rate_limits(update)
+
+        Operations.usage(state.operations, Map.get(updated_running_entry, :run_id), Map.get(updated_running_entry, :model), token_delta)
+        maybe_record_turn_event(state.operations, updated_running_entry, update)
 
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
@@ -203,6 +257,38 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info(msg, state) do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
     {:noreply, state}
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    Operations.sync(state.operations)
+    Operations.close(state.operations)
+  end
+
+  defp handle_worker_down(ref, reason, running, state) do
+    case find_issue_id_for_ref(running, ref) do
+      nil ->
+        {:noreply, state}
+
+      issue_id ->
+        {running_entry, state} = pop_running_entry(state, issue_id)
+        state = record_session_completion_totals(state, running_entry)
+        session_id = running_entry_session_id(running_entry)
+
+        Operations.finish_run(state.operations, Map.get(running_entry, :run_id), if(reason == :normal, do: "completed", else: "failed"), %{
+          issue_identifier: running_entry.identifier,
+          issue_url: running_entry.issue.url,
+          model: Map.get(running_entry, :model),
+          summary: if(reason == :normal, do: "Worker finished", else: "Worker failed")
+        })
+
+        state = handle_agent_down(reason, state, issue_id, running_entry, session_id)
+
+        Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
+
+        notify_dashboard()
+        {:noreply, state}
+    end
   end
 
   defp handle_agent_down(:normal, state, issue_id, running_entry, session_id) do
@@ -260,50 +346,53 @@ defmodule SymphonyElixir.Orchestrator do
       |> reconcile_blocked_issues()
 
     with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_issues_by_states(Config.settings!().tracker.active_states),
-         true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
+         {:ok, issues} <- Tracker.fetch_issues_by_states(Config.settings!().tracker.active_states) do
+      state = %{
+        state
+        | polled_issues: sort_issues_for_dispatch(issues),
+          issues_observed_at: DateTime.utc_now(),
+          issues_error: nil
+      }
+
+      if available_slots(state) > 0, do: choose_issues(issues, state), else: state
     else
       {:error, :missing_linear_api_token} ->
         Logger.error("Tracker API token missing in WORKFLOW.md")
-        state
+        %{state | issues_error: "missing Linear API token"}
 
       {:error, :missing_linear_project_slug} ->
         Logger.error("Tracker project scope missing in WORKFLOW.md")
-        state
+        %{state | issues_error: "missing Linear project scope"}
 
       {:error, :missing_tracker_kind} ->
         Logger.error("Tracker kind missing in WORKFLOW.md")
 
-        state
+        %{state | issues_error: "missing tracker kind"}
 
       {:error, {:unsupported_tracker_kind, kind}} ->
         Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
 
-        state
+        %{state | issues_error: "unsupported tracker kind #{inspect(kind)}"}
 
       {:error, {:invalid_workflow_config, message}} ->
         Logger.error("Invalid WORKFLOW.md config: #{message}")
-        state
+        %{state | issues_error: message}
 
       {:error, {:missing_workflow_file, path, reason}} ->
         Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
-        state
+        %{state | issues_error: "missing workflow file #{path}: #{inspect(reason)}"}
 
       {:error, :workflow_front_matter_not_a_map} ->
         Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
-        state
+        %{state | issues_error: "workflow front matter is not a map"}
 
       {:error, {:workflow_parse_error, reason}} ->
         Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
-        state
+        %{state | issues_error: "workflow parse error: #{inspect(reason)}"}
 
       {:error, reason} ->
         Logger.error("Failed to fetch from issue tracker: #{inspect(reason)}")
-        state
-
-      false ->
-        state
+        %{state | issues_error: "tracker fetch failed"}
     end
   end
 
@@ -422,6 +511,7 @@ defmodule SymphonyElixir.Orchestrator do
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
+        Operations.event(state.operations, "issue_terminal", %{issue_identifier: issue.identifier, issue_url: issue.url, summary: issue.state})
 
         terminate_running_issue(state, issue.id, true)
 
@@ -457,6 +547,7 @@ defmodule SymphonyElixir.Orchestrator do
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Blocked issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; releasing block")
+        Operations.event(state.operations, "issue_terminal", %{issue_identifier: issue.identifier, issue_url: issue.url, summary: issue.state})
         cleanup_issue_workspace(issue, Map.get(state.blocked, issue.id, %{}))
         release_issue_claim(state, issue.id)
 
@@ -656,14 +747,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp last_activity_timestamp(_running_entry), do: nil
 
-  defp input_required_blocker?(running_entry) when is_map(running_entry) do
+  defp input_required_blocker?(running_entry) do
     Map.get(running_entry, :last_codex_event) in [:turn_input_required, :approval_required] or
       not is_nil(input_required_completion_outcome(Map.get(running_entry, :completion))) or
       codex_message_method(Map.get(running_entry, :last_codex_message)) ==
         "mcpServer/elicitation/request"
   end
-
-  defp input_required_blocker?(_running_entry), do: false
 
   defp input_required_completion_outcome(completion) when is_map(completion) do
     outcome = Map.get(completion, :outcome) || Map.get(completion, "outcome")
@@ -687,14 +776,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp normalize_input_required_outcome(_outcome), do: nil
 
-  defp blocker_error(running_entry, fallback) when is_map(running_entry) do
+  defp blocker_error(running_entry, fallback) do
     codex_event_blocker_error(Map.get(running_entry, :last_codex_event)) ||
       completion_blocker_error(Map.get(running_entry, :completion)) ||
       codex_message_blocker_error(Map.get(running_entry, :last_codex_message)) ||
       fallback
   end
-
-  defp blocker_error(_running_entry, fallback), do: fallback
 
   defp codex_event_blocker_error(:turn_input_required), do: "codex turn requires operator input"
   defp codex_event_blocker_error(:approval_required), do: "codex turn requires approval"
@@ -755,6 +842,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error) do
+    Operations.event(state.operations, "blocked", %{
+      issue_identifier: Map.get(running_entry, :identifier, issue_id),
+      issue_url: Map.get(Map.get(running_entry, :issue) || %{}, :url),
+      summary: "Operator input or approval required"
+    })
+
     blocked_entry = %{
       issue_id: issue_id,
       identifier: Map.get(running_entry, :identifier, issue_id),
@@ -978,10 +1071,21 @@ defmodule SymphonyElixir.Orchestrator do
             codex_last_reported_input_tokens: 0,
             codex_last_reported_output_tokens: 0,
             codex_last_reported_total_tokens: 0,
+            codex_last_reported_cached_input_tokens: 0,
+            run_id: Base.encode16(:crypto.strong_rand_bytes(12), case: :lower),
+            model: nil,
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
             started_at: DateTime.utc_now()
           })
+
+        entry = Map.fetch!(running, issue.id)
+
+        Operations.start_run(state.operations, entry.run_id, %{
+          issue_identifier: issue.identifier,
+          issue_url: issue.url,
+          summary: "Dispatched to #{worker_host || "local"}"
+        })
 
         %{
           state
@@ -1054,6 +1158,12 @@ defmodule SymphonyElixir.Orchestrator do
     error_suffix = if is_binary(error), do: " error=#{error}", else: ""
 
     Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
+
+    Operations.event(state.operations, "retry_scheduled", %{
+      issue_identifier: identifier,
+      issue_url: issue_url,
+      summary: "Attempt #{next_attempt} in #{div(delay_ms, 1_000)}s"
+    })
 
     %{
       state
@@ -1426,6 +1536,7 @@ defmodule SymphonyElixir.Orchestrator do
           codex_input_tokens: metadata.codex_input_tokens,
           codex_output_tokens: metadata.codex_output_tokens,
           codex_total_tokens: metadata.codex_total_tokens,
+          model: Map.get(metadata, :model),
           turn_count: Map.get(metadata, :turn_count, 0),
           started_at: metadata.started_at,
           last_codex_timestamp: metadata.last_codex_timestamp,
@@ -1475,6 +1586,15 @@ defmodule SymphonyElixir.Orchestrator do
        retrying: retrying,
        blocked: blocked,
        codex_totals: state.codex_totals,
+       operations: Operations.snapshot(state.operations),
+       operations_error: state.operations_error,
+       upcoming: upcoming_issues(state),
+       pull_requests: %{
+         items: state.pull_requests,
+         observed_at: state.pulls_observed_at,
+         error: state.pulls_error,
+         enabled: Config.settings!().tracker.kind == "github"
+       },
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
          checking?: state.poll_check_in_progress == true,
@@ -1514,6 +1634,7 @@ defmodule SymphonyElixir.Orchestrator do
     last_reported_input = Map.get(running_entry, :codex_last_reported_input_tokens, 0)
     last_reported_output = Map.get(running_entry, :codex_last_reported_output_tokens, 0)
     last_reported_total = Map.get(running_entry, :codex_last_reported_total_tokens, 0)
+    last_reported_cached = Map.get(running_entry, :codex_last_reported_cached_input_tokens, 0)
     turn_count = Map.get(running_entry, :turn_count, 0)
 
     {
@@ -1529,6 +1650,8 @@ defmodule SymphonyElixir.Orchestrator do
         codex_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
         codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
+        codex_last_reported_cached_input_tokens: max(last_reported_cached, token_delta.cached_input_reported),
+        model: model_for_update(Map.get(running_entry, :model), update),
         turn_count: turn_count_for_update(turn_count, running_entry.session_id, update)
       }),
       token_delta
@@ -1707,17 +1830,25 @@ defmodule SymphonyElixir.Orchestrator do
         :total,
         usage,
         :codex_last_reported_total_tokens
+      ),
+      compute_token_delta(
+        running_entry,
+        :cached_input,
+        usage,
+        :codex_last_reported_cached_input_tokens
       )
     }
     |> Tuple.to_list()
-    |> then(fn [input, output, total] ->
+    |> then(fn [input, output, total, cached] ->
       %{
         input_tokens: input.delta,
         output_tokens: output.delta,
         total_tokens: total.delta,
+        cached_input_tokens: cached.delta,
         input_reported: input.reported,
         output_reported: output.reported,
-        total_reported: total.reported
+        total_reported: total.reported,
+        cached_input_reported: cached.reported
       }
     end)
   end
@@ -1956,6 +2087,12 @@ defmodule SymphonyElixir.Orchestrator do
         :totalTokens
       ])
 
+  defp get_token_usage(usage, :cached_input) do
+    payload_get(usage, ["cached_input_tokens", :cached_input_tokens, "cachedInputTokens", :cachedInputTokens]) ||
+      payload_get(map_at_path(usage, ["input_tokens_details"]), ["cached_tokens", :cached_tokens]) ||
+      payload_get(map_at_path(usage, [:input_tokens_details]), ["cached_tokens", :cached_tokens])
+  end
+
   defp payload_get(payload, fields) when is_list(fields) do
     Enum.find_value(fields, fn field -> map_integer_value(payload, field) end)
   end
@@ -1987,4 +2124,212 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp integer_like(_value), do: nil
+
+  defp open_operations(opts, name) do
+    path = Keyword.get(opts, :operations_path)
+
+    if name == __MODULE__ or is_binary(path) do
+      log_file = Application.get_env(:symphony_elixir, :log_file, SymphonyElixir.LogFile.default_log_file())
+      path = path || Path.join(Path.dirname(log_file), "operations.dets")
+
+      case Operations.open(path) do
+        {:ok, table} ->
+          {table, nil}
+
+        {:error, reason} ->
+          Logger.warning("Operations history unavailable: #{inspect(reason)}")
+          {nil, inspect(reason)}
+      end
+    else
+      {nil, nil}
+    end
+  end
+
+  defp maybe_sync_operations(%State{operations: nil} = state), do: state
+
+  defp maybe_sync_operations(state) do
+    now_ms = System.monotonic_time(:millisecond)
+
+    if now_ms - state.operations_last_sync_ms >= 30_000 do
+      :ok = Operations.sync(state.operations)
+      %{state | operations_last_sync_ms: now_ms}
+    else
+      state
+    end
+  end
+
+  defp maybe_fetch_pull_requests(state) do
+    now_ms = System.monotonic_time(:millisecond)
+
+    if Config.settings!().tracker.kind == "github" and not state.pulls_fetching and
+         now_ms >= state.next_pulls_due_at_ms do
+      case start_pull_inventory_task(state.task_supervisor, state.pull_requests) do
+        {:ok, pid} ->
+          %{state | pulls_fetching: true, pulls_task_ref: Process.monitor(pid), next_pulls_due_at_ms: now_ms + 60_000}
+
+        {:error, reason} ->
+          Logger.warning("GitHub pull request inventory task failed: #{inspect(reason)}")
+          %{state | pulls_error: "GitHub inventory task failed", next_pulls_due_at_ms: now_ms + 60_000}
+      end
+    else
+      state
+    end
+  end
+
+  defp start_pull_inventory_task(supervisor, previous) do
+    recipient = self()
+
+    Task.Supervisor.start_child(supervisor, fn ->
+      send(recipient, {:pull_requests_fetched, fetch_pull_inventory(previous)})
+    end)
+  end
+
+  defp fetch_pull_inventory(previous) do
+    client = Application.get_env(:symphony_elixir, :github_client_module, GitHubClient)
+
+    if function_exported?(client, :fetch_open_pull_requests, 0),
+      do: fetch_pulls_with_statuses(client, previous),
+      else: {:error, :pull_request_inventory_unavailable}
+  rescue
+    error -> {:error, Exception.message(error)}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  defp fetch_pulls_with_statuses(client, previous) do
+    case client.fetch_open_pull_requests() do
+      {:ok, pulls} ->
+        current_numbers = MapSet.new(pulls, & &1.number)
+
+        statuses =
+          previous
+          |> Enum.reject(&MapSet.member?(current_numbers, &1.number))
+          |> Map.new(&{&1.number, pull_status(client, &1.number)})
+
+        {:ok, pulls, statuses}
+
+      error ->
+        error
+    end
+  end
+
+  defp pull_status(client, number) do
+    if function_exported?(client, :fetch_pull_status, 1) do
+      case client.fetch_pull_status(number) do
+        {:ok, value} -> value
+        _ -> "left open list"
+      end
+    else
+      "left open list"
+    end
+  end
+
+  defp record_pull_changes(_table, _previous, _current, nil, _statuses), do: :ok
+
+  defp record_pull_changes(table, previous, current, _observed_at, statuses) do
+    before = Map.new(previous, &{&1.number, &1})
+    after_pulls = Map.new(current, &{&1.number, &1})
+
+    Enum.each(current, fn pull ->
+      kind = pull_change_kind(Map.get(before, pull.number), pull)
+      if kind, do: Operations.event(table, kind, %{pr_number: pull.number, pr_url: pull.url, summary: pull.title})
+    end)
+
+    previous
+    |> Enum.reject(&Map.has_key?(after_pulls, &1.number))
+    |> Enum.each(fn pull ->
+      kind = pull_departure_kind(Map.get(statuses, pull.number))
+      Operations.event(table, kind, %{pr_number: pull.number, pr_url: pull.url, summary: pull.title})
+    end)
+  end
+
+  defp pull_change_kind(nil, _pull), do: "pr_opened"
+  defp pull_change_kind(%{draft: true}, %{draft: false}), do: "pr_ready_for_review"
+  defp pull_change_kind(%{draft: false}, %{draft: true}), do: "pr_drafted"
+  defp pull_change_kind(_, _), do: nil
+
+  defp pull_departure_kind("merged"), do: "pr_merged"
+  defp pull_departure_kind("closed"), do: "pr_closed"
+  defp pull_departure_kind(_), do: "pr_left_open_list"
+
+  defp upcoming_issues(state) do
+    required = Config.settings!().tracker.required_labels
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
+
+    entries =
+      state.polled_issues
+      |> Enum.filter(fn issue ->
+        labels = MapSet.new(Issue.label_names(issue), &String.downcase/1)
+
+        Enum.all?(required, &MapSet.member?(labels, String.downcase(&1))) and
+          active_issue_state?(issue.state, active_states) and
+          not terminal_issue_state?(issue.state, terminal_states)
+      end)
+      |> Enum.reject(&Map.has_key?(state.running, &1.id))
+      |> Enum.map(fn issue ->
+        reason = upcoming_reason(state, issue, active_states, terminal_states)
+
+        %{issue_identifier: issue.identifier, title: issue.title, issue_url: issue.url, priority: issue.priority, reason: reason, blocked_by: Enum.map(issue.blocked_by, &Map.get(&1, :identifier))}
+      end)
+
+    %{
+      ready: Enum.filter(entries, &is_nil(&1.reason)),
+      waiting: Enum.reject(entries, &is_nil(&1.reason)),
+      observed_at: state.issues_observed_at,
+      error: state.issues_error,
+      available_slots: available_slots(state)
+    }
+  end
+
+  defp upcoming_reason(state, issue, active_states, terminal_states) do
+    cond do
+      Map.has_key?(state.blocked, issue.id) -> "operator blocked"
+      Map.has_key?(state.retry_attempts, issue.id) -> "retry scheduled"
+      issue.blocked_by != [] and not issue.dispatchable -> "dependency blocked"
+      not issue.dispatchable -> "not dispatchable"
+      MapSet.member?(state.claimed, issue.id) -> "continuation pending"
+      not candidate_issue?(issue, active_states, terminal_states) -> "not dispatchable"
+      true -> nil
+    end
+  end
+
+  defp maybe_record_turn_event(table, entry, update) do
+    payload = Map.get(update, :payload) || %{}
+    method = Map.get(payload, "method") || Map.get(payload, :method)
+
+    if method in ["turn/completed", :turn_completed] or update[:event] == :turn_completed do
+      Operations.event(table, "turn_completed", %{
+        issue_identifier: entry.identifier,
+        issue_url: entry.issue.url,
+        model: Map.get(entry, :model),
+        summary: "Codex turn completed"
+      })
+
+      Operations.sync(table)
+    end
+
+    if method == "model/rerouted" do
+      Operations.event(table, "model_rerouted", %{
+        issue_identifier: entry.identifier,
+        issue_url: entry.issue.url,
+        model: entry.model,
+        summary: "Codex rerouted this run"
+      })
+    end
+  end
+
+  defp model_for_update(existing, update) do
+    payload = Map.get(update, :payload) || %{}
+    params = Map.get(payload, "params") || Map.get(payload, :params) || %{}
+
+    if (Map.get(payload, "method") || Map.get(payload, :method)) == "model/rerouted" do
+      Map.get(params, "toModel") || Map.get(params, :toModel) || existing
+    else
+      existing
+    end
+  end
+
+  defp safe_pull_error({:github_api_status, status}) when is_integer(status), do: "GitHub HTTP #{status}"
+  defp safe_pull_error(_), do: "GitHub fetch failed"
 end
