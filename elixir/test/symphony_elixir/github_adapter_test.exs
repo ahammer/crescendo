@@ -238,6 +238,100 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
              )
   end
 
+  test "ready issues wait for native dependencies, including dependencies added before dispatch" do
+    issue = Map.put(raw_issue(42), "labels", [%{"name" => "symphony:ready"}])
+
+    requests = fn "GET", path, _params, nil, _settings ->
+      case path do
+        "/repos/octo/repo/issues" ->
+          {:ok, %{status: 200, body: [issue]}}
+
+        "/repos/octo/repo/issues/42" ->
+          {:ok, %{status: 200, body: issue}}
+
+        "/repos/octo/repo/issues/42/dependencies/blocked_by" ->
+          send(self(), :dependency_read)
+          {:ok, %{status: 200, body: [%{"id" => 7, "number" => 7, "state" => "open"}]}}
+      end
+    end
+
+    assert {:ok, [candidate]} =
+             GitHubClient.fetch_issues_by_states_for_test(["open"], tracker_settings(), requests)
+
+    refute candidate.dispatchable
+    assert candidate.blocked_by == [%{id: "7", identifier: "GH-7", state: "open", state_reason: nil}]
+    assert_receive :dependency_read
+
+    assert {:ok, [refreshed]} =
+             GitHubClient.fetch_issues_by_ids_for_test(["42"], tracker_settings(), requests)
+
+    refute refreshed.dispatchable
+    assert_receive :dependency_read
+  end
+
+  test "dependency reads fail closed and not-planned closures do not unblock work" do
+    issue = Map.put(raw_issue(42), "labels", [%{"name" => "symphony:ready"}])
+
+    requests = fn "GET", path, _params, nil, _settings ->
+      case path do
+        "/repos/octo/repo/issues/42" ->
+          {:ok, %{status: 200, body: issue}}
+
+        "/repos/octo/repo/issues/42/dependencies/blocked_by" ->
+          {:ok, %{status: 200, body: [%{"id" => 7, "number" => 7, "state" => "closed", "state_reason" => "not_planned"}]}}
+      end
+    end
+
+    assert {:ok, [blocked]} =
+             GitHubClient.fetch_issues_by_ids_for_test(["42"], tracker_settings(), requests)
+
+    refute blocked.dispatchable
+
+    failed_requests = fn "GET", path, params, body, settings ->
+      if String.ends_with?(path, "/blocked_by") do
+        {:ok, %{status: 503, body: %{}}}
+      else
+        requests.("GET", path, params, body, settings)
+      end
+    end
+
+    assert {:error, {:github_api_status, 503}} =
+             GitHubClient.fetch_issues_by_ids_for_test(["42"], tracker_settings(), failed_requests)
+  end
+
+  test "dependency reads page through the final blocker" do
+    issue = Map.put(raw_issue(42), "labels", [%{"name" => "symphony:ready"}])
+
+    closed =
+      for number <- 1..100,
+          do: %{"id" => number, "number" => number, "state" => "closed", "state_reason" => "completed"}
+
+    requests = fn "GET", path, params, nil, _settings ->
+      case path do
+        "/repos/octo/repo/issues/42" ->
+          {:ok, %{status: 200, body: issue}}
+
+        "/repos/octo/repo/issues/42/dependencies/blocked_by" ->
+          send(self(), {:blocker_page, params["page"]})
+
+          rows =
+            if params["page"] == 1,
+              do: closed,
+              else: [%{"id" => 101, "number" => 101, "state" => "open"}]
+
+          {:ok, %{status: 200, body: rows}}
+      end
+    end
+
+    assert {:ok, [candidate]} =
+             GitHubClient.fetch_issues_by_ids_for_test(["42"], tracker_settings(), requests)
+
+    refute candidate.dispatchable
+    assert length(candidate.blocked_by) == 101
+    assert_receive {:blocker_page, 1}
+    assert_receive {:blocker_page, 2}
+  end
+
   test "github_api preserves REST status and body while rejecting unsafe arguments" do
     test_pid = self()
     tracker_settings = tracker_settings()
@@ -408,7 +502,8 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
           provider_overrides
         ),
       active_states: ["open"],
-      terminal_states: ["closed"]
+      terminal_states: ["closed"],
+      required_labels: ["symphony:ready"]
     }
   end
 
