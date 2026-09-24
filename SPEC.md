@@ -625,6 +625,11 @@ not require recognizing or validating extension fields unless that extension is 
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
 - `codex.command`: shell command string, default `codex app-server`
+- `codex.routing`: optional explicit issue-label route map with `label_prefix`, `default`
+  (`model`, `effort`), and `labels` mapping full label names to routes. A configured route
+  overrides model at `thread/start` and effort at `turn/start`; no routing preserves Codex
+  defaults. Unknown or conflicting route labels fail the run. The selected route is fixed
+  for one agent run and may change on the next run.
 - `codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
 - `codex.thread_sandbox`: Codex `SandboxMode` value, default implementation-defined
 - `codex.turn_sandbox_policy`: Codex `SandboxPolicy` value, default implementation-defined

@@ -31,6 +31,9 @@ Check out [elixir/README.md](elixir/README.md) for instructions on how to set up
 and run the Elixir-based Symphony implementation. You can also ask your favorite coding agent to
 help with the setup:
 
+The Elixir implementation can route Codex model and reasoning effort from explicit issue labels;
+see its `codex.routing` workflow setting.
+
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 

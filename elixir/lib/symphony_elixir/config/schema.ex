@@ -179,6 +179,7 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:command, :string, default: "codex app-server")
+      field(:routing, :map)
 
       field(:approval_policy, StringOrMap,
         default: %{
@@ -204,6 +205,7 @@ defmodule SymphonyElixir.Config.Schema do
         attrs,
         [
           :command,
+          :routing,
           :approval_policy,
           :thread_sandbox,
           :turn_sandbox_policy,
@@ -214,6 +216,12 @@ defmodule SymphonyElixir.Config.Schema do
         empty_values: []
       )
       |> validate_required([:command])
+      |> validate_change(:routing, fn :routing, routing ->
+        case SymphonyElixir.ModelRouting.validate(routing) do
+          :ok -> []
+          {:error, reason} -> [routing: reason]
+        end
+      end)
       |> validate_change(:command, fn :command, command ->
         if command != "" and String.trim(command) == "" do
           [command: "can't be blank"]
