@@ -1,6 +1,53 @@
 defmodule SymphonyElixir.AppServerTest do
   use SymphonyElixir.TestSupport
 
+  test "app server sends the selected model and effort and exports the route label" do
+    root = Path.join(System.tmp_dir!(), "symphony-route-#{System.unique_integer([:positive])}")
+    workspace = Path.join(root, "workspaces/ROUTE-1")
+    binary = Path.join(root, "fake-codex")
+    observed = Path.join(root, "observed")
+    File.mkdir_p!(workspace)
+
+    File.write!(binary, """
+    #!/bin/sh
+    printf '%s\\n' "$SYMPHONY_SELECTED_MODEL_LABEL" > '#{observed}'
+    count=0
+    while IFS= read -r line; do
+      count=$((count + 1))
+      printf '%s\\n' "$line" >> '#{observed}'
+      case "$count" in
+        1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+        3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-route"}}}' ;;
+        4) printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-route"}}}'
+           printf '%s\\n' '{"method":"turn/completed"}' ;;
+      esac
+    done
+    """)
+
+    File.chmod!(binary, 0o755)
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: Path.join(root, "workspaces"), codex_command: "#{binary} app-server")
+      issue = %Issue{id: "route", identifier: "ROUTE-1", title: "Route", labels: []}
+      route = %{"label" => "symphony:model:luna", "model" => "gpt-6-luna", "effort" => "medium"}
+      assert {:ok, _} = AppServer.run(workspace, "route", issue, model_route: route)
+      [label | messages] = File.read!(observed) |> String.split("\n", trim: true)
+      assert label == "symphony:model:luna"
+
+      assert Enum.any?(messages, fn line ->
+               message = Jason.decode!(line)
+               message["method"] == "thread/start" and message["params"]["model"] == "gpt-6-luna"
+             end)
+
+      assert Enum.any?(messages, fn line ->
+               message = Jason.decode!(line)
+               message["method"] == "turn/start" and message["params"]["effort"] == "medium"
+             end)
+    after
+      File.rm_rf(root)
+    end
+  end
+
   test "app server rejects the workspace root and paths outside workspace root" do
     test_root =
       Path.join(

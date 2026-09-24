@@ -21,7 +21,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           thread_id: String.t(),
           workspace: Path.t(),
           worker_host: String.t() | nil,
-          dynamic_tool_binding: map()
+          dynamic_tool_binding: map(),
+          model_route: map() | nil
         }
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -38,15 +39,16 @@ defmodule SymphonyElixir.Codex.AppServer do
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
+    model_route = Keyword.get(opts, :model_route)
     dynamic_tool_binding = DynamicTool.bind()
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, port} <- start_port(expanded_workspace, worker_host, dynamic_tool_binding) do
+         {:ok, port} <- start_port(expanded_workspace, worker_host, dynamic_tool_binding, model_route) do
       metadata = port_metadata(port, worker_host)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
            {:ok, thread_id} <-
-             do_start_session(port, expanded_workspace, session_policies, dynamic_tool_binding) do
+             do_start_session(port, expanded_workspace, session_policies, dynamic_tool_binding, model_route) do
         {:ok,
          %{
            port: port,
@@ -58,7 +60,8 @@ defmodule SymphonyElixir.Codex.AppServer do
            thread_id: thread_id,
            workspace: expanded_workspace,
            worker_host: worker_host,
-           dynamic_tool_binding: dynamic_tool_binding
+           dynamic_tool_binding: dynamic_tool_binding,
+           model_route: model_route
          }}
       else
         {:error, reason} ->
@@ -78,7 +81,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           turn_sandbox_policy: turn_sandbox_policy,
           thread_id: thread_id,
           workspace: workspace,
-          dynamic_tool_binding: dynamic_tool_binding
+          dynamic_tool_binding: dynamic_tool_binding,
+          model_route: model_route
         },
         prompt,
         issue,
@@ -91,7 +95,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         DynamicTool.execute(tool, arguments, dynamic_tool_binding, issue: issue)
       end)
 
-    case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
+    case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy, model_route) do
       {:ok, turn_id} ->
         session_id = "#{thread_id}-#{turn_id}"
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
@@ -189,7 +193,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace, nil, dynamic_tool_binding) do
+  defp start_port(workspace, nil, dynamic_tool_binding, model_route) do
     executable = System.find_executable("bash")
 
     if is_nil(executable) do
@@ -204,7 +208,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             :stderr_to_stdout,
             args: [~c"-lc", String.to_charlist(local_launch_command(dynamic_tool_binding))],
             cd: String.to_charlist(workspace),
-            env: tracker_secret_port_env(dynamic_tool_binding),
+            env: tracker_secret_port_env(dynamic_tool_binding) ++ route_port_env(model_route),
             line: @port_line_bytes
           ]
         )
@@ -213,8 +217,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace, worker_host, dynamic_tool_binding) when is_binary(worker_host) do
-    remote_command = remote_launch_command(workspace, dynamic_tool_binding)
+  defp start_port(workspace, worker_host, dynamic_tool_binding, model_route) when is_binary(worker_host) do
+    remote_command = remote_launch_command(workspace, dynamic_tool_binding, model_route)
     SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
   end
 
@@ -227,15 +231,22 @@ defmodule SymphonyElixir.Codex.AppServer do
     |> Enum.join(" && ")
   end
 
-  defp remote_launch_command(workspace, dynamic_tool_binding) when is_binary(workspace) do
+  defp remote_launch_command(workspace, dynamic_tool_binding, model_route) when is_binary(workspace) do
     [
       "cd #{shell_escape(workspace)}",
       tracker_secret_unset_command(dynamic_tool_binding),
+      route_export_command(model_route),
       "exec #{Config.settings!().codex.command}"
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join(" && ")
   end
+
+  defp route_port_env(nil), do: []
+  defp route_port_env(route), do: [{~c"SYMPHONY_SELECTED_MODEL_LABEL", String.to_charlist(route["label"])}]
+
+  defp route_export_command(nil), do: nil
+  defp route_export_command(route), do: "export SYMPHONY_SELECTED_MODEL_LABEL=#{shell_escape(route["label"])}"
 
   defp tracker_secret_port_env(dynamic_tool_binding) do
     dynamic_tool_binding.secret_environment_names
@@ -304,9 +315,9 @@ defmodule SymphonyElixir.Codex.AppServer do
     Config.codex_runtime_settings(workspace, remote: true)
   end
 
-  defp do_start_session(port, workspace, session_policies, dynamic_tool_binding) do
+  defp do_start_session(port, workspace, session_policies, dynamic_tool_binding, model_route) do
     case send_initialize(port) do
-      :ok -> start_thread(port, workspace, session_policies, dynamic_tool_binding)
+      :ok -> start_thread(port, workspace, session_policies, dynamic_tool_binding, model_route)
       {:error, reason} -> {:error, reason}
     end
   end
@@ -315,17 +326,20 @@ defmodule SymphonyElixir.Codex.AppServer do
          port,
          workspace,
          %{approval_policy: approval_policy, thread_sandbox: thread_sandbox},
-         dynamic_tool_binding
+         dynamic_tool_binding,
+         model_route
        ) do
     send_message(port, %{
       "method" => "thread/start",
       "id" => @thread_start_id,
-      "params" => %{
-        "approvalPolicy" => approval_policy,
-        "sandbox" => thread_sandbox,
-        "cwd" => workspace,
-        "dynamicTools" => dynamic_tool_binding.tool_specs
-      }
+      "params" =>
+        %{
+          "approvalPolicy" => approval_policy,
+          "sandbox" => thread_sandbox,
+          "cwd" => workspace,
+          "dynamicTools" => dynamic_tool_binding.tool_specs
+        }
+        |> maybe_put("model", model_route && model_route["model"])
     })
 
     case await_response(port, @thread_start_id) do
@@ -340,23 +354,25 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
+  defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy, model_route) do
     send_message(port, %{
       "method" => "turn/start",
       "id" => @turn_start_id,
-      "params" => %{
-        "threadId" => thread_id,
-        "input" => [
-          %{
-            "type" => "text",
-            "text" => prompt
-          }
-        ],
-        "cwd" => workspace,
-        "title" => "#{issue.identifier}: #{issue.title}",
-        "approvalPolicy" => approval_policy,
-        "sandboxPolicy" => turn_sandbox_policy
-      }
+      "params" =>
+        %{
+          "threadId" => thread_id,
+          "input" => [
+            %{
+              "type" => "text",
+              "text" => prompt
+            }
+          ],
+          "cwd" => workspace,
+          "title" => "#{issue.identifier}: #{issue.title}",
+          "approvalPolicy" => approval_policy,
+          "sandboxPolicy" => turn_sandbox_policy
+        }
+        |> maybe_put("effort", model_route && model_route["effort"])
     })
 
     case await_response(port, @turn_start_id) do
@@ -364,6 +380,9 @@ defmodule SymphonyElixir.Codex.AppServer do
       other -> other
     end
   end
+
+  defp maybe_put(params, _key, nil), do: params
+  defp maybe_put(params, key, value), do: Map.put(params, key, value)
 
   defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
     receive_loop(

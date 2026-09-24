@@ -155,6 +155,12 @@ Notes:
 - `tracker.required_labels` is optional. When set, an issue must have every
   configured label to dispatch or continue running. Label matching ignores
   case and surrounding whitespace. A blank configured label matches no issue.
+- `codex.routing` optionally selects a model and reasoning effort from explicit issue labels.
+  Example: `routing: {label_prefix: "symphony:model:", default: {model: "gpt-6-sol", effort: "medium"}, labels: {"symphony:model:astra": {model: "gpt-6-astra", effort: "high"}}}`.
+  With no matching route label, `default` applies. Unknown or conflicting labels under the
+  prefix stop the run. Priority does not affect routing. A run keeps its selected route across
+  continuation turns; a label change takes effect on a new run. Without `routing`, existing
+  Codex command and account defaults continue to apply.
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`

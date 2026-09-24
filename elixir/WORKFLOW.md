@@ -32,6 +32,7 @@ agent:
   max_turns: 20
 codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
+  # Optional: routing selects model and effort from explicit issue labels. See README.md.
   approval_policy: never
   thread_sandbox: workspace-write
   turn_sandbox_policy:
