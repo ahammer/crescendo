@@ -319,7 +319,9 @@ The observability UI now runs on a minimal Phoenix stack:
   `pull_requests`; a failed poll leaves the last good inventory visible with its timestamp and an error.
 - Dollar figures compare recorded tokens with standard short-context API prices dated
   September 24, 2026. They are estimates, not actual ChatGPT billing; unknown models remain
-  unpriced. Recording starts with the first run after this version is deployed.
+  unpriced. Recording starts with the first run after this version is deployed. The dashboard
+  warns at $50 estimated worker usage per UTC day; separate planner and independent reviewer
+  calls are not included, and the warning does not stop dispatch.
 
 ## Project Layout
 

@@ -124,6 +124,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
         </section>
 
+        <section :if={@payload.usage.status == "ok" and (@payload.usage.today[:usd_micro] || 0) >= 50_000_000} class="error-card" role="alert">
+          <h2 class="error-title">Worker usage alert</h2>
+          <p class="error-copy">Estimated Symphony worker usage today (UTC) reached <%= format_usd(@payload.usage.today[:usd_micro]) %>, above the $50 alert threshold. Planning and independent review usage are not included.</p>
+        </section>
+
         <section class="section-card">
           <div class="section-header">
             <div>

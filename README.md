@@ -36,6 +36,7 @@ see its `codex.routing` workflow setting.
 Its GitHub Issues adapter also respects native issue dependencies before dispatch.
 The Elixir operations dashboard shows upcoming issues and open GitHub PRs, a recent activity
 timeline, and per-model token usage with clearly labeled API-equivalent cost estimates.
+It warns when recorded worker usage reaches an estimated $50 in one UTC day.
 
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md

@@ -589,6 +589,29 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "snapshot_unavailable"
   end
 
+  test "dashboard warns at the daily worker estimate threshold" do
+    orchestrator_name = Module.concat(__MODULE__, :SpendAlertOrchestrator)
+    usage = SymphonyElixir.Operations.snapshot(nil)
+    usage = %{usage | status: "ok", today: %{usage.today | usd_micro: 49_999_999}}
+    snapshot = Map.put(static_snapshot(), :operations, usage)
+    {:ok, orchestrator_pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, view, html} = live(build_conn(), "/")
+    refute html =~ "Worker usage alert"
+
+    updated_usage = %{usage | today: %{usage.today | usd_micro: 50_000_000}}
+
+    :sys.replace_state(orchestrator_pid, fn state ->
+      Keyword.put(state, :snapshot, %{snapshot | operations: updated_usage})
+    end)
+
+    StatusDashboard.notify_update()
+
+    assert_eventually(fn -> render(view) =~ "Worker usage alert" end)
+    assert render(view) =~ "Planning and independent review usage are not included"
+  end
+
   test "http server serves embedded assets, accepts form posts, and rejects invalid hosts" do
     spec = HttpServer.child_spec(port: 0)
     assert spec.id == HttpServer
