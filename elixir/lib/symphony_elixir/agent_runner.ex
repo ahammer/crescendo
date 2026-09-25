@@ -91,6 +91,7 @@ defmodule SymphonyElixir.AgentRunner do
 
     with {:ok, route} <- ModelRouting.select(Config.settings!().codex.routing, issue),
          :ok <- log_route(issue, route),
+         :ok <- send_model_route(codex_update_recipient, issue, route),
          {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host, model_route: route) do
       try do
         do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
@@ -105,6 +106,13 @@ defmodule SymphonyElixir.AgentRunner do
   defp log_route(issue, route) do
     Logger.info("Selected model route for #{issue_context(issue)} label=#{route["label"]} model=#{route["model"]} effort=#{route["effort"]}")
   end
+
+  defp send_model_route(recipient, %Issue{id: issue_id}, route) when is_pid(recipient) do
+    send(recipient, {:worker_model_route, issue_id, route})
+    :ok
+  end
+
+  defp send_model_route(_recipient, _issue, _route), do: :ok
 
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)

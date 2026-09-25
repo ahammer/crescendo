@@ -293,6 +293,24 @@ pre,
   font-size: 0.94rem;
 }
 
+.activity-list {
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.activity-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.75rem;
+  padding: 0.7rem 0;
+  border-top: 1px solid var(--line);
+}
+
+.activity-list time {
+  color: var(--muted);
+}
+
 .table-wrap {
   overflow-x: auto;
   margin-top: 1rem;

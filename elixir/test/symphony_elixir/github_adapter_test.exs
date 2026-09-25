@@ -17,6 +17,29 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
     end
   end
 
+  defmodule InventoryGitHubClient do
+    def fetch_issues_by_states(_states) do
+      {:ok,
+       [
+         %SymphonyElixir.Tracker.Issue{
+           id: "42",
+           identifier: "GH-42",
+           title: "Blocked water",
+           state: "open",
+           labels: ["symphony:portfolio", "symphony:needs-attention"],
+           dispatchable: true,
+           created_at: ~U[2026-09-01 00:00:00Z]
+         }
+       ]}
+    end
+
+    def fetch_issues_by_ids(_ids), do: {:ok, []}
+
+    def fetch_open_pull_requests do
+      {:ok, [%{number: 12, title: "Finish water", url: "https://github.test/pull/12", draft: true, updated_at: "2026-09-01T00:00:00Z"}]}
+    end
+  end
+
   setup do
     github_client_module = Application.get_env(:symphony_elixir, :github_client_module)
 
@@ -167,11 +190,11 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
                    request_fun
                  )
 
-        assert length(issues) == 99
+        assert length(issues) == 98
         assert hd(issues).id == "1"
         assert List.last(issues).id == "101"
         refute Enum.any?(issues, &(&1.id == "99"))
-        assert Enum.find(issues, &(&1.id == "98")).dispatchable == false
+        refute Enum.any?(issues, &(&1.id == "98"))
       end)
 
     assert log =~ "Dropping malformed GitHub issue records count=1"
@@ -195,6 +218,25 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
                  flunk("unsupported GitHub states should not make an HTTP request")
                end
              )
+  end
+
+  test "client reads the open pull request inventory in update order" do
+    request_fun = fn "GET", "/repos/octo/repo/pulls", params, nil, _settings ->
+      send(self(), {:pull_params, params})
+
+      {:ok,
+       %{
+         status: 200,
+         body: [
+           %{"number" => 12, "title" => "Finish water", "html_url" => "https://github.test/pull/12", "draft" => true, "updated_at" => "2026-09-01T00:00:00Z"}
+         ]
+       }}
+    end
+
+    assert {:ok, [%{number: 12, draft: true}]} =
+             GitHubClient.fetch_open_pull_requests_for_test(tracker_settings(), request_fun)
+
+    assert_receive {:pull_params, %{"state" => "open", "sort" => "updated", "direction" => "asc"}}
   end
 
   test "client refreshes numeric IDs in order, omits 404s, and rejects malformed refreshes" do
@@ -488,6 +530,27 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
 
     assert [%{"name" => "github_api"}] = binding.tool_specs
     assert :ok = Config.validate!()
+  end
+
+  test "orchestrator refreshes the GitHub pull request inventory" do
+    write_github_workflow!(Workflow.workflow_file_path(), "test-token")
+    Application.put_env(:symphony_elixir, :github_client_module, InventoryGitHubClient)
+
+    supervisor = Module.concat(__MODULE__, :InventoryTaskSupervisor)
+    orchestrator = Module.concat(__MODULE__, :InventoryOrchestrator)
+    start_supervised!({Task.Supervisor, name: supervisor})
+    start_supervised!({Orchestrator, name: orchestrator, task_supervisor: supervisor})
+
+    expected_pull = %{number: 12, title: "Finish water", url: "https://github.test/pull/12", draft: true, updated_at: "2026-09-01T00:00:00Z"}
+    expected_issue = %{issue_identifier: "GH-42", reason: "needs attention", title: "Blocked water", issue_url: nil, priority: nil, blocked_by: []}
+
+    assert Enum.any?(1..30, fn _ ->
+             snapshot = Orchestrator.snapshot(orchestrator, 5_000)
+             if get_in(snapshot, [:pull_requests, :items]) == [], do: Process.sleep(50)
+
+             get_in(snapshot, [:pull_requests, :items]) == [expected_pull] and
+               get_in(snapshot, [:upcoming, :waiting]) == [expected_issue]
+           end)
   end
 
   defp tracker_settings(provider_overrides \\ %{}) do
