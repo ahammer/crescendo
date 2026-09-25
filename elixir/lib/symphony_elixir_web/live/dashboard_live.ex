@@ -128,7 +128,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <div class="section-header">
             <div>
               <h2 class="section-title">Upcoming issues</h2>
-              <p class="section-copy">Dispatch order from the last tracker poll · <%= @payload.upcoming.observed_at || "not polled yet" %></p>
+              <p class="section-copy">Open tracker issues in dispatch order. Only ready issues are queued · <%= @payload.upcoming.observed_at || "not polled yet" %></p>
             </div>
           </div>
           <%= if @payload.upcoming.error do %><p class="error-copy">Tracker data is stale: <%= @payload.upcoming.error %></p><% end %>

@@ -85,6 +85,7 @@ defmodule SymphonyElixir.Orchestrator do
           operations_last_sync_ms: now_ms,
           pull_requests: pull_requests,
           pulls_observed_at: pulls_observed_at,
+          next_pulls_due_at_ms: now_ms,
           codex_totals: @empty_codex_totals,
           codex_rate_limits: nil
         }
@@ -2253,17 +2254,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp pull_departure_kind(_), do: "pr_left_open_list"
 
   defp upcoming_issues(state) do
-    required = Config.settings!().tracker.required_labels
     active_states = active_state_set()
     terminal_states = terminal_state_set()
 
     entries =
       state.polled_issues
       |> Enum.filter(fn issue ->
-        labels = MapSet.new(Issue.label_names(issue), &String.downcase/1)
-
-        Enum.all?(required, &MapSet.member?(labels, String.downcase(&1))) and
-          active_issue_state?(issue.state, active_states) and
+        active_issue_state?(issue.state, active_states) and
           not terminal_issue_state?(issue.state, terminal_states)
       end)
       |> Enum.reject(&Map.has_key?(state.running, &1.id))
@@ -2283,13 +2280,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp upcoming_reason(state, issue, active_states, terminal_states) do
+    labels = MapSet.new(Issue.label_names(issue), &String.downcase/1)
+
     cond do
       Map.has_key?(state.blocked, issue.id) -> "operator blocked"
       Map.has_key?(state.retry_attempts, issue.id) -> "retry scheduled"
+      MapSet.member?(labels, "symphony:needs-attention") -> "needs attention"
       issue.blocked_by != [] and not issue.dispatchable -> "dependency blocked"
-      not issue.dispatchable -> "not dispatchable"
       MapSet.member?(state.claimed, issue.id) -> "continuation pending"
-      not candidate_issue?(issue, active_states, terminal_states) -> "not dispatchable"
+      not candidate_issue?(issue, active_states, terminal_states) -> "not queued"
       true -> nil
     end
   end
