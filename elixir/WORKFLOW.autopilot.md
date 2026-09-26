@@ -98,6 +98,7 @@ No description provided.
 - Work only in this repository copy. Never ask a human for help; there is no one watching.
 - Keep the change small and focused on the issue. File a new issue labeled `symphony` for anything out of scope instead of expanding this one.
 - Use the `gh` CLI or the `github_api` tool for all GitHub reads and writes.
+- Put scratch clones, builds, probes, and drafts in a persistent directory outside the repository (the project's evidence directory if it has one), never in a RAM-backed `/tmp`, and delete them before finishing, keeping only retained evidence. Stop every process you started and confirm none survive.
 
 ## Flow
 

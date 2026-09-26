@@ -18,7 +18,7 @@ Spend most of this run observing and exercising the product before writing anyth
 4. Run the benchmarks, profilers, or timing and memory probes the project provides, or write a throwaway measurement. Record numbers with the environment; note when the machine was busy.
 5. Read the code behind anything suspicious you observed, and look for the channel's classes of problems across the whole codebase, not only the current roadmap frontier.
 
-Keep raw evidence outside the repository (for example under `$TMPDIR` or the project's evidence directory) and summarize it in the issue. Stop every process you started before you finish.
+Summarize raw evidence in the issue rather than attaching it. Put scratch clones, builds, probes, and drafts in a persistent directory outside the repository (the project's evidence directory if it has one), never in a RAM-backed `/tmp`, and delete them before finishing, keeping only retained evidence. Stop every process you started and confirm none survive.
 
 ## Rules
 
