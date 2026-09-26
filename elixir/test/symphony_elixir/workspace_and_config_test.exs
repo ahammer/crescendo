@@ -1052,6 +1052,16 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.settings!().tracker.required_labels == [""]
 
     write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_excluded_labels: [" Symphony:Hold ", "symphony:hold", "Symphony:In-Review"]
+    )
+
+    assert Config.settings!().tracker.excluded_labels == ["symphony:hold", "symphony:in-review"]
+    assert Config.settings!().agent.max_attempts == nil
+
+    write_workflow_file!(Workflow.workflow_file_path(), max_attempts: 3)
+    assert Config.settings!().agent.max_attempts == 3
+
+    write_workflow_file!(Workflow.workflow_file_path(),
       codex_command: "codex --config 'model=\"gpt-5.5\"' app-server"
     )
 
@@ -1112,6 +1122,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), codex_stall_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "codex.stall_timeout_ms"
+
+    write_workflow_file!(Workflow.workflow_file_path(), max_attempts: 0)
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "agent.max_attempts"
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_active_states: %{todo: true},

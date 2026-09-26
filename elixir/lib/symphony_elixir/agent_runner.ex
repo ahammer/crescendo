@@ -169,6 +169,10 @@ defmodule SymphonyElixir.AgentRunner do
     """
   end
 
+  # Pull request reviews and research runs are single passes; only tracker
+  # issues continue while they stay active.
+  defp continue_with_issue?(%Issue{kind: kind} = issue, _issue_state_fetcher) when kind != :issue, do: {:done, issue}
+
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
@@ -198,7 +202,8 @@ defmodule SymphonyElixir.AgentRunner do
   defp active_issue_state?(_state_name), do: false
 
   defp issue_routable?(%Issue{} = issue) do
-    Issue.routable?(issue, Config.settings!().tracker.required_labels)
+    tracker = Config.settings!().tracker
+    Issue.routable?(issue, tracker.required_labels, tracker.excluded_labels)
   end
 
   defp selected_worker_host(nil, []), do: nil

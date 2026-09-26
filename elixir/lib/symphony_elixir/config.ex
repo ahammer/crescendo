@@ -116,10 +116,18 @@ defmodule SymphonyElixir.Config do
   @doc false
   @spec validate_settings(Schema.t()) :: :ok | {:error, term()}
   def validate_settings(settings) do
-    if is_nil(settings.tracker.kind) do
-      {:error, :missing_tracker_kind}
-    else
-      Tracker.validate_config(settings.tracker)
+    cond do
+      is_nil(settings.tracker.kind) ->
+        {:error, :missing_tracker_kind}
+
+      settings.autopilot.enabled and settings.tracker.kind not in ["github", "memory"] ->
+        {:error, {:invalid_workflow_config, "autopilot requires tracker.kind github"}}
+
+      settings.autopilot.enabled and map_size(settings.autopilot.prompts) < 2 ->
+        {:error, {:invalid_workflow_config, "autopilot requires prompts.pull_request and prompts.research"}}
+
+      true ->
+        Tracker.validate_config(settings.tracker)
     end
   end
 

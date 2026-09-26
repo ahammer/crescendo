@@ -56,6 +56,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:provider, :map, default: %{})
       field(:secret_environment_names, {:array, :string}, default: [])
       field(:required_labels, {:array, :string}, default: [])
+      field(:excluded_labels, {:array, :string}, default: [])
       field(:active_states, {:array, :string})
       field(:terminal_states, {:array, :string})
     end
@@ -73,16 +74,20 @@ defmodule SymphonyElixir.Config.Schema do
           :assignee,
           :provider,
           :required_labels,
+          :excluded_labels,
           :active_states,
           :terminal_states
         ],
         empty_values: []
       )
-      |> update_change(:required_labels, fn labels ->
-        labels
-        |> Enum.map(&(String.trim(&1) |> String.downcase()))
-        |> Enum.uniq()
-      end)
+      |> update_change(:required_labels, &normalize_labels/1)
+      |> update_change(:excluded_labels, &normalize_labels/1)
+    end
+
+    defp normalize_labels(labels) do
+      labels
+      |> Enum.map(&(String.trim(&1) |> String.downcase()))
+      |> Enum.uniq()
     end
   end
 
@@ -152,6 +157,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:max_concurrent_agents, :integer, default: 10)
       field(:max_turns, :integer, default: 20)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
+      field(:max_attempts, :integer)
       field(:max_concurrent_agents_by_state, :map, default: %{})
     end
 
@@ -160,12 +166,13 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
+        [:max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_attempts, :max_concurrent_agents_by_state],
         empty_values: []
       )
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
+      |> validate_number(:max_attempts, greater_than: 0)
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
     end
@@ -297,6 +304,83 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Autopilot do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+
+      field(:channels, :map,
+        default: %{
+          "cleanup" => "Dead code, duplication, unclear names, awkward or inconsistent APIs, and code that is hard to read.",
+          "optimization" => "Measurable performance, resource, or cost wins, plus latent bugs found along the way.",
+          "testing" => "Missing or weak tests for important behavior, flaky tests, and untested edge cases."
+        }
+      )
+
+      field(:max_issues_per_channel, :integer, default: 3)
+      field(:max_open_issues, :integer, default: 10)
+      field(:research_cooldown_ms, :integer, default: 1_800_000)
+      field(:max_pr_runs, :integer, default: 5)
+      field(:trusted_associations, {:array, :string}, default: ["OWNER", "MEMBER", "COLLABORATOR"])
+      field(:trusted_authors, {:array, :string}, default: [])
+      field(:prompts, :map, default: %{})
+    end
+
+    @prompt_kinds ["pull_request", "research"]
+    @channel_name ~r/^[a-z0-9][a-z0-9-]*$/
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :enabled,
+          :channels,
+          :max_issues_per_channel,
+          :max_open_issues,
+          :research_cooldown_ms,
+          :max_pr_runs,
+          :trusted_associations,
+          :trusted_authors,
+          :prompts
+        ],
+        empty_values: []
+      )
+      |> validate_number(:max_issues_per_channel, greater_than: 0)
+      |> validate_number(:max_open_issues, greater_than: 0)
+      |> validate_number(:research_cooldown_ms, greater_than_or_equal_to: 0)
+      |> validate_number(:max_pr_runs, greater_than: 0)
+      |> update_change(:trusted_associations, fn values -> Enum.map(values, &(String.trim(&1) |> String.upcase())) end)
+      |> update_change(:trusted_authors, fn values -> Enum.map(values, &(String.trim(&1) |> String.downcase())) end)
+      |> validate_change(:channels, &validate_channels/2)
+      |> validate_change(:prompts, &validate_prompts/2)
+    end
+
+    defp validate_channels(field, channels) do
+      cond do
+        map_size(channels) == 0 ->
+          [{field, "must name at least one channel"}]
+
+        Enum.all?(channels, fn {name, focus} -> Regex.match?(@channel_name, name) and is_binary(focus) end) ->
+          []
+
+        true ->
+          [{field, "names must be lowercase letters, digits, or dashes and map to focus text"}]
+      end
+    end
+
+    defp validate_prompts(field, prompts) do
+      if Enum.all?(prompts, fn {kind, path} -> kind in @prompt_kinds and is_binary(path) and String.trim(path) != "" end),
+        do: [],
+        else: [{field, "keys must be pull_request or research and values must be file paths"}]
+    end
+  end
+
   embedded_schema do
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
@@ -307,6 +391,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:autopilot, Autopilot, on_replace: :update, defaults_to_struct: true)
   end
 
   @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
@@ -401,6 +486,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
+    |> cast_embed(:autopilot, with: &Autopilot.changeset/2)
   end
 
   defp finalize_settings(settings) do

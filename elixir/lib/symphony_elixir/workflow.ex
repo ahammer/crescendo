@@ -30,7 +30,9 @@ defmodule SymphonyElixir.Workflow do
   @type loaded_workflow :: %{
           config: map(),
           prompt: String.t(),
-          prompt_template: String.t()
+          prompt_template: String.t(),
+          prompt_templates: %{optional(String.t()) => String.t()},
+          prompt_paths: [Path.t()]
         }
 
   @spec current() :: {:ok, loaded_workflow()} | {:error, term()}
@@ -53,7 +55,9 @@ defmodule SymphonyElixir.Workflow do
   def load(path) when is_binary(path) do
     case File.read(path) do
       {:ok, content} ->
-        parse(content)
+        with {:ok, workflow} <- parse(content) do
+          load_prompt_files(workflow, Path.dirname(Path.expand(path)))
+        end
 
       {:error, reason} ->
         {:error, {:missing_workflow_file, path, reason}}
@@ -71,7 +75,9 @@ defmodule SymphonyElixir.Workflow do
          %{
            config: front_matter,
            prompt: prompt,
-           prompt_template: prompt
+           prompt_template: prompt,
+           prompt_templates: %{},
+           prompt_paths: []
          }}
 
       {:error, :workflow_front_matter_not_a_map} ->
@@ -80,6 +86,35 @@ defmodule SymphonyElixir.Workflow do
       {:error, reason} ->
         {:error, {:workflow_parse_error, reason}}
     end
+  end
+
+  # `autopilot.prompts` maps a work-item kind to a template file resolved
+  # relative to WORKFLOW.md. The WORKFLOW.md body stays the issue prompt.
+  defp load_prompt_files(%{config: config} = workflow, base_dir) do
+    # Unknown kinds are left for schema validation to reject.
+    prompts =
+      case config do
+        %{"autopilot" => %{"prompts" => %{} = prompts}} -> Map.take(prompts, ["pull_request", "research"])
+        _ -> %{}
+      end
+
+    Enum.reduce_while(prompts, {:ok, workflow}, fn {kind, relative_path}, {:ok, acc} ->
+      path = Path.expand(to_string(relative_path), base_dir)
+
+      case File.read(path) do
+        {:ok, template} ->
+          {:cont,
+           {:ok,
+            %{
+              acc
+              | prompt_templates: Map.put(acc.prompt_templates, to_string(kind), String.trim(template)),
+                prompt_paths: [path | acc.prompt_paths]
+            }}}
+
+        {:error, reason} ->
+          {:halt, {:error, {:missing_prompt_file, path, reason}}}
+      end
+    end)
   end
 
   defp split_front_matter(content) do

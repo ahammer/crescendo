@@ -155,6 +155,10 @@ Notes:
 - `tracker.required_labels` is optional. When set, an issue must have every
   configured label to dispatch or continue running. Label matching ignores
   case and surrounding whitespace. A blank configured label matches no issue.
+- `tracker.excluded_labels` is optional. An issue with any configured label (for example
+  `symphony:hold`) does not dispatch, and a running worker stops when one is added.
+- `agent.max_attempts` optionally caps failure retries. Once exceeded, the issue is blocked until
+  its state or labels change. Unset means retry indefinitely with backoff.
 - `codex.routing` optionally selects a model and reasoning effort from explicit issue labels.
   Example: `routing: {label_prefix: "symphony:model:", default: {model: "gpt-6-sol", effort: "medium"}, labels: {"symphony:model:astra": {model: "gpt-6-astra", effort: "high"}}}`.
   With no matching route label, `default` applies. Unknown or conflicting labels under the
@@ -262,7 +266,8 @@ codex:
   `terminal_states`; active entries may be `open` and terminal entries may be `closed`.
 - Reads and identity: polling is scoped to the configured repository; `issue.id` is the
   repository issue number, `issue.identifier` is `GH-<number>`, hidden or deleted `404` issues are
-  omitted on refresh, and pull requests returned by the Issues API are not dispatchable.
+  omitted on refresh, and pull requests returned by the Issues API are not dispatchable unless
+  autopilot is enabled (see below).
 - Native issue dependencies are checked for label-eligible open issues during polling and again
   on ID refresh before dispatch. An open blocker or one closed as `not_planned` prevents dispatch;
   a dependency API error fails the read rather than treating the issue as unblocked.
@@ -270,6 +275,36 @@ codex:
   `body`; Symphony executes it host-side with the session-bound token, removes configured tracker
   credentials and provider authentication aliases from the Codex child, and leaves raw tool access
   limited by that token's GitHub permissions.
+
+### Autopilot (GitHub)
+
+`WORKFLOW.autopilot.md` turns Symphony into a loop that keeps improving one GitHub repository:
+
+1. **Pull requests first.** Open, non-draft pull requests become work items (`PR-<number>`).
+   Authors whose `author_association` is in `autopilot.trusted_associations` or whose login is in
+   `autopilot.trusted_authors` are admitted automatically; anyone else's pull request waits until
+   a maintainer adds every `tracker.required_labels` label. A reviewer run
+   (`prompts/pull_request.md`) reviews, pushes fixes when it can push to the head branch, and
+   squash-merges pinned to the reviewed head commit once CI is green. Symphony skips pull requests
+   whose CI is pending and re-reviews only after a new push, up to `autopilot.max_pr_runs`.
+2. **Issues next.** Issues labeled `symphony` are implemented. The worker opens a pull request that
+   closes the issue, then labels the issue `symphony:in-review`, which hands it to step 1.
+3. **Research when idle.** When nothing is ready, one research run per `autopilot.channels` entry
+   (`prompts/research.md`; default channels `cleanup`, `optimization`, `testing`) files at most
+   `max_issues_per_channel` deduplicated `symphony` issues. Research pauses while
+   `max_open_issues` are open and for `research_cooldown_ms` after the last research run ends.
+
+Agents may abandon work: issues close as `not planned`, and pull requests close with a comment.
+`agent.max_attempts` stops retrying crashing runs. Add `symphony:hold` to any issue or pull request
+to stop and hold it. Handled pull request heads and the research cooldown survive restarts.
+
+```bash
+GITHUB_REPO=owner/name GITHUB_TOKEN=... mise exec -- ./bin/symphony \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails ./WORKFLOW.autopilot.md
+```
+
+The token needs to read and write issues, pull requests, and contents, and to merge. `gh` must be
+authenticated on the worker host for the workspace clone hook.
 
 ### Jira Cloud adapter
 
