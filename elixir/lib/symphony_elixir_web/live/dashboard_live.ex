@@ -50,7 +50,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </div>
         </div>
         <div class="topbar-meta">
+          <span :if={!@payload[:error] and @payload.runtime.tracker} class="chip mono"><%= @payload.runtime.tracker %></span>
           <span :if={!@payload[:error] and @payload.autopilot.enabled} class="chip chip-accent">Autopilot on</span>
+          <span :if={!@payload[:error]} class="muted"><%= poll_status(@payload, @now) %></span>
           <span :if={@payload[:generated_at]} class="mono muted" title="Snapshot time (UTC)">Updated <%= short_time(@payload.generated_at) %> UTC</span>
           <span class="status-badge status-badge-live"><span class="status-badge-dot"></span>Live</span>
           <span class="status-badge status-badge-offline"><span class="status-badge-dot"></span>Offline</span>
@@ -72,10 +74,19 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <.tile label="Running" value={@payload.counts.running} detail={"#{@payload.upcoming.available_slots || 0} slots free"} accent={@payload.counts.running > 0} />
           <.tile label="Ready next" value={@payload.counts.ready} detail="queued for dispatch" />
           <.tile label="Waiting" value={@payload.counts.waiting} detail="held by labels, deps, CI" />
+          <.tile
+            label="Needs attention"
+            value={@payload.counts.blocked + @payload.counts.retrying}
+            detail={"#{@payload.counts.blocked} blocked · #{@payload.counts.retrying} retrying"}
+            warn={@payload.counts.blocked + @payload.counts.retrying > 0}
+          />
           <.tile label="Open PRs" value={@payload.counts.open_prs} detail="on GitHub" />
-          <.tile label="Retrying" value={@payload.counts.retrying} detail="backing off" warn={@payload.counts.retrying > 0} />
-          <.tile label="Blocked" value={@payload.counts.blocked} detail="need an operator" warn={@payload.counts.blocked > 0} />
-          <.tile label="Spend today" value={if @payload.usage.status == "ok", do: format_usd(@payload.usage.today[:usd_micro]), else: "n/a"} detail={"#{format_usd(@payload.usage.recorded[:usd_micro])} recorded"} />
+          <.tile label="PRs merged today" value={today(@payload.usage, :merged)} detail={"#{merged_total(@payload.usage)} in 14 days"}>
+            <Charts.sparkline values={daily_values(@payload.usage, :merged)} title="Pull requests merged per day, last 14 days" />
+          </.tile>
+          <.tile label="Spend today" value={if @payload.usage.status == "ok", do: format_usd(@payload.usage.today[:usd_micro]), else: "n/a"} detail={"#{format_usd(@payload.usage.recorded[:usd_micro])} recorded"} warn={(@payload.usage.today[:usd_micro] || 0) >= 50_000_000}>
+            <Charts.sparkline values={daily_spend(@payload.usage)} title="Estimated spend per day, last 14 days" />
+          </.tile>
           <.tile label="Tokens today" value={compact(@payload.usage.today[:total_tokens])} detail={"#{compact(@payload.usage.recorded[:total_tokens])} recorded"} />
           <.tile label="Runtime" value={format_runtime_seconds(total_runtime_seconds(@payload, @now))} detail="Codex, this process" />
         </section>
@@ -101,13 +112,21 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   </header>
                   <div class="agent-body">
                     <p class="agent-label">Codex update</p>
-                    <p class="agent-message" title={entry.last_message || to_string(entry.last_event || "n/a")}><%= entry.last_message || to_string(entry.last_event || "n/a") %></p>
-                    <p class="agent-meta muted">
-                      <%= entry.last_event || "n/a" %><%= if entry.last_event_at do %> · <span class="mono"><%= short_time(entry.last_event_at) %></span><% end %>
-                    </p>
+                    <%= if entry.last_message || entry.last_event do %>
+                      <p class="agent-message" title={entry.last_message || to_string(entry.last_event)}><%= entry.last_message || to_string(entry.last_event) %></p>
+                      <p class="agent-meta muted">
+                        <%= entry.last_event || "update" %><%= if entry.last_event_at do %> · <span title={entry.last_event_at}><%= ago(entry.last_event_at, @now) %></span><% end %>
+                      </p>
+                    <% else %>
+                      <p class="agent-message muted">Waiting for the first Codex event…</p>
+                    <% end %>
+                  </div>
+                  <div :if={@payload.runtime.max_turns} class="turn-budget" title={"Turn #{entry.turn_count} of #{@payload.runtime.max_turns}"}>
+                    <span class="turn-budget-label">Turns <%= entry.turn_count %>/<%= @payload.runtime.max_turns %></span>
+                    <span class="turn-budget-track"><span class="turn-budget-fill" style={"width: #{turn_percent(entry.turn_count, @payload.runtime.max_turns)}%"}></span></span>
                   </div>
                   <footer class="agent-foot">
-                    <span class="numeric">Tokens <strong><%= format_int(entry.tokens.total_tokens) %></strong> <span class="muted">in <%= compact(entry.tokens.input_tokens) %> / out <%= compact(entry.tokens.output_tokens) %></span></span>
+                    <span class="numeric">Tokens <strong><%= format_int(entry.tokens.total_tokens) %></strong> <span class="muted">in <%= compact(entry.tokens.input_tokens) %> / out <%= compact(entry.tokens.output_tokens) %> · <%= token_rate(entry, @now) %></span></span>
                     <span class="agent-spacer"></span>
                     <%= if entry.session_id do %>
                       <.copy_button value={entry.session_id} />
@@ -132,7 +151,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   <span class="step-state"><%= channel_status_label(channel_status(@payload, channel)) %></span>
                 </li>
               </ol>
-              <p class="panel-copy"><%= research_summary(@payload.autopilot) %></p>
+              <p class="panel-copy"><%= research_summary(@payload.autopilot, @now) %></p>
+              <Charts.meter
+                :if={Map.get(@payload.autopilot, :max_open_issues)}
+                label={"Open issue backlog #{@payload.autopilot.open_issues}/#{@payload.autopilot.max_open_issues}"}
+                percent={round(@payload.autopilot.open_issues * 100 / max(@payload.autopilot.max_open_issues, 1))}
+                detail="Research pauses at the cap."
+              />
             <% else %>
               <p class="empty-state">Autopilot is disabled in WORKFLOW.md.</p>
             <% end %>
@@ -215,8 +240,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
               <p class="empty-state">No recorded activity yet.</p>
             <% else %>
               <ol class="activity-list">
-                <li :for={event <- Enum.take(@payload.usage.activity, 60)} class="activity-item">
-                  <time class="mono muted" datetime={event.at} title={event.at}><%= short_time(event.at) %></time>
+                <li :for={event <- activity(@payload.usage)} class="activity-item">
+                  <time class="muted numeric" datetime={event.at} title={event.at}><%= ago(event.at, @now) %></time>
                   <span class={"activity-kind activity-#{event_tone(event.kind)}"}><%= event.kind |> String.replace("_", " ") %></span>
                   <span class="activity-subject">
                     <%= if Map.get(event, :issue_identifier) do %><.issue_identifier identifier={event.issue_identifier} url={Map.get(event, :issue_url)} /><% end %>
@@ -274,12 +299,16 @@ defmodule SymphonyElixirWeb.DashboardLive do
   attr(:detail, :string, default: nil)
   attr(:accent, :boolean, default: false)
   attr(:warn, :boolean, default: false)
+  slot(:inner_block)
 
   defp tile(assigns) do
     ~H"""
     <article class={["tile", @accent && "tile-accent", @warn && "tile-warn"]}>
       <p class="tile-label"><%= @label %></p>
-      <p class="tile-value"><%= @value %></p>
+      <div class="tile-row">
+        <p class="tile-value"><%= @value %></p>
+        <%= render_slot(@inner_block) %>
+      </div>
       <p :if={@detail} class="tile-detail"><%= @detail %></p>
     </article>
     """
@@ -347,6 +376,83 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp external_issue_url(_url), do: nil
 
+  defp activity(usage) do
+    usage.activity
+    |> Enum.reject(&(&1.kind == "turn_completed"))
+    |> Enum.take(60)
+  end
+
+  defp today(usage, key), do: usage |> Map.get(:daily, []) |> List.last(%{}) |> Map.get(key, 0)
+
+  defp daily_values(usage, key), do: usage |> Map.get(:daily, []) |> Enum.map(&Map.get(&1, key, 0))
+
+  defp daily_spend(usage), do: usage |> Map.get(:daily, []) |> Enum.map(&(&1.spend_by_model |> Map.values() |> Enum.sum()))
+
+  defp turn_percent(turns, max_turns) when is_integer(turns) and is_integer(max_turns) and max_turns > 0,
+    do: min(round(turns * 100 / max_turns), 100)
+
+  defp turn_percent(_turns, _max_turns), do: 0
+
+  defp token_rate(entry, now) do
+    minutes = runtime_seconds_from_started_at(entry.started_at, now) / 60
+
+    case entry.tokens.total_tokens do
+      total when is_integer(total) and total > 0 and minutes >= 1 -> "#{compact(round(total / minutes))}/min"
+      _ -> "rate pending"
+    end
+  end
+
+  defp poll_status(%{polling: %{checking?: true}}, _now), do: "Polling…"
+
+  defp poll_status(%{polling: %{next_poll_in_ms: ms}, generated_at: generated_at}, now) when is_integer(ms) do
+    elapsed =
+      case DateTime.from_iso8601(generated_at) do
+        {:ok, at, _} -> DateTime.diff(now, at, :millisecond)
+        _ -> 0
+      end
+
+    "Next poll in #{max(div(ms - elapsed, 1000), 0)}s"
+  end
+
+  defp poll_status(_payload, _now), do: ""
+
+  defp ago(value, now) do
+    case parse_time(value) do
+      nil -> "—"
+      at -> relative(DateTime.diff(now, at, :second), "ago")
+    end
+  end
+
+  defp until(value, now) do
+    case parse_time(value) do
+      nil -> "soon"
+      at -> if DateTime.compare(at, now) == :gt, do: "in " <> relative(DateTime.diff(at, now, :second), ""), else: "is due"
+    end
+  end
+
+  defp relative(seconds, suffix) do
+    text =
+      cond do
+        seconds < 60 -> "#{max(seconds, 0)}s"
+        seconds < 3_600 -> "#{div(seconds, 60)}m"
+        seconds < 86_400 -> "#{div(seconds, 3_600)}h #{rem(div(seconds, 60), 60)}m"
+        true -> "#{div(seconds, 86_400)}d"
+      end
+
+    String.trim("#{text} #{suffix}")
+  end
+
+  defp parse_time(%DateTime{} = at), do: at
+
+  defp parse_time(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, at, _offset} -> at
+      _ -> nil
+    end
+  end
+
+  defp parse_time(_value), do: nil
+
   defp work_kind("PR-" <> _), do: "pr"
   defp work_kind("research-" <> _), do: "research"
   defp work_kind(_identifier), do: "issue"
@@ -355,7 +461,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp kind_label("research"), do: "Research"
   defp kind_label(_kind), do: "Issue"
 
-  defp idle_reason(%{autopilot: %{enabled: true} = autopilot}), do: research_summary(autopilot)
+  defp idle_reason(%{autopilot: %{enabled: true} = autopilot}), do: research_summary(autopilot, DateTime.utc_now())
   defp idle_reason(_payload), do: "Waiting for ready work."
 
   defp channel_status(payload, channel) do
@@ -376,11 +482,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp channel_status_label("done"), do: "done"
   defp channel_status_label(_status), do: "—"
 
-  defp research_summary(autopilot) do
+  defp research_summary(autopilot, now) do
     cond do
       Map.get(autopilot, :research_running, 0) > 0 -> "A planner has the machine to itself; other work waits for it."
       Map.get(autopilot, :research_pending, []) != [] -> "Round in progress; resumes when the queue is idle."
-      next = Map.get(autopilot, :next_research_at) -> "Next research round no earlier than #{short_time(next)} UTC."
+      next = Map.get(autopilot, :next_research_at) -> "Next research round #{until(next, now)}, once the queue is empty."
       true -> "Research starts when the queue is empty."
     end
   end

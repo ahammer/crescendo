@@ -94,6 +94,39 @@ defmodule SymphonyElixirWeb.Charts do
     """
   end
 
+  @doc """
+  A 14-point trend line for a stat tile: 2px line, a 10% area wash, and an
+  end dot with a surface ring on the current value.
+  """
+  attr(:values, :list, required: true)
+  attr(:title, :string, required: true)
+
+  @spec sparkline(map()) :: Phoenix.LiveView.Rendered.t()
+  def sparkline(assigns) do
+    assigns = assign(assigns, spark_geometry(assigns.values))
+
+    ~H"""
+    <svg class="sparkline" viewBox="0 0 100 28" role="img" aria-label={@title}>
+      <title><%= @title %></title>
+      <path class="spark-area" d={@area} />
+      <polyline class="spark-line" points={@points} />
+      <circle class="spark-dot" cx={@end_x} cy={@end_y} r="3" />
+    </svg>
+    """
+  end
+
+  defp spark_geometry(values) do
+    values = if values == [], do: [0], else: values
+    top = max(Enum.max(values), 1)
+    step = if length(values) > 1, do: 96 / (length(values) - 1), else: 0
+    coords = values |> Enum.with_index() |> Enum.map(fn {value, index} -> {2 + step * index, 25 - value / top * 21} end)
+    {end_x, end_y} = List.last(coords)
+    points = Enum.map_join(coords, " ", fn {x, y} -> "#{f(x)},#{f(y)}" end)
+    {first_x, _} = hd(coords)
+
+    %{points: points, area: "M#{f(first_x)},25 L#{points} L#{f(end_x)},25 Z", end_x: f(end_x), end_y: f(end_y)}
+  end
+
   @doc "A single horizontal meter whose fill carries severity."
   attr(:label, :string, required: true)
   attr(:percent, :any, required: true)

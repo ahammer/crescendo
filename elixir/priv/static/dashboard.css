@@ -287,6 +287,42 @@ p {
   text-overflow: ellipsis;
 }
 
+.tile-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.sparkline {
+  flex: none;
+  width: 72px;
+  height: 22px;
+  margin-bottom: 4px;
+  overflow: visible;
+}
+
+.spark-line {
+  fill: none;
+  stroke: var(--line-strong);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.spark-area {
+  fill: var(--accent);
+  opacity: 0.1;
+}
+
+.spark-dot {
+  fill: var(--accent);
+  stroke: var(--surface);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
 .tile-accent {
   border-top: 3px solid var(--accent);
 }
@@ -454,6 +490,34 @@ p {
 
 .agent-meta {
   font-size: 11px;
+}
+
+.turn-budget {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--ink-2);
+}
+
+.turn-budget-label {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.turn-budget-track {
+  flex: 1;
+  height: 6px;
+  background: var(--accent-soft);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.turn-budget-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
 }
 
 .kind-chip {
@@ -675,7 +739,7 @@ p {
 
 .activity-item {
   display: grid;
-  grid-template-columns: 58px 92px auto 1fr;
+  grid-template-columns: 52px 92px auto 1fr;
   gap: 8px;
   align-items: center;
   padding: 4px 0;

@@ -30,6 +30,8 @@ defmodule SymphonyElixirWeb.Presenter do
           usage_error: Map.get(snapshot, :operations_error),
           upcoming: upcoming_payload(Map.get(snapshot, :upcoming)),
           autopilot: Map.get(snapshot, :autopilot) || %{enabled: false},
+          polling: Map.get(snapshot, :polling),
+          runtime: runtime_context(),
           pull_requests: pulls_payload(Map.get(snapshot, :pull_requests))
         }
 
@@ -70,6 +72,22 @@ defmodule SymphonyElixirWeb.Presenter do
         {:ok, Map.update!(payload, :requested_at, &DateTime.to_iso8601/1)}
     end
   end
+
+  # Static context the dashboard shows beside live state: which tracker scope
+  # this runtime serves and the per-run turn budget.
+  defp runtime_context do
+    case Config.settings() do
+      {:ok, settings} ->
+        %{tracker: tracker_scope(settings.tracker), max_turns: settings.agent.max_turns}
+
+      {:error, _reason} ->
+        %{tracker: nil, max_turns: nil}
+    end
+  end
+
+  defp tracker_scope(%{kind: "github", provider: provider}), do: "github:#{provider["repo"] || provider[:repo]}"
+  defp tracker_scope(%{kind: kind, project_slug: slug}) when is_binary(slug), do: "#{kind}:#{slug}"
+  defp tracker_scope(%{kind: kind}), do: kind
 
   defp issue_payload_body(issue_identifier, running, retry, blocked) do
     %{

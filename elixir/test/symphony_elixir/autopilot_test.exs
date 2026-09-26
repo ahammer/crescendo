@@ -389,6 +389,40 @@ defmodule SymphonyElixir.AutopilotTest do
       assert :sys.get_state(pid).running == %{}
     end
 
+    test "draft pull requests wait with an explicit reason, and stopped runs close their record" do
+      write_autopilot_workflow!()
+      draft_details = %{head_sha: "sha-3", draft: true, trusted: true}
+      untrusted_details = %{head_sha: "sha-4", draft: false, trusted: false}
+      draft = %{pull_request("3", "sha-3") | dispatchable: false, pull_request: draft_details}
+      untrusted = %{pull_request("4", "sha-4") | dispatchable: false, pull_request: untrusted_details}
+      pr = pull_request("2", "sha-2")
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [draft, untrusted, pr])
+
+      ops_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "ops.dets")
+      suffix = System.unique_integer([:positive])
+      supervisor = Module.concat(__MODULE__, "StopTasks#{suffix}")
+      name = Module.concat(__MODULE__, "StopOrchestrator#{suffix}")
+      start_supervised!({Task.Supervisor, name: supervisor})
+
+      table = :"autopilot_stop_ops_#{suffix}"
+      opts = [name: name, task_supervisor: supervisor, operations_path: ops_path, operations_table: table]
+      pid = start_supervised!({Orchestrator, opts})
+
+      send(pid, :run_poll_cycle)
+      assert Map.has_key?(:sys.get_state(pid).running, "2")
+
+      reasons = Orchestrator.snapshot(name, 5_000).upcoming.waiting |> Map.new(&{&1.issue_identifier, &1.reason})
+      assert reasons["PR-3"] == "draft"
+      assert reasons["PR-4"] == "awaiting maintainer label"
+
+      # The review is running when its pull request closes: reconciliation stops it and records why.
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{pr | state: "closed"}])
+      send(pid, :run_poll_cycle)
+
+      activity = Orchestrator.snapshot(name, 5_000).operations.activity
+      assert Enum.any?(activity, &(&1.kind == "stopped" and &1.issue_identifier == "PR-2"))
+    end
+
     test "research waits while the backlog is full" do
       write_autopilot_workflow!(autopilot: %{max_open_issues: 1})
       held = %Issue{id: "1", identifier: "GH-1", title: "Held", state: "open", dispatchable: true, labels: ["symphony:hold"]}

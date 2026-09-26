@@ -689,6 +689,7 @@ defmodule SymphonyElixir.Orchestrator do
         state = record_session_completion_totals(state, running_entry)
 
         stop_running_task(pid, ref, state.task_supervisor)
+        record_stopped_run(state, running_entry, "Worker stopped by reconciliation")
 
         if cleanup_workspace do
           cleanup_issue_workspace(Map.get(running_entry, :issue, identifier), running_entry)
@@ -883,7 +884,20 @@ defmodule SymphonyElixir.Orchestrator do
       state.task_supervisor
     )
 
+    record_stopped_run(state, running_entry, "Worker stopped for operator input")
+
     block_issue_from_entry(state, issue_id, running_entry, error)
+  end
+
+  # A stopped task delivers no :DOWN, so its run is closed here; otherwise the
+  # next restart would report it as interrupted.
+  defp record_stopped_run(state, running_entry, summary) do
+    Operations.finish_run(state.operations, Map.get(running_entry, :run_id), "stopped", %{
+      issue_identifier: Map.get(running_entry, :identifier),
+      issue_url: Map.get(Map.get(running_entry, :issue) || %{}, :url),
+      model: Map.get(running_entry, :model),
+      summary: summary
+    })
   end
 
   defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error, summary \\ "Operator input or approval required") do
@@ -1769,6 +1783,8 @@ defmodule SymphonyElixir.Orchestrator do
     %{
       enabled: settings.enabled,
       channels: settings.channels |> Map.keys() |> Enum.sort(),
+      open_issues: open_issue_count(state.polled_issues, Config.settings!()),
+      max_open_issues: settings.max_open_issues,
       research_running: Enum.count(state.running, fn {_id, entry} -> research_entry?(entry) end),
       research_pending: state.autopilot.research_pending,
       research_finished_at: finished_at,
@@ -2289,7 +2305,13 @@ defmodule SymphonyElixir.Orchestrator do
       log_file = Application.get_env(:symphony_elixir, :log_file, SymphonyElixir.LogFile.default_log_file())
       path = path || Path.join(Path.dirname(log_file), "operations.dets")
 
-      case Operations.open(path) do
+      open_result =
+        case Keyword.fetch(opts, :operations_table) do
+          {:ok, table} -> Operations.open(path, table)
+          :error -> Operations.open(path)
+        end
+
+      case open_result do
         {:ok, table} ->
           {table, nil}
 
@@ -2454,9 +2476,17 @@ defmodule SymphonyElixir.Orchestrator do
     cond do
       MapSet.member?(labels, "symphony:needs-attention") -> "needs attention"
       label = Issue.excluded_label(issue, config.tracker.excluded_labels) -> "excluded by #{label}"
+      reason = pull_request_admission_reason(issue) -> reason
       true -> Autopilot.pull_request_waiting_reason(issue, state.autopilot, config.autopilot)
     end
   end
+
+  defp pull_request_admission_reason(%Issue{kind: :pull_request, dispatchable: false, pull_request: %{draft: true}}), do: "draft"
+
+  defp pull_request_admission_reason(%Issue{kind: :pull_request, dispatchable: false, pull_request: %{trusted: false}}),
+    do: "awaiting maintainer label"
+
+  defp pull_request_admission_reason(_issue), do: nil
 
   defp maybe_record_turn_event(table, entry, update) do
     payload = Map.get(update, :payload) || %{}
