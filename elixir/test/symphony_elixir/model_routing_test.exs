@@ -40,4 +40,25 @@ defmodule SymphonyElixir.ModelRoutingTest do
     assert {:error, _} = Schema.parse(%{"codex" => %{"routing" => %{}}})
     assert {:ok, _} = Schema.parse(%{"codex" => %{"routing" => @routing}})
   end
+
+  test "research runs use the research route and other runs route by label" do
+    routing = %{
+      "label_prefix" => "symphony:model:",
+      "default" => %{"model" => "luna", "effort" => "medium"},
+      "labels" => %{"symphony:model:sol" => %{"model" => "sol", "effort" => "high"}}
+    }
+
+    research_route = %{"model" => "astra", "effort" => "xhigh"}
+    research = %Issue{kind: :research, labels: ["symphony:model:sol"]}
+    issue = %Issue{kind: :issue, labels: ["symphony:model:sol"]}
+
+    assert {:ok, %{"model" => "astra", "effort" => "xhigh", "label" => "research"}} = ModelRouting.select_for_run(routing, research_route, research)
+    assert {:ok, %{"model" => "sol", "label" => "symphony:model:sol"}} = ModelRouting.select_for_run(routing, research_route, issue)
+
+    assert {:ok, %{"model" => "luna", "label" => "default"}} =
+             ModelRouting.select_for_run(routing, nil, %{research | labels: ["symphony:research"]})
+
+    assert :ok = ModelRouting.validate_route(research_route)
+    assert {:error, _} = ModelRouting.validate_route(%{"model" => "astra", "effort" => "extreme"})
+  end
 end

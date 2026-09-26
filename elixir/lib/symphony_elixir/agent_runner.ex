@@ -89,7 +89,9 @@ defmodule SymphonyElixir.AgentRunner do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
 
-    with {:ok, route} <- ModelRouting.select(Config.settings!().codex.routing, issue),
+    settings = Config.settings!()
+
+    with {:ok, route} <- ModelRouting.select_for_run(settings.codex.routing, settings.autopilot.research_route, issue),
          :ok <- log_route(issue, route),
          :ok <- send_model_route(codex_update_recipient, issue, route),
          {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host, model_route: route) do

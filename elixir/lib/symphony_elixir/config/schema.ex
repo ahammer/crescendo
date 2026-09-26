@@ -321,7 +321,9 @@ defmodule SymphonyElixir.Config.Schema do
         }
       )
 
+      field(:min_issues_per_channel, :integer, default: 1)
       field(:max_issues_per_channel, :integer, default: 3)
+      field(:research_route, :map)
       field(:max_open_issues, :integer, default: 10)
       field(:research_cooldown_ms, :integer, default: 1_800_000)
       field(:max_pr_runs, :integer, default: 5)
@@ -341,7 +343,9 @@ defmodule SymphonyElixir.Config.Schema do
         [
           :enabled,
           :channels,
+          :min_issues_per_channel,
           :max_issues_per_channel,
+          :research_route,
           :max_open_issues,
           :research_cooldown_ms,
           :max_pr_runs,
@@ -351,7 +355,15 @@ defmodule SymphonyElixir.Config.Schema do
         ],
         empty_values: []
       )
+      |> validate_number(:min_issues_per_channel, greater_than: 0)
       |> validate_number(:max_issues_per_channel, greater_than: 0)
+      |> validate_issue_range()
+      |> validate_change(:research_route, fn field, route ->
+        case SymphonyElixir.ModelRouting.validate_route(route) do
+          :ok -> []
+          {:error, message} -> [{field, message}]
+        end
+      end)
       |> validate_number(:max_open_issues, greater_than: 0)
       |> validate_number(:research_cooldown_ms, greater_than_or_equal_to: 0)
       |> validate_number(:max_pr_runs, greater_than: 0)
@@ -359,6 +371,12 @@ defmodule SymphonyElixir.Config.Schema do
       |> update_change(:trusted_authors, fn values -> Enum.map(values, &(String.trim(&1) |> String.downcase())) end)
       |> validate_change(:channels, &validate_channels/2)
       |> validate_change(:prompts, &validate_prompts/2)
+    end
+
+    defp validate_issue_range(changeset) do
+      if get_field(changeset, :min_issues_per_channel) > get_field(changeset, :max_issues_per_channel),
+        do: add_error(changeset, :min_issues_per_channel, "must not exceed max_issues_per_channel"),
+        else: changeset
     end
 
     defp validate_channels(field, channels) do

@@ -22,11 +22,26 @@ defmodule SymphonyElixir.ModelRouting do
         {:error, "route labels must be unique ignoring case"}
 
       true ->
-        Enum.find_value([default | Map.values(labels)], :ok, &validate_route/1)
+        Enum.find_value([default | Map.values(labels)], :ok, &validate_route_entry/1)
     end
   end
 
   def validate(_), do: {:error, "routing requires label_prefix, default, and labels"}
+
+  @doc "Validates a single `{model, effort}` route."
+  @spec validate_route(term()) :: :ok | {:error, String.t()}
+  def validate_route(route), do: validate_route_entry(route) || :ok
+
+  @doc """
+  Selects the route for one run. Autopilot research runs use `research_route`
+  when configured, since planning deserves a stronger model than the default
+  issue route; everything else routes by issue labels.
+  """
+  @spec select_for_run(map() | nil, map() | nil, Issue.t()) :: {:ok, map() | nil} | {:error, String.t()}
+  def select_for_run(_routing, %{} = research_route, %Issue{kind: :research}),
+    do: {:ok, Map.put(research_route, "label", "research")}
+
+  def select_for_run(routing, _research_route, %Issue{} = issue), do: select(routing, issue)
 
   @spec select(map() | nil, Issue.t()) :: {:ok, map() | nil} | {:error, String.t()}
   def select(nil, %Issue{}), do: {:ok, nil}
@@ -58,12 +73,12 @@ defmodule SymphonyElixir.ModelRouting do
     end
   end
 
-  defp validate_route(%{"model" => model, "effort" => effort} = route)
+  defp validate_route_entry(%{"model" => model, "effort" => effort} = route)
        when is_binary(model) and is_binary(effort) do
     if map_size(route) == 2 and String.trim(model) != "" and effort in @efforts,
       do: false,
       else: {:error, "each route needs a nonblank model and supported effort"}
   end
 
-  defp validate_route(_), do: {:error, "each route needs a nonblank model and supported effort"}
+  defp validate_route_entry(_), do: {:error, "each route needs a nonblank model and supported effort"}
 end

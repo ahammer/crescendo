@@ -5,6 +5,7 @@ defmodule SymphonyElixir.AutopilotTest do
 
   @settings %{
     enabled: true,
+    min_issues_per_channel: 1,
     channels: %{"testing" => "Tests", "cleanup" => "Cleanup"},
     max_issues_per_channel: 2,
     max_open_issues: 3,
@@ -95,7 +96,7 @@ defmodule SymphonyElixir.AutopilotTest do
                kind: :research,
                state: "research",
                labels: ["symphony:research", "symphony:channel:cleanup"],
-               research: %{channel: "cleanup", focus: "Cleanup", max_issues: 2}
+               research: %{channel: "cleanup", focus: "Cleanup", min_issues: 1, max_issues: 2}
              } = cleanup
 
       assert testing.id == "research:testing"
@@ -151,7 +152,9 @@ defmodule SymphonyElixir.AutopilotTest do
         {%{channels: %{}}, "autopilot.channels"},
         {%{channels: %{"Bad Name" => "x"}}, "autopilot.channels"},
         {%{prompts: %{other: "x.md"}}, "autopilot.prompts"},
-        {%{max_pr_runs: 0}, "autopilot.max_pr_runs"}
+        {%{max_pr_runs: 0}, "autopilot.max_pr_runs"},
+        {%{min_issues_per_channel: 4, max_issues_per_channel: 3}, "autopilot.min_issues_per_channel"},
+        {%{research_route: %{model: "astra", effort: "extreme"}}, "autopilot.research_route"}
       ]
 
       for {autopilot, field} <- invalid do
@@ -208,7 +211,8 @@ defmodule SymphonyElixir.AutopilotTest do
         assert PromptBuilder.build_prompt(pr) =~ "git fetch origin pull/7/head"
 
         [research | _] = Autopilot.research_items(settings.autopilot)
-        assert PromptBuilder.build_prompt(research) =~ "File **at most 3** issues"
+        assert PromptBuilder.build_prompt(research) =~ "File **at least 3 and at most 5** issues"
+        assert settings.autopilot.research_route == %{"model" => "gpt-6-astra", "effort" => "high"}
       after
         {repo, token} = previous
         restore_env("GITHUB_REPO", repo)

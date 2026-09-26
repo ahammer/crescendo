@@ -105,6 +105,7 @@ defmodule SymphonyElixir.Autopilot do
         research: %{
           channel: channel,
           focus: focus,
+          min_issues: autopilot_settings.min_issues_per_channel,
           max_issues: autopilot_settings.max_issues_per_channel
         }
       }

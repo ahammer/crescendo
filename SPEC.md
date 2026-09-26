@@ -2344,7 +2344,10 @@ Extension config (`autopilot` object):
 - `enabled` (boolean, default `false`).
 - `channels` (map `name -> focus text`), default `cleanup`, `optimization`, `testing`. Names are
   lowercase letters, digits, or dashes.
-- `max_issues_per_channel` (positive integer, default `3`): issue cap per research run.
+- `min_issues_per_channel` (positive integer, default `1`) and `max_issues_per_channel` (positive
+  integer, default `3`): the issue range each research run is asked to file; min must not exceed max.
+- `research_route` (object `{model, effort}`, OPTIONAL): model route for research runs, overriding
+  label routing. Planning is the loop's hardest judgment call, so a strong model is RECOMMENDED.
 - `max_open_issues` (positive integer, default `10`): research pauses while at least this many open
   issues carry every `tracker.required_labels` label.
 - `research_cooldown_ms` (non-negative integer, default `1800000`): minimum time between the end of
@@ -2370,7 +2373,7 @@ Work items carry a `kind`:
   pull requests; `excluded_labels` is.
 - `research`: a synthetic item per channel (`id` `research:<channel>`, `state` `research`, labels
   `symphony:research` and `symphony:channel:<channel>`, and a `research` object with `channel`,
-  `focus`, `max_issues`). Research items MUST NOT be passed to tracker reads; reconciliation skips
+  `focus`, `min_issues`, `max_issues`). Research items MUST NOT be passed to tracker reads; reconciliation skips
   them.
 
 ### B.2 Scheduling

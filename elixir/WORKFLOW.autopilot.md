@@ -44,14 +44,25 @@ codex:
     networkAccess: true
 autopilot:
   enabled: true
-  # Research channels: name -> what that researcher looks for.
+  # Research channels: name -> what that planner hunts for by running the product.
   channels:
-    cleanup: Dead code, duplication, unclear names, awkward or inconsistent APIs, and code that is hard to read.
-    optimization: Measurable performance, resource, or cost wins, plus latent bugs found along the way.
-    testing: Missing or weak tests for important behavior, flaky tests, and untested edge cases.
-  max_issues_per_channel: 3
+    cleanup: >-
+      Code and API quality found by building, running, and tracing real behavior: dead or duplicated
+      code, unclear ownership and names, awkward or inconsistent APIs, error handling that hides
+      failures, and code that is hard to read or change.
+    optimization: >-
+      Measured performance, memory, and resource costs found by running benchmarks, profilers, and
+      timed product journeys, plus latent bugs exposed along the way. Every claim carries numbers.
+    testing: >-
+      Behavior the tests do not prove, found by running the suite and exercising the product headed:
+      failing, flaky, or slow tests, untested owners and edge cases, and user-visible defects seen in
+      UI journeys, screenshots, and recordings.
+  min_issues_per_channel: 3
+  max_issues_per_channel: 5
+  # Planning is the hardest judgment call in the loop; give it the strongest model.
+  research_route: {model: gpt-6-astra, effort: high}
   # Research pauses while this many `symphony` issues are open.
-  max_open_issues: 10
+  max_open_issues: 15
   research_cooldown_ms: 1800000
   max_pr_runs: 5
   # PR authors whose code may run and merge without a maintainer label.
