@@ -141,7 +141,7 @@ defmodule SymphonyElixir.WorkflowStore do
   end
 
   defp reload_current_path(path, state) do
-    case current_stamp(path) do
+    case current_stamp(path, state.workflow.prompt_paths) do
       {:ok, stamp} when stamp == state.stamp ->
         {:ok, state}
 
@@ -158,7 +158,7 @@ defmodule SymphonyElixir.WorkflowStore do
     with {:ok, workflow} <- Workflow.load(path),
          {:ok, settings} <- Schema.parse(workflow.config),
          :ok <- Config.validate_settings(settings),
-         {:ok, stamp} <- current_stamp(path) do
+         {:ok, stamp} <- current_stamp(path, workflow.prompt_paths) do
       {:ok, %State{path: path, stamp: stamp, workflow: workflow, settings: settings}}
     else
       {:error, reason} ->
@@ -166,12 +166,21 @@ defmodule SymphonyElixir.WorkflowStore do
     end
   end
 
-  defp current_stamp(path) when is_binary(path) do
+  # Prompt files referenced from WORKFLOW.md are part of the stamp so edits to
+  # them hot-reload like WORKFLOW.md itself.
+  defp current_stamp(path, prompt_paths) when is_binary(path) do
+    Enum.reduce_while([path | prompt_paths], {:ok, []}, fn file, {:ok, acc} ->
+      case file_stamp(file) do
+        {:ok, stamp} -> {:cont, {:ok, [stamp | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp file_stamp(path) do
     with {:ok, stat} <- File.stat(path, time: :posix),
          {:ok, content} <- File.read(path) do
       {:ok, {stat.mtime, stat.size, :erlang.phash2(content)}}
-    else
-      {:error, reason} -> {:error, reason}
     end
   end
 

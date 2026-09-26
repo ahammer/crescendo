@@ -32,12 +32,42 @@ defmodule SymphonyElixir.GitHub.Client do
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(state_names) when is_list(state_names) do
-    fetch_issues_by_states(state_names, Config.settings!().tracker, &perform_request/5)
+    config = Config.settings!()
+    fetch_issues_by_states(state_names, config.tracker, &perform_request/5, pull_policy(config))
   end
 
   @spec fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_ids(issue_ids) when is_list(issue_ids) do
-    fetch_issues_by_ids(issue_ids, Config.settings!().tracker, &perform_request/5)
+    config = Config.settings!()
+    fetch_issues_by_ids(issue_ids, config.tracker, &perform_request/5, pull_policy(config))
+  end
+
+  @doc """
+  Summarizes CI for a commit as `"pending"`, `"failure"`, `"success"`, or
+  `"none"` from both commit statuses and check runs.
+  """
+  @spec fetch_commit_ci_state(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def fetch_commit_ci_state(sha) when is_binary(sha) do
+    fetch_commit_ci_state_for_test(sha, Config.settings!().tracker, &perform_request/5)
+  end
+
+  @doc false
+  @spec fetch_commit_ci_state_for_test(String.t(), map(), function()) :: {:ok, String.t()} | {:error, term()}
+  def fetch_commit_ci_state_for_test(sha, tracker_settings, request_fun) do
+    get = fn settings, suffix, params ->
+      path = "/repos/#{encoded_repo(settings.repo)}/commits/#{URI.encode(sha, &URI.char_unreserved?/1)}/#{suffix}"
+      request_with_settings("GET", path, params, nil, settings, request_fun, false)
+    end
+
+    with {:ok, settings} <- settings(tracker_settings),
+         {:ok, %{} = status} <- get.(settings, "status", %{}),
+         {:ok, %{} = checks} <- get.(settings, "check-runs", %{"per_page" => @page_size}) do
+      check_states = checks["check_runs"] |> List.wrap() |> Enum.map(&check_run_ci_state/1)
+      {:ok, combine_ci_states([status_ci_state(status) | check_states])}
+    else
+      {:ok, _payload} -> {:error, :github_unknown_payload}
+      error -> error
+    end
   end
 
   @spec fetch_open_pull_requests() :: {:ok, [map()]} | {:error, term()}
@@ -81,22 +111,34 @@ defmodule SymphonyElixir.GitHub.Client do
   end
 
   @doc false
-  @spec fetch_issues_by_states_for_test([String.t()], map(), function()) ::
+  @spec fetch_issues_by_states_for_test([String.t()], map(), function(), map() | nil) ::
           {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_issues_by_states_for_test(state_names, tracker_settings, request_fun)
+  def fetch_issues_by_states_for_test(state_names, tracker_settings, request_fun, pull_policy \\ nil)
       when is_list(state_names) and is_map(tracker_settings) and is_function(request_fun, 5) do
-    fetch_issues_by_states(state_names, tracker_settings, request_fun)
+    fetch_issues_by_states(state_names, tracker_settings, request_fun, pull_policy)
   end
 
   @doc false
-  @spec fetch_issues_by_ids_for_test([String.t()], map(), function()) ::
+  @spec fetch_issues_by_ids_for_test([String.t()], map(), function(), map() | nil) ::
           {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_issues_by_ids_for_test(issue_ids, tracker_settings, request_fun)
+  def fetch_issues_by_ids_for_test(issue_ids, tracker_settings, request_fun, pull_policy \\ nil)
       when is_list(issue_ids) and is_map(tracker_settings) and is_function(request_fun, 5) do
-    fetch_issues_by_ids(issue_ids, tracker_settings, request_fun)
+    fetch_issues_by_ids(issue_ids, tracker_settings, request_fun, pull_policy)
   end
 
-  defp fetch_issues_by_states(state_names, tracker_settings, request_fun) do
+  # Pull requests are work items only when autopilot is enabled. The policy
+  # decides which authors are trusted to have their code run and merged.
+  defp pull_policy(%{autopilot: %{enabled: true} = autopilot, tracker: tracker}) do
+    %{
+      trusted_associations: autopilot.trusted_associations,
+      trusted_authors: autopilot.trusted_authors,
+      required_labels: tracker.required_labels
+    }
+  end
+
+  defp pull_policy(_config), do: nil
+
+  defp fetch_issues_by_states(state_names, tracker_settings, request_fun, pull_policy) do
     normalized_states = state_names |> Enum.map(&normalize_state/1) |> MapSet.new()
 
     case github_state_query(normalized_states) do
@@ -105,13 +147,15 @@ defmodule SymphonyElixir.GitHub.Client do
 
       state_query ->
         with {:ok, github_settings} <- settings(tracker_settings),
-             {:ok, issues} <- do_fetch_pages(github_settings, state_query, normalized_states, 1, request_fun, []) do
+             {:ok, issues} <-
+               do_fetch_pages(github_settings, state_query, normalized_states, 1, request_fun, [], pull_policy),
+             {:ok, issues} <- attach_open_pull_details(issues, github_settings, request_fun, pull_policy) do
           fetch_dependencies(issues, tracker_settings, github_settings, request_fun)
         end
     end
   end
 
-  defp fetch_issues_by_ids(issue_ids, tracker_settings, request_fun) do
+  defp fetch_issues_by_ids(issue_ids, tracker_settings, request_fun, pull_policy) do
     ids = Enum.uniq(issue_ids)
 
     case ids do
@@ -120,13 +164,14 @@ defmodule SymphonyElixir.GitHub.Client do
 
       ids ->
         with {:ok, github_settings} <- settings(tracker_settings),
-             {:ok, issues} <- fetch_issue_ids(ids, github_settings, request_fun, []) do
+             {:ok, issues} <- fetch_issue_ids(ids, github_settings, request_fun, []),
+             {:ok, issues} <- attach_pull_details_by_number(issues, github_settings, request_fun, pull_policy) do
           fetch_dependencies(issues, tracker_settings, github_settings, request_fun)
         end
     end
   end
 
-  defp do_fetch_pages(settings, state_query, requested_states, page, request_fun, acc) do
+  defp do_fetch_pages(settings, state_query, requested_states, page, request_fun, acc, pull_policy) do
     params = %{
       "state" => state_query,
       "per_page" => @page_size,
@@ -146,33 +191,146 @@ defmodule SymphonyElixir.GitHub.Client do
              false
            ),
          true <- is_list(payload) or {:error, :github_unknown_payload} do
-      issues = normalize_state_page(payload, settings.repo, requested_states)
+      issues = normalize_state_page(payload, settings.repo, requested_states, not is_nil(pull_policy))
       updated_acc = [issues | acc]
 
       if length(payload) < @page_size do
         {:ok, updated_acc |> Enum.reverse() |> List.flatten()}
       else
-        do_fetch_pages(settings, state_query, requested_states, page + 1, request_fun, updated_acc)
+        do_fetch_pages(settings, state_query, requested_states, page + 1, request_fun, updated_acc, pull_policy)
       end
     end
   end
 
   defp do_fetch_pull_pages(settings, request_fun, page, acc) do
-    params = %{"state" => "open", "per_page" => @page_size, "page" => page, "sort" => "updated", "direction" => "asc"}
-    path = "/repos/#{encoded_repo(settings.repo)}/pulls"
-
-    with {:ok, payload} <- request_with_settings("GET", path, params, nil, settings, request_fun, false),
-         true <- is_list(payload) or {:error, :github_unknown_payload},
+    with {:ok, payload} <- fetch_raw_pull_pages(settings, request_fun, page, acc),
          pulls <- Enum.map(payload, &normalize_pull/1),
          true <- Enum.all?(pulls, &is_map/1) or {:error, :github_unknown_payload} do
-      acc = [pulls | acc]
+      {:ok, pulls}
+    end
+  end
+
+  defp fetch_raw_pull_pages(settings, request_fun, page, acc) do
+    params = %{"state" => "open", "per_page" => @page_size, "page" => page, "sort" => "updated", "direction" => "asc"}
+
+    path = repository_pulls_path(settings)
+
+    with {:ok, payload} <- request_with_settings("GET", path, params, nil, settings, request_fun, false),
+         true <- is_list(payload) or {:error, :github_unknown_payload} do
+      acc = [payload | acc]
 
       if length(payload) < @page_size do
         {:ok, acc |> Enum.reverse() |> List.flatten()}
       else
-        do_fetch_pull_pages(settings, request_fun, page + 1, acc)
+        fetch_raw_pull_pages(settings, request_fun, page + 1, acc)
       end
     end
+  end
+
+  # Joins open pull request items with their `/pulls` records, which carry the
+  # head commit, draft flag, and fork details that `/issues` lacks.
+  defp attach_open_pull_details(issues, _settings, _request_fun, nil), do: {:ok, issues}
+
+  defp attach_open_pull_details(issues, settings, request_fun, pull_policy) do
+    if Enum.any?(issues, &open_pull_request?/1) do
+      with {:ok, payload} <- fetch_raw_pull_pages(settings, request_fun, 1, []) do
+        pulls = Map.new(payload, &{&1["number"], &1})
+        {:ok, Enum.map(issues, &attach_pull_detail(&1, pulls, settings.repo, pull_policy))}
+      end
+    else
+      {:ok, issues}
+    end
+  end
+
+  defp attach_pull_details_by_number(issues, _settings, _request_fun, nil), do: {:ok, issues}
+
+  defp attach_pull_details_by_number(issues, settings, request_fun, pull_policy) do
+    Enum.reduce_while(issues, {:ok, []}, fn issue, {:ok, acc} ->
+      case refresh_pull_detail(issue, settings, request_fun, pull_policy) do
+        {:ok, issue} -> {:cont, {:ok, [issue | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, reversed} -> {:ok, Enum.reverse(reversed)}
+      error -> error
+    end
+  end
+
+  defp refresh_pull_detail(issue, settings, request_fun, pull_policy) do
+    if open_pull_request?(issue) do
+      path = "#{repository_pulls_path(settings)}/#{issue.id}"
+
+      case request_with_settings("GET", path, %{}, nil, settings, request_fun, true) do
+        {:ok, %{} = pull} -> {:ok, attach_pull_detail(issue, %{pull["number"] => pull}, settings.repo, pull_policy)}
+        {:ok, :not_found} -> {:ok, issue}
+        {:ok, _payload} -> {:error, :github_unknown_payload}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:ok, issue}
+    end
+  end
+
+  defp open_pull_request?(%Issue{kind: :pull_request, state: "open"}), do: true
+  defp open_pull_request?(_issue), do: false
+
+  defp attach_pull_detail(%Issue{kind: :pull_request} = issue, pulls, repo, pull_policy) do
+    case Map.get(pulls, String.to_integer(issue.id)) do
+      %{"head" => %{"sha" => head_sha} = head} = pull when is_binary(head_sha) ->
+        head_repo = get_in(head, ["repo", "full_name"])
+        author = get_in(pull, ["user", "login"])
+        association = pull["author_association"]
+        trusted = pull_trusted?(author, association, pull_policy)
+        draft = pull["draft"] == true
+
+        detail = %{
+          number: pull["number"],
+          head_sha: head_sha,
+          head_ref: head["ref"],
+          head_repo: head_repo,
+          base_ref: get_in(pull, ["base", "ref"]),
+          draft: draft,
+          can_push: head_repo == repo or pull["maintainer_can_modify"] == true,
+          author: author,
+          author_association: association,
+          trusted: trusted
+        }
+
+        admitted = trusted or label_opt_in?(issue, pull_policy.required_labels)
+        %{issue | pull_request: detail, dispatchable: admitted and not draft, branch_name: head["ref"]}
+
+      _ ->
+        issue
+    end
+  end
+
+  defp attach_pull_detail(issue, _pulls, _repo, _pull_policy), do: issue
+
+  defp pull_trusted?(author, association, pull_policy) do
+    (is_binary(association) and String.upcase(association) in pull_policy.trusted_associations) or
+      (is_binary(author) and String.downcase(author) in pull_policy.trusted_authors)
+  end
+
+  # A maintainer opts an untrusted pull request in by adding every required
+  # label; with no required labels configured there is no label opt-in.
+  defp label_opt_in?(_issue, []), do: false
+  defp label_opt_in?(issue, required_labels), do: Issue.has_required_labels?(issue, required_labels)
+
+  defp status_ci_state(%{"total_count" => 0}), do: "none"
+  defp status_ci_state(%{"state" => state}) when state in ["success", "pending"], do: state
+  defp status_ci_state(%{"state" => _state}), do: "failure"
+  defp status_ci_state(_status), do: "none"
+
+  defp check_run_ci_state(%{"status" => "completed", "conclusion" => conclusion})
+       when conclusion in ["success", "neutral", "skipped"],
+       do: "success"
+
+  defp check_run_ci_state(%{"status" => "completed"}), do: "failure"
+  defp check_run_ci_state(_check_run), do: "pending"
+
+  defp combine_ci_states(states) do
+    Enum.find(["pending", "failure", "success"], "none", &(&1 in states))
   end
 
   defp normalize_pull(%{"number" => number, "title" => title, "html_url" => url, "draft" => draft, "updated_at" => updated_at})
@@ -215,8 +373,12 @@ defmodule SymphonyElixir.GitHub.Client do
     {:error, :github_unknown_payload}
   end
 
-  defp normalize_state_page(payload, repo, requested_states) do
-    issues = payload |> Enum.reject(&(is_map(&1) and Map.has_key?(&1, "pull_request"))) |> Enum.map(&normalize_issue(&1, repo))
+  defp normalize_state_page(payload, repo, requested_states, include_pulls) do
+    issues =
+      payload
+      |> Enum.reject(&(not include_pulls and is_map(&1) and Map.has_key?(&1, "pull_request")))
+      |> Enum.map(&normalize_issue(&1, repo))
+
     malformed_count = Enum.count(issues, &is_nil/1)
 
     if malformed_count > 0 do
@@ -232,12 +394,15 @@ defmodule SymphonyElixir.GitHub.Client do
     issue_number = issue["number"]
     state = issue["state"]
 
+    pull_request? = Map.has_key?(issue, "pull_request")
+
     if is_integer(issue_number) and issue_number > 0 and
          Enum.all?([issue["title"], state], &present_string?/1) do
       %Issue{
         id: Integer.to_string(issue_number),
+        kind: if(pull_request?, do: :pull_request, else: :issue),
         native_ref: native_ref(issue, repo),
-        identifier: "GH-#{issue_number}",
+        identifier: if(pull_request?, do: "PR-#{issue_number}", else: "GH-#{issue_number}"),
         title: issue["title"],
         description: issue["body"],
         state: state,
@@ -245,7 +410,8 @@ defmodule SymphonyElixir.GitHub.Client do
         assignee_id: get_in(issue, ["assignee", "login"]),
         labels: extract_labels(issue),
         blocked_by: [],
-        dispatchable: not Map.has_key?(issue, "pull_request"),
+        # Pull requests become dispatchable only once their details are attached.
+        dispatchable: not pull_request?,
         created_at: parse_datetime(issue["created_at"]),
         updated_at: parse_datetime(issue["updated_at"])
       }
@@ -270,7 +436,7 @@ defmodule SymphonyElixir.GitHub.Client do
   end
 
   defp fetch_dependencies_for_issue(issue, required_labels, settings, request_fun) do
-    if Issue.routable?(issue, required_labels) and issue.state == "open" do
+    if issue.kind == :issue and Issue.routable?(issue, required_labels) and issue.state == "open" do
       with {:ok, blockers} <- fetch_blockers(settings, issue.id, request_fun, 1, []) do
         dispatchable = Enum.all?(blockers, &satisfied_blocker?/1)
         {:ok, %{issue | blocked_by: blockers, dispatchable: dispatchable}}
@@ -451,6 +617,7 @@ defmodule SymphonyElixir.GitHub.Client do
   defp valid_repo?(_repo), do: false
 
   defp repository_issues_path(settings), do: "/repos/#{encoded_repo(settings.repo)}/issues"
+  defp repository_pulls_path(settings), do: "/repos/#{encoded_repo(settings.repo)}/pulls"
 
   defp repository_issue_path(settings, issue_number),
     do: "#{repository_issues_path(settings)}/#{issue_number}"

@@ -326,6 +326,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              },
              "usage_error" => nil,
              "upcoming" => %{"ready" => [], "waiting" => [], "observed_at" => nil, "error" => nil, "available_slots" => nil},
+             "autopilot" => %{"enabled" => false},
              "pull_requests" => %{"items" => [], "observed_at" => nil, "error" => nil, "enabled" => false}
            }
 

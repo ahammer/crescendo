@@ -117,6 +117,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="metric-detail"><%= @payload.upcoming.available_slots || 0 %> worker slots available.</p>
           </article>
 
+          <article :if={@payload.autopilot.enabled} class="metric-card">
+            <p class="metric-label">Autopilot research</p>
+            <p class="metric-value numeric"><%= if @payload.autopilot.research_running > 0, do: "#{@payload.autopilot.research_running} running", else: "Idle" %></p>
+            <p class="metric-detail">Pull requests first, then issues; research refills an empty queue. <%= if @payload.autopilot.next_research_at do %>Next research no earlier than <%= @payload.autopilot.next_research_at %>.<% else %>No research run yet.<% end %></p>
+          </article>
+
           <article class="metric-card">
             <p class="metric-label">Estimated API USD</p>
             <p class="metric-value numeric"><%= if @payload.usage.status == "ok", do: format_usd(@payload.usage.recorded[:usd_micro]), else: "n/a" %></p>
@@ -133,7 +139,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <div class="section-header">
             <div>
               <h2 class="section-title">Upcoming issues</h2>
-              <p class="section-copy">Open tracker issues in dispatch order. Only ready issues are queued · <%= @payload.upcoming.observed_at || "not polled yet" %></p>
+              <p class="section-copy">Open tracker work in dispatch order (pull requests first under autopilot). Only ready issues are queued · <%= @payload.upcoming.observed_at || "not polled yet" %></p>
             </div>
           </div>
           <%= if @payload.upcoming.error do %><p class="error-copy">Tracker data is stale: <%= @payload.upcoming.error %></p><% end %>

@@ -532,6 +532,137 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
     assert :ok = Config.validate!()
   end
 
+  test "autopilot keeps pull requests as work items gated by author trust or label opt-in" do
+    issues = [
+      raw_pull_issue(10, []),
+      raw_pull_issue(11, []),
+      raw_pull_issue(12, [%{"name" => "symphony:ready"}]),
+      raw_pull_issue(13, []),
+      raw_pull_issue(14, []),
+      Map.put(raw_issue(15), "labels", [%{"name" => "symphony:ready"}])
+    ]
+
+    pulls = [
+      raw_pull(10, "OWNER", "octo/repo"),
+      raw_pull(11, "NONE", "stranger/fork", %{"maintainer_can_modify" => true}),
+      raw_pull(12, "NONE", "stranger/fork"),
+      raw_pull(13, "CONTRIBUTOR", "friend/fork", %{"user" => %{"login" => "AdamH"}, "draft" => true})
+    ]
+
+    request_fun = fn "GET", path, _params, nil, _settings ->
+      send(self(), {:github_path, path})
+
+      case path do
+        "/repos/octo/repo/issues" -> {:ok, %{status: 200, body: issues}}
+        "/repos/octo/repo/pulls" -> {:ok, %{status: 200, body: pulls}}
+        "/repos/octo/repo/issues/15/dependencies/blocked_by" -> {:ok, %{status: 200, body: []}}
+      end
+    end
+
+    assert {:ok, [pr10, pr11, pr12, pr13, pr14, issue15]} =
+             GitHubClient.fetch_issues_by_states_for_test(["open"], tracker_settings(), request_fun, pull_policy())
+
+    assert %{kind: :pull_request, identifier: "PR-10", dispatchable: true, branch_name: "feature-10"} = pr10
+
+    assert pr10.pull_request == %{
+             number: 10,
+             head_sha: "sha-10",
+             head_ref: "feature-10",
+             head_repo: "octo/repo",
+             base_ref: "main",
+             draft: false,
+             can_push: true,
+             author: "author10",
+             author_association: "OWNER",
+             trusted: true
+           }
+
+    assert %{dispatchable: false, pull_request: %{trusted: false, can_push: true}} = pr11
+    assert %{dispatchable: true, pull_request: %{trusted: false, can_push: false}} = pr12
+    assert %{dispatchable: false, pull_request: %{trusted: true, draft: true}} = pr13
+    assert %{dispatchable: false, pull_request: nil} = pr14
+    assert %{kind: :issue, identifier: "GH-15", dispatchable: true} = issue15
+
+    assert Issue.routable?(pr12, ["symphony:ready"], [])
+    refute Issue.routable?(%{pr10 | labels: ["symphony:hold"]}, [], ["symphony:hold"])
+    refute_receive {:github_path, "/repos/octo/repo/issues/12/dependencies/blocked_by"}
+
+    no_label_policy = %{pull_policy() | required_labels: []}
+
+    no_label_settings = %{tracker_settings() | required_labels: []}
+
+    assert {:ok, [_pr10, _pr11, %{dispatchable: false} | _]} =
+             GitHubClient.fetch_issues_by_states_for_test(["open"], no_label_settings, request_fun, no_label_policy)
+
+    # Without autopilot, pull requests stay out of the work queue.
+    issues_only = fn "GET", "/repos/octo/repo/issues", _params, nil, _settings ->
+      {:ok, %{status: 200, body: [raw_pull_issue(10, [])]}}
+    end
+
+    assert {:ok, []} = GitHubClient.fetch_issues_by_states_for_test(["open"], tracker_settings(), issues_only)
+  end
+
+  test "autopilot refreshes pull request details by number" do
+    request_fun = fn "GET", path, _params, nil, _settings ->
+      case path do
+        "/repos/octo/repo/issues/10" -> {:ok, %{status: 200, body: raw_pull_issue(10, [])}}
+        "/repos/octo/repo/issues/11" -> {:ok, %{status: 200, body: raw_pull_issue(11, [])}}
+        "/repos/octo/repo/issues/12" -> {:ok, %{status: 200, body: raw_pull_issue(12, [])}}
+        "/repos/octo/repo/issues/13" -> {:ok, %{status: 200, body: Map.put(raw_pull_issue(13, []), "state", "closed")}}
+        "/repos/octo/repo/pulls/10" -> {:ok, %{status: 200, body: raw_pull(10, "MEMBER", "octo/repo")}}
+        "/repos/octo/repo/pulls/11" -> {:ok, %{status: 404, body: %{}}}
+        "/repos/octo/repo/pulls/12" -> {:ok, %{status: 200, body: []}}
+      end
+    end
+
+    assert {:ok, [pr10, pr11, pr13]} =
+             GitHubClient.fetch_issues_by_ids_for_test(["10", "11", "13"], tracker_settings(), request_fun, pull_policy())
+
+    assert %{dispatchable: true, pull_request: %{head_sha: "sha-10"}} = pr10
+    assert %{dispatchable: false, pull_request: nil} = pr11
+    assert %{state: "closed", pull_request: nil} = pr13
+
+    assert {:error, :github_unknown_payload} =
+             GitHubClient.fetch_issues_by_ids_for_test(["12"], tracker_settings(), request_fun, pull_policy())
+
+    assert {:error, {:github_api_status, 500}} =
+             GitHubClient.fetch_issues_by_ids_for_test(
+               ["10"],
+               tracker_settings(),
+               fn "GET", path, _params, nil, _settings ->
+                 if path == "/repos/octo/repo/issues/10",
+                   do: {:ok, %{status: 200, body: raw_pull_issue(10, [])}},
+                   else: {:ok, %{status: 500, body: %{}}}
+               end,
+               pull_policy()
+             )
+  end
+
+  test "client summarizes commit CI from statuses and check runs" do
+    ci = fn status, check_runs ->
+      GitHubClient.fetch_commit_ci_state_for_test("abc123", tracker_settings(), fn "GET", path, _params, nil, _settings ->
+        case path do
+          "/repos/octo/repo/commits/abc123/status" -> {:ok, %{status: 200, body: status}}
+          "/repos/octo/repo/commits/abc123/check-runs" -> {:ok, %{status: 200, body: %{"check_runs" => check_runs}}}
+        end
+      end)
+    end
+
+    completed = fn conclusion -> %{"status" => "completed", "conclusion" => conclusion} end
+
+    assert {:ok, "none"} = ci.(%{"total_count" => 0, "state" => "pending"}, [])
+    assert {:ok, "success"} = ci.(%{"total_count" => 1, "state" => "success"}, [completed.("skipped"), completed.("neutral")])
+    assert {:ok, "pending"} = ci.(%{"total_count" => 1, "state" => "success"}, [%{"status" => "in_progress"}])
+    assert {:ok, "failure"} = ci.(%{"total_count" => 0}, [completed.("success"), completed.("timed_out")])
+    assert {:ok, "failure"} = ci.(%{"total_count" => 2, "state" => "error"}, [])
+    assert {:ok, "none"} = ci.(%{}, [])
+
+    malformed = fn "GET", _path, _params, nil, _settings -> {:ok, %{status: 200, body: []}} end
+
+    assert {:error, :github_unknown_payload} =
+             GitHubClient.fetch_commit_ci_state_for_test("abc123", tracker_settings(), malformed)
+  end
+
   test "orchestrator refreshes the GitHub pull request inventory" do
     write_github_workflow!(Workflow.workflow_file_path(), "test-token")
     Application.put_env(:symphony_elixir, :github_client_module, InventoryGitHubClient)
@@ -568,6 +699,31 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
       terminal_states: ["closed"],
       required_labels: ["symphony:ready"]
     }
+  end
+
+  defp pull_policy do
+    %{trusted_associations: ["OWNER", "MEMBER", "COLLABORATOR"], trusted_authors: ["adamh"], required_labels: ["symphony:ready"]}
+  end
+
+  defp raw_pull_issue(number, labels) do
+    number
+    |> raw_issue()
+    |> Map.merge(%{"labels" => labels, "pull_request" => %{"url" => "https://api.github.test/pulls/#{number}"}})
+  end
+
+  defp raw_pull(number, association, head_repo, overrides \\ %{}) do
+    Map.merge(
+      %{
+        "number" => number,
+        "draft" => false,
+        "author_association" => association,
+        "user" => %{"login" => "author#{number}"},
+        "maintainer_can_modify" => false,
+        "head" => %{"sha" => "sha-#{number}", "ref" => "feature-#{number}", "repo" => %{"full_name" => head_repo}},
+        "base" => %{"ref" => "main"}
+      },
+      overrides
+    )
   end
 
   defp raw_issue(number) do

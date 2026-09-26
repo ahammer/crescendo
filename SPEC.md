@@ -392,6 +392,11 @@ Fields:
   - An issue MUST contain every configured label to dispatch or continue.
   - Matching ignores case and surrounding whitespace.
   - A blank configured label matches no issue.
+- `excluded_labels` (list of strings)
+  - Default: `[]`.
+  - An issue carrying any configured label MUST NOT dispatch or continue. Adding one stops a
+    running worker without workspace cleanup and releases a blocked claim.
+  - Matching ignores case and surrounding whitespace.
 - `active_states` (list of strings)
   - REQUIRED unless the selected adapter profile documents a default.
   - Values are provider-native state names compared case-insensitively by the scheduler.
@@ -455,6 +460,10 @@ Fields:
 - `max_retry_backoff_ms` (integer)
   - Default: `300000` (5 minutes)
   - Changes SHOULD be re-applied at runtime and affect future retry scheduling.
+- `max_attempts` (positive integer or null)
+  - Default: null (retry failures indefinitely).
+  - When a failure-driven retry would exceed this attempt number, the issue is blocked instead of
+    retried. The block is released when the issue's state or routability changes.
 - `max_concurrent_agents_by_state` (map `state_name -> positive integer`)
   - Default: empty map.
   - State keys are normalized (`trim + lowercase`) for lookup.
@@ -611,6 +620,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.kind`: string, REQUIRED, selects one supported adapter
 - `tracker.provider`: object, default `{}`, adapter-owned endpoint/scope/auth settings
 - `tracker.required_labels`: list of strings, default `[]`
+- `tracker.excluded_labels`: list of strings, default `[]`
 - `tracker.active_states`: list of provider-native state names, adapter-defined default
 - `tracker.terminal_states`: list of provider-native state names, adapter-defined default
 - `polling.interval_ms`: integer, default `30000`
@@ -623,6 +633,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `agent.max_concurrent_agents`: integer, default `10`
 - `agent.max_turns`: integer, default `20`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
+- `agent.max_attempts`: positive integer or null, default null (unlimited)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
 - `codex.command`: shell command string, default `codex app-server`
 - `codex.routing`: optional explicit issue-label route map with `label_prefix`, `default`
@@ -764,13 +775,15 @@ An issue is dispatch-eligible only if all are true:
 - Its state is in `active_states` and not in `terminal_states`.
 - Its adapter-provided `dispatchable` value is `true`.
 - It contains every label in `tracker.required_labels`.
+- It contains no label in `tracker.excluded_labels`.
 - It is not already in `running`.
 - It is not already in `claimed`.
 - Global concurrency slots are available.
 - Per-state concurrency slots are available.
 
 For refresh and continuation checks, `issue_routable(issue)` means only that adapter-provided
-`dispatchable` is true and all `tracker.required_labels` match. State, claims, and concurrency are
+`dispatchable` is true, all `tracker.required_labels` match, and no `tracker.excluded_labels`
+match. State, claims, and concurrency are
 checked separately by the surrounding algorithm.
 
 Sorting order (stable intent):
@@ -804,6 +817,8 @@ Backoff formula:
 - Normal continuation retries after a clean worker exit use a short fixed delay of `1000` ms.
 - Failure-driven retries use `delay = min(10000 * 2^(attempt - 1), agent.max_retry_backoff_ms)`.
 - Power is capped by the configured max retry backoff (default `300000` / 5m).
+- Failure-driven retries (abnormal exit or stall) whose attempt number would exceed
+  `agent.max_attempts` block the issue instead of scheduling a retry.
 
 Retry handling behavior:
 
@@ -2318,3 +2333,70 @@ Extension config:
 - Cleanup and observability:
   - Operators need to know which host owns a run, where its workspace lives, and whether cleanup
     happened on the right machine.
+
+## Appendix B. Autopilot Extension (OPTIONAL)
+
+This appendix describes an extension profile in which Symphony continuously improves one GitHub
+repository without a human filing work. It is implemented only for the GitHub Issues adapter.
+
+Extension config (`autopilot` object):
+
+- `enabled` (boolean, default `false`).
+- `channels` (map `name -> focus text`), default `cleanup`, `optimization`, `testing`. Names are
+  lowercase letters, digits, or dashes.
+- `max_issues_per_channel` (positive integer, default `3`): issue cap per research run.
+- `max_open_issues` (positive integer, default `10`): research pauses while at least this many open
+  issues carry every `tracker.required_labels` label.
+- `research_cooldown_ms` (non-negative integer, default `1800000`): minimum time between the end of
+  the last research run and the next research round.
+- `max_pr_runs` (positive integer, default `5`): review runs per pull request.
+- `trusted_associations` (list, default `[OWNER, MEMBER, COLLABORATOR]`) and `trusted_authors`
+  (list of logins, default `[]`): pull request authors trusted to have their code run and merged.
+- `prompts.pull_request` and `prompts.research` (paths relative to `WORKFLOW.md`, REQUIRED when
+  enabled): prompt templates for those work-item kinds. The `WORKFLOW.md` body remains the issue
+  prompt. Edits to prompt files reload like `WORKFLOW.md`.
+
+### B.1 Work Items
+
+Work items carry a `kind`:
+
+- `issue`: a tracker issue, unchanged from the core model.
+- `pull_request`: an open GitHub pull request, returned by the adapter alongside issues with
+  `identifier` `PR-<number>` and a `pull_request` object (`number`, `head_sha`, `head_ref`,
+  `head_repo`, `base_ref`, `draft`, `can_push`, `author`, `author_association`, `trusted`, and
+  `ci_state` once checked at dispatch). It is `dispatchable` only when it is not a draft and its
+  author is trusted or it carries every `tracker.required_labels` label (a maintainer opt-in; with
+  no required labels there is no label opt-in). `required_labels` is not otherwise applied to
+  pull requests; `excluded_labels` is.
+- `research`: a synthetic item per channel (`id` `research:<channel>`, `state` `research`, labels
+  `symphony:research` and `symphony:channel:<channel>`, and a `research` object with `channel`,
+  `focus`, `max_issues`). Research items MUST NOT be passed to tracker reads; reconciliation skips
+  them.
+
+### B.2 Scheduling
+
+- Pull requests sort before issues; priority and creation time order each group.
+- A pull request dispatches only when its head commit differs from the last head a review run
+  finished at and it is under `max_pr_runs`. Before spawning, the orchestrator reads CI for the
+  head commit (commit statuses and check runs) and skips the pull request while CI is pending or
+  unknown, so reviewers never wait on CI.
+- A pull request run is a single turn sequence without continuation retries. A normal exit records
+  the head commit it started at; the pull request waits for a new push. Abnormal exits retry with
+  backoff under `agent.max_attempts`.
+- Research starts, one run per channel as slots allow, only when no tracker item is ready to
+  dispatch, no research run is active, the cooldown has elapsed, and the backlog is below
+  `max_open_issues`. Research runs never retry; any exit ends the round, cleans the workspace, and
+  starts the cooldown.
+- Handled heads, per-PR run counts, and the last research finish time persist across restarts.
+
+### B.3 Workflow Contract
+
+The reference `WORKFLOW.autopilot.md` uses these conventions:
+
+- An issue worker opens a draft pull request that closes the issue, marks it ready and labels it
+  `symphony` when validated, and finally labels the issue `symphony:in-review` (an excluded
+  label), which hands the work to a separate reviewer run.
+- A reviewer treats pull request content as untrusted, pushes fixes only when `can_push`, and
+  merges pinned to the reviewed head commit. When it abandons a pull request it closes it and
+  releases the linked issue (closed as not planned, or relabeled `symphony:needs-attention`).
+- `symphony:hold` stops and holds any issue or pull request.

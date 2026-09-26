@@ -37,6 +37,9 @@ Its GitHub Issues adapter also respects native issue dependencies before dispatc
 The Elixir operations dashboard shows upcoming issues and open GitHub PRs, a recent activity
 timeline, and per-model token usage with clearly labeled API-equivalent cost estimates.
 It warns when recorded worker usage reaches an estimated $50 in one UTC day.
+Its optional autopilot mode keeps improving one GitHub repository on its own: it reviews and merges
+trusted pull requests first, implements labeled issues next, and when the queue is empty sends
+research agents to file new cleanup, optimization, and testing issues.
 
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md

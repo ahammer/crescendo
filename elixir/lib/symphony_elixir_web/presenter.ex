@@ -29,6 +29,7 @@ defmodule SymphonyElixirWeb.Presenter do
           usage: Map.get(snapshot, :operations) || Operations.snapshot(nil),
           usage_error: Map.get(snapshot, :operations_error),
           upcoming: upcoming_payload(Map.get(snapshot, :upcoming)),
+          autopilot: Map.get(snapshot, :autopilot) || %{enabled: false},
           pull_requests: pulls_payload(Map.get(snapshot, :pull_requests))
         }
 
