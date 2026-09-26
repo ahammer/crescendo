@@ -3,7 +3,7 @@ defmodule SymphonyElixir.ModelRouting do
 
   alias SymphonyElixir.Tracker.Issue
 
-  @efforts ~w(minimal low medium high xhigh)
+  @efforts ~w(minimal low medium high xhigh max)
 
   @spec validate(map()) :: :ok | {:error, String.t()}
   def validate(%{"label_prefix" => prefix, "default" => default, "labels" => labels})

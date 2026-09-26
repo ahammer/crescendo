@@ -59,6 +59,7 @@ defmodule SymphonyElixir.ModelRoutingTest do
              ModelRouting.select_for_run(routing, nil, %{research | labels: ["symphony:research"]})
 
     assert :ok = ModelRouting.validate_route(research_route)
+    assert :ok = ModelRouting.validate_route(%{"model" => "gpt-6-luna", "effort" => "max"})
     assert {:error, _} = ModelRouting.validate_route(%{"model" => "astra", "effort" => "extreme"})
   end
 end
