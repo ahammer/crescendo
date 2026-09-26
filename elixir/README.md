@@ -265,8 +265,9 @@ codex:
   (default `https://api.github.com`, HTTPS only). Set explicit `active_states` and
   `terminal_states`; active entries may be `open` and terminal entries may be `closed`.
 - Reads and identity: polling is scoped to the configured repository; `issue.id` is the
-  repository issue number, `issue.identifier` is `GH-<number>`, hidden or deleted `404` issues are
-  omitted on refresh, and pull requests returned by the Issues API are not dispatchable unless
+  repository issue number, `issue.identifier` is `GH-<number>`, hidden or transferred `404` issues are
+  omitted on refresh (stopping their worker), issues deleted on GitHub (`410`) refresh as `closed`
+  so reconciliation stops their worker and cleans their workspace, and pull requests returned by the Issues API are not dispatchable unless
   autopilot is enabled (see below).
 - Native issue dependencies are checked for label-eligible open issues during polling and again
   on ID refresh before dispatch. An open blocker or one closed as `not_planned` prevents dispatch;

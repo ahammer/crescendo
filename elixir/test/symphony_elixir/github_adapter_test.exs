@@ -280,6 +280,24 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
              )
   end
 
+  test "client reports externally deleted issues as closed so reconciliation retires them" do
+    request_fun = fn "GET", path, %{}, nil, _settings ->
+      case path do
+        "/repos/octo/repo/issues/5" -> {:ok, %{status: 410, body: %{"message" => "This issue was deleted"}}}
+        "/repos/octo/repo/issues/6" -> {:ok, %{status: 200, body: raw_issue(6)}}
+        "/repos/octo/repo/issues/7" -> {:ok, %{status: 200, body: raw_pull_issue(7, [])}}
+        "/repos/octo/repo/pulls/7" -> {:ok, %{status: 410, body: %{}}}
+      end
+    end
+
+    assert {:ok, [deleted, live]} = GitHubClient.fetch_issues_by_ids_for_test(["5", "6"], tracker_settings(), request_fun)
+    assert %Issue{id: "5", identifier: "GH-5", state: "closed", dispatchable: false, title: "Deleted on GitHub"} = deleted
+    assert live.id == "6"
+
+    assert {:ok, [%Issue{kind: :pull_request, pull_request: nil, dispatchable: false}]} =
+             GitHubClient.fetch_issues_by_ids_for_test(["7"], tracker_settings(), request_fun, pull_policy())
+  end
+
   test "ready issues wait for native dependencies, including dependencies added before dispatch" do
     issue = Map.put(raw_issue(42), "labels", [%{"name" => "symphony:ready"}])
 

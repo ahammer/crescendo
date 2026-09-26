@@ -263,7 +263,7 @@ defmodule SymphonyElixir.GitHub.Client do
 
       case request_with_settings("GET", path, %{}, nil, settings, request_fun, true) do
         {:ok, %{} = pull} -> {:ok, attach_pull_detail(issue, %{pull["number"] => pull}, settings.repo, pull_policy)}
-        {:ok, :not_found} -> {:ok, issue}
+        {:ok, missing} when missing in [:not_found, :gone] -> {:ok, issue}
         {:ok, _payload} -> {:error, :github_unknown_payload}
         {:error, reason} -> {:error, reason}
       end
@@ -354,8 +354,25 @@ defmodule SymphonyElixir.GitHub.Client do
              request_fun,
              true
            ) do
-      continue_issue_id_fetch(payload, rest, settings, request_fun, acc)
+      case payload do
+        :gone -> fetch_issue_ids(rest, settings, request_fun, [deleted_issue(issue_number, settings.repo) | acc])
+        payload -> continue_issue_id_fetch(payload, rest, settings, request_fun, acc)
+      end
     end
+  end
+
+  # GitHub answers 410 for an issue deleted outside Symphony. It can never come
+  # back, so it is reported as closed: reconciliation then stops its worker and
+  # cleans its workspace, where a 404 (hidden or transferred) only stops it.
+  defp deleted_issue(issue_number, repo) do
+    %Issue{
+      id: Integer.to_string(issue_number),
+      identifier: "GH-#{issue_number}",
+      native_ref: %{"number" => issue_number, "repo" => repo},
+      title: "Deleted on GitHub",
+      state: "closed",
+      dispatchable: false
+    }
   end
 
   defp continue_issue_id_fetch(:not_found, rest, settings, request_fun, acc) do
@@ -525,6 +542,9 @@ defmodule SymphonyElixir.GitHub.Client do
 
       {:ok, %{status: 404}} when allow_not_found ->
         {:ok, :not_found}
+
+      {:ok, %{status: 410}} when allow_not_found ->
+        {:ok, :gone}
 
       {:ok, %{status: status}} when is_integer(status) ->
         Logger.error("GitHub API request failed status=#{status} method=#{method} path=#{path}")

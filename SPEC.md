@@ -1300,6 +1300,10 @@ Adapter output MUST satisfy Section 4.1.1. In addition:
 - The GitHub Issues adapter checks native `blocked_by` relationships for otherwise routable open
   issues at polling and ID refresh. Open blockers and `not_planned` closures make them
   `dispatchable=false`; failed or malformed dependency reads fail closed.
+- On ID refresh, an item the provider reports as permanently deleted (GitHub `410 Gone`) SHOULD be
+  returned in a terminal state rather than omitted, so reconciliation stops its worker and cleans
+  its workspace. An item that is merely hidden or moved (`404`) is omitted, which stops the worker
+  and keeps the workspace.
 - `dispatchable` MUST be explicit. It is `true` only when provider-specific eligibility checks
   pass; the generic scheduler never tries to reconstruct those checks from `native_ref`.
 - `native_ref` MUST be null or a JSON-safe object containing only non-secret values safe to expose
