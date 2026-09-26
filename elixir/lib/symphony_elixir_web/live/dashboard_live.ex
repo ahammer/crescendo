@@ -119,8 +119,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
           <article :if={@payload.autopilot.enabled} class="metric-card">
             <p class="metric-label">Autopilot research</p>
-            <p class="metric-value numeric"><%= if @payload.autopilot.research_running > 0, do: "#{@payload.autopilot.research_running} running", else: "Idle" %></p>
-            <p class="metric-detail">Pull requests first, then issues; research refills an empty queue. <%= if @payload.autopilot.next_research_at do %>Next research no earlier than <%= @payload.autopilot.next_research_at %>.<% else %>No research run yet.<% end %></p>
+            <p class="metric-value numeric"><%= if @payload.autopilot.research_running > 0, do: "Running", else: "Idle" %></p>
+            <p class="metric-detail">Pull requests first, then issues; research refills an empty queue one channel at a time, alone on the machine. <%= cond do %><% @payload.autopilot.research_pending != [] -> %>Round in progress: <%= Enum.join(@payload.autopilot.research_pending, ", ") %> left.<% @payload.autopilot.next_research_at -> %>Next round no earlier than <%= @payload.autopilot.next_research_at %>.<% true -> %>No research round yet.<% end %></p>
           </article>
 
           <article class="metric-card">

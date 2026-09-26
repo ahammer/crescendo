@@ -2386,11 +2386,15 @@ Work items carry a `kind`:
 - A pull request run is a single turn sequence without continuation retries. A normal exit records
   the head commit it started at; the pull request waits for a new push. Abnormal exits retry with
   backoff under `agent.max_attempts`.
-- Research starts, one run per channel as slots allow, only when no tracker item is ready to
-  dispatch, no research run is active, the cooldown has elapsed, and the backlog is below
-  `max_open_issues`. Research runs never retry; any exit ends the round, cleans the workspace, and
-  starts the cooldown.
-- Handled heads, per-PR run counts, and the last research finish time persist across restarts.
+- Research runs in rounds covering every channel, one channel at a time. A research run starts only
+  when no agent is running and no tracker item is ready, and while it runs nothing else dispatches
+  (including retries), so planners' tests, headed journeys, and measurements have the machine to
+  themselves. A new round needs the cooldown to have elapsed; an unfinished round resumes with its
+  next channel once the machine is idle again. Both need the backlog below `max_open_issues`.
+- Research runs never retry; any exit ends that channel, cleans its workspace, and the cooldown
+  starts when the round's last channel ends.
+- Handled heads, per-PR run counts, the channels left in the current round, and the last round's
+  finish time persist across restarts.
 
 ### B.3 Workflow Contract
 

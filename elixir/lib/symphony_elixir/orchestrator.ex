@@ -54,7 +54,7 @@ defmodule SymphonyElixir.Orchestrator do
       next_pulls_due_at_ms: 0,
       codex_totals: nil,
       codex_rate_limits: nil,
-      autopilot: %{pr_handled: %{}, research_finished_at: nil}
+      autopilot: %{pr_handled: %{}, research_finished_at: nil, research_pending: []}
     ]
   end
 
@@ -1578,32 +1578,25 @@ defmodule SymphonyElixir.Orchestrator do
     cleanup_issue_workspace(running_entry.issue, running_entry)
 
     state
-    |> put_autopilot(Autopilot.record_research_finished(state.autopilot, DateTime.utc_now()))
+    |> put_autopilot(Autopilot.record_research_finished(state.autopilot, running_entry.issue.research.channel, DateTime.utc_now()))
     |> release_issue_claim(issue_id)
   end
 
-  # When nothing is ready to work on, one research run per channel looks for
-  # the next improvements and files them as issues.
+  # When the machine is idle and nothing is ready, one research channel runs at
+  # a time so planners' tests, headed journeys, and measurements never overlap.
   defp maybe_dispatch_research(%State{} = state, issues) do
     config = Config.settings!()
 
-    research_running? = Enum.any?(state.running, fn {_id, entry} -> research_entry?(entry) end)
-    open_issues = open_issue_count(issues, config)
+    if config.autopilot.enabled and state.running == %{} and not Enum.any?(issues, &work_ready?(&1, state)) do
+      open_issues = open_issue_count(issues, config)
 
-    if config.autopilot.enabled and not research_running? and not Enum.any?(issues, &work_ready?(&1, state)) and
-         Autopilot.research_due?(state.autopilot, config.autopilot, open_issues, DateTime.utc_now()) do
-      config.autopilot
-      |> Autopilot.research_items()
-      |> Enum.reduce(state, &maybe_dispatch_research_item/2)
+      case Autopilot.next_research(state.autopilot, config.autopilot, open_issues, DateTime.utc_now()) do
+        {autopilot, nil} -> put_autopilot(state, autopilot)
+        {autopilot, item} -> state |> put_autopilot(autopilot) |> dispatch_issue(item)
+      end
     else
       state
     end
-  end
-
-  defp maybe_dispatch_research_item(item, state) do
-    if dispatch_slots_available?(item, state) and worker_slots_available?(state),
-      do: dispatch_issue(state, item),
-      else: state
   end
 
   defp work_ready?(%Issue{} = issue, %State{} = state) do
@@ -1617,7 +1610,15 @@ defmodule SymphonyElixir.Orchestrator do
     Enum.count(issues, &(&1.kind == :issue and Issue.has_required_labels?(&1, config.tracker.required_labels)))
   end
 
+  # A research run has the machine to itself: nothing else dispatches, including
+  # retries, until it finishes.
   defp available_slots(%State{} = state) do
+    if research_running?(state), do: 0, else: free_slots(state)
+  end
+
+  defp research_running?(%State{running: running}), do: Enum.any?(running, fn {_id, entry} -> research_entry?(entry) end)
+
+  defp free_slots(%State{} = state) do
     max(
       (state.max_concurrent_agents || Config.settings!().agent.max_concurrent_agents) -
         map_size(state.running),
@@ -1768,6 +1769,7 @@ defmodule SymphonyElixir.Orchestrator do
     %{
       enabled: settings.enabled,
       research_running: Enum.count(state.running, fn {_id, entry} -> research_entry?(entry) end),
+      research_pending: state.autopilot.research_pending,
       research_finished_at: finished_at,
       next_research_at: finished_at && DateTime.add(finished_at, settings.research_cooldown_ms, :millisecond)
     }

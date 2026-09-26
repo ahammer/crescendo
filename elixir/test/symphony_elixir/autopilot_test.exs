@@ -13,7 +13,7 @@ defmodule SymphonyElixir.AutopilotTest do
     max_pr_runs: 2
   }
 
-  @empty %{pr_handled: %{}, research_finished_at: nil}
+  @empty %{pr_handled: %{}, research_finished_at: nil, research_pending: []}
 
   defmodule CiClient do
     def fetch_commit_ci_state(sha) do
@@ -73,18 +73,33 @@ defmodule SymphonyElixir.AutopilotTest do
   end
 
   describe "research policy" do
-    test "research is due only when enabled, below the backlog cap, and cooled down" do
+    test "research runs as sequential rounds over every channel, then cools down" do
       now = ~U[2026-09-25 12:00:00Z]
 
-      assert Autopilot.research_due?(@empty, @settings, 2, now)
-      refute Autopilot.research_due?(@empty, %{@settings | enabled: false}, 0, now)
-      refute Autopilot.research_due?(@empty, @settings, 3, now)
+      assert {@empty, nil} = Autopilot.next_research(@empty, %{@settings | enabled: false}, 0, now)
+      assert {@empty, nil} = Autopilot.next_research(@empty, @settings, 3, now)
 
-      recent = Autopilot.record_research_finished(@empty, DateTime.add(now, -59, :second))
-      refute Autopilot.research_due?(recent, @settings, 0, now)
+      # A fresh round covers every channel in name order, one at a time.
+      assert {state, %Issue{id: "research:cleanup"}} = Autopilot.next_research(@empty, @settings, 0, now)
+      assert state.research_pending == ["cleanup", "testing"]
+      assert {^state, %Issue{id: "research:cleanup"}} = Autopilot.next_research(state, @settings, 0, now)
 
-      old = Autopilot.record_research_finished(@empty, DateTime.add(now, -60, :second))
-      assert Autopilot.research_due?(old, @settings, 0, now)
+      state = Autopilot.record_research_finished(state, "cleanup", now)
+      assert state.research_pending == ["testing"]
+      assert state.research_finished_at == nil
+
+      # An unfinished round continues without waiting for the cooldown, but still respects the backlog.
+      assert {_, %Issue{id: "research:testing"}} = Autopilot.next_research(state, @settings, 2, now)
+      assert {_, nil} = Autopilot.next_research(state, @settings, 3, now)
+
+      state = Autopilot.record_research_finished(state, "testing", now)
+      assert state == %{@empty | research_finished_at: now}
+      assert {_, nil} = Autopilot.next_research(state, @settings, 0, DateTime.add(now, 59, :second))
+      assert {_, %Issue{id: "research:cleanup"}} = Autopilot.next_research(state, @settings, 0, DateTime.add(now, 60, :second))
+
+      # Channels removed from config drop out of a pending round.
+      stale = %{@empty | research_pending: ["removed", "testing"]}
+      assert {%{research_pending: ["testing"]}, %Issue{id: "research:testing"}} = Autopilot.next_research(stale, @settings, 0, now)
     end
 
     test "research items are synthetic, per channel, and never tracker backed" do
@@ -233,7 +248,7 @@ defmodule SymphonyElixir.AutopilotTest do
         {:ok, ^table} = Operations.open(path, table)
         assert Operations.autopilot_state(table) == @empty
 
-        saved = %{pr_handled: %{"7" => %{runs: 1, head_sha: "sha"}}, research_finished_at: ~U[2026-09-25 00:00:00Z]}
+        saved = %{pr_handled: %{"7" => %{runs: 1, head_sha: "sha"}}, research_finished_at: ~U[2026-09-25 00:00:00Z], research_pending: ["testing"]}
         :ok = Operations.save_autopilot_state(table, saved)
         :ok = Operations.close(table)
 
@@ -303,8 +318,14 @@ defmodule SymphonyElixir.AutopilotTest do
       # the run is still recorded at the head it was dispatched at.
       entry = Map.merge(running_entry(pull_request("2", "sha-fix"), ref), %{dispatched_head: "sha-2"})
 
+      # Research is cooling down, so idle polls leave the machine free for the pull request.
       :sys.replace_state(pid, fn state ->
-        %{state | running: %{"2" => entry}, claimed: MapSet.new(["2"])}
+        %{
+          state
+          | running: %{"2" => entry},
+            claimed: MapSet.new(["2"]),
+            autopilot: %{state.autopilot | research_finished_at: DateTime.utc_now()}
+        }
       end)
 
       send(pid, {:DOWN, ref, :process, self(), :normal})
@@ -323,32 +344,47 @@ defmodule SymphonyElixir.AutopilotTest do
       assert Map.has_key?(:sys.get_state(pid).running, "2")
     end
 
-    test "an idle queue starts one research run per channel, then waits for the cooldown" do
+    test "research runs one channel at a time and has the machine to itself" do
       write_autopilot_workflow!()
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
 
-      {pid, _name} = start_orchestrator!()
+      {pid, name} = start_orchestrator!()
       send(pid, :run_poll_cycle)
       state = :sys.get_state(pid)
 
-      assert state.running |> Map.keys() |> Enum.sort() == ["research:cleanup", "research:testing"]
+      assert Map.keys(state.running) == ["research:cleanup"]
+      assert state.autopilot.research_pending == ["cleanup", "testing"]
 
-      # Reconciliation must not treat research runs as missing tracker issues.
+      # Reconciliation must not treat research runs as missing tracker issues, and
+      # work that becomes ready waits for the running planner.
+      issue = %Issue{id: "1", identifier: "GH-1", title: "Filed", state: "open", dispatchable: true, labels: []}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
       send(pid, :run_poll_cycle)
-      state = :sys.get_state(pid)
-      assert map_size(state.running) == 2
+      assert Map.keys(:sys.get_state(pid).running) == ["research:cleanup"]
+      assert Orchestrator.snapshot(name, 5_000).autopilot.research_pending == ["cleanup", "testing"]
 
-      %{ref: ref, pid: worker} = state.running["research:cleanup"]
-      Process.exit(worker, :kill)
-      send(pid, {:DOWN, ref, :process, worker, :boom})
+      finish_running_research(pid, "research:cleanup")
       state = :sys.get_state(pid)
-
-      refute Map.has_key?(state.running, "research:cleanup")
-      refute Map.has_key?(state.retry_attempts, "research:cleanup")
       refute MapSet.member?(state.claimed, "research:cleanup")
+      refute Map.has_key?(state.retry_attempts, "research:cleanup")
+      assert state.autopilot.research_pending == ["testing"]
+      assert state.autopilot.research_finished_at == nil
+
+      # Ready work outranks the rest of the round.
+      send(pid, :run_poll_cycle)
+      assert Map.keys(:sys.get_state(pid).running) == ["1"]
+
+      # Once idle again, the round resumes with the next channel, then cools down.
+      :sys.replace_state(pid, fn state -> %{state | running: %{}, claimed: MapSet.new()} end)
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+      send(pid, :run_poll_cycle)
+      assert Map.keys(:sys.get_state(pid).running) == ["research:testing"]
+
+      finish_running_research(pid, "research:testing")
+      state = :sys.get_state(pid)
+      assert state.autopilot.research_pending == []
       assert %DateTime{} = state.autopilot.research_finished_at
 
-      :sys.replace_state(pid, fn state -> %{state | running: Map.delete(state.running, "research:testing")} end)
       send(pid, :run_poll_cycle)
       assert :sys.get_state(pid).running == %{}
     end
@@ -376,6 +412,12 @@ defmodule SymphonyElixir.AutopilotTest do
       labels: [],
       pull_request: %{number: String.to_integer(id), head_sha: head_sha, can_push: true, trusted: true}
     }
+  end
+
+  defp finish_running_research(pid, id) do
+    %{ref: ref, pid: worker} = :sys.get_state(pid).running[id]
+    Process.exit(worker, :kill)
+    send(pid, {:DOWN, ref, :process, worker, :boom})
   end
 
   defp running_entry(issue, ref) do

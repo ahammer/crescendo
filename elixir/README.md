@@ -289,12 +289,13 @@ codex:
    whose CI is pending and re-reviews only after a new push, up to `autopilot.max_pr_runs`.
 2. **Issues next.** Issues labeled `symphony` are implemented. The worker opens a pull request that
    closes the issue, then labels the issue `symphony:in-review`, which hands it to step 1.
-3. **Research when idle.** When nothing is ready, one research run per `autopilot.channels` entry
+3. **Research when idle.** When nothing is ready and no agent is running, a research round runs each
+   `autopilot.channels` entry in turn, one at a time with the machine to itself. Each run
    (`prompts/research.md`; default channels `cleanup`, `optimization`, `testing`) builds, tests,
    benchmarks, and exercises the product headed, then files between `min_issues_per_channel` and
    `max_issues_per_channel` evidence-backed `symphony` issues. `autopilot.research_route` runs
    research on a stronger model than the default issue route. Research pauses while
-   `max_open_issues` are open and for `research_cooldown_ms` after the last research run ends.
+   `max_open_issues` are open and for `research_cooldown_ms` after a round's last channel ends.
 
 Agents may abandon work: issues close as `not planned`, and pull requests close with a comment.
 `agent.max_attempts` stops retrying crashing runs. Add `symphony:hold` to any issue or pull request

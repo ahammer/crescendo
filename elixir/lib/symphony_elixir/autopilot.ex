@@ -9,7 +9,11 @@ defmodule SymphonyElixir.Autopilot do
 
   alias SymphonyElixir.Tracker.Issue
 
-  @type state :: %{pr_handled: %{optional(String.t()) => map()}, research_finished_at: DateTime.t() | nil}
+  @type state :: %{
+          pr_handled: %{optional(String.t()) => map()},
+          research_finished_at: DateTime.t() | nil,
+          research_pending: [String.t()]
+        }
 
   @research_state "research"
 
@@ -71,18 +75,44 @@ defmodule SymphonyElixir.Autopilot do
     %{state | pr_handled: Map.filter(state.pr_handled, fn {id, _} -> MapSet.member?(open_ids, id) end)}
   end
 
-  @spec record_research_finished(state(), DateTime.t()) :: state()
-  def record_research_finished(state, now), do: %{state | research_finished_at: now}
+  @doc """
+  Picks the next research channel to run, if any. Research runs as rounds:
+  a round covers every configured channel one at a time, so planners never
+  share the machine. An unfinished round continues without waiting for the
+  cooldown; a new round starts once the cooldown since the last round has
+  elapsed. Either way the open issue backlog must be below its cap. The caller
+  checks that the machine is otherwise idle.
+  """
+  @spec next_research(state(), map(), non_neg_integer(), DateTime.t()) :: {state(), Issue.t() | nil}
+  def next_research(state, autopilot_settings, open_issue_count, now) do
+    channels = autopilot_settings.channels |> Map.keys() |> Enum.sort()
+    pending = Enum.filter(Map.get(state, :research_pending, []), &(&1 in channels))
+
+    cond do
+      not autopilot_settings.enabled or open_issue_count >= autopilot_settings.max_open_issues ->
+        {state, nil}
+
+      pending != [] ->
+        {%{state | research_pending: pending}, research_item(autopilot_settings, hd(pending))}
+
+      cooled_down?(state.research_finished_at, autopilot_settings.research_cooldown_ms, now) ->
+        {%{state | research_pending: channels}, research_item(autopilot_settings, hd(channels))}
+
+      true ->
+        {state, nil}
+    end
+  end
 
   @doc """
-  Whether a research round may start: autopilot is on, the cooldown since the
-  last research run has elapsed, and the open issue backlog is below its cap.
-  The caller checks that no work is ready and no research is running.
+  Ends one channel's research run, whatever its outcome. The cooldown starts
+  when the round's last channel finishes.
   """
-  @spec research_due?(state(), map(), non_neg_integer(), DateTime.t()) :: boolean()
-  def research_due?(state, autopilot_settings, open_issue_count, now) do
-    autopilot_settings.enabled and open_issue_count < autopilot_settings.max_open_issues and
-      cooled_down?(state.research_finished_at, autopilot_settings.research_cooldown_ms, now)
+  @spec record_research_finished(state(), String.t(), DateTime.t()) :: state()
+  def record_research_finished(state, channel, now) do
+    case List.delete(Map.get(state, :research_pending, []), channel) do
+      [] -> %{state | research_pending: [], research_finished_at: now}
+      pending -> %{state | research_pending: pending}
+    end
   end
 
   defp cooled_down?(nil, _cooldown_ms, _now), do: true
@@ -92,23 +122,28 @@ defmodule SymphonyElixir.Autopilot do
   @spec research_items(map()) :: [Issue.t()]
   def research_items(autopilot_settings) do
     autopilot_settings.channels
+    |> Map.keys()
     |> Enum.sort()
-    |> Enum.map(fn {channel, focus} ->
-      %Issue{
-        id: "research:#{channel}",
-        kind: :research,
-        identifier: "research-#{channel}",
-        title: "Research #{channel} improvements",
-        state: @research_state,
-        labels: ["symphony:research", "symphony:channel:#{channel}"],
-        dispatchable: true,
-        research: %{
-          channel: channel,
-          focus: focus,
-          min_issues: autopilot_settings.min_issues_per_channel,
-          max_issues: autopilot_settings.max_issues_per_channel
-        }
+    |> Enum.map(&research_item(autopilot_settings, &1))
+  end
+
+  defp research_item(autopilot_settings, channel) do
+    focus = Map.fetch!(autopilot_settings.channels, channel)
+
+    %Issue{
+      id: "research:#{channel}",
+      kind: :research,
+      identifier: "research-#{channel}",
+      title: "Research #{channel} improvements",
+      state: @research_state,
+      labels: ["symphony:research", "symphony:channel:#{channel}"],
+      dispatchable: true,
+      research: %{
+        channel: channel,
+        focus: focus,
+        min_issues: autopilot_settings.min_issues_per_channel,
+        max_issues: autopilot_settings.max_issues_per_channel
       }
-    end)
+    }
   end
 end
