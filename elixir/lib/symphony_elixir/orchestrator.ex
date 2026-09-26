@@ -1768,6 +1768,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     %{
       enabled: settings.enabled,
+      channels: settings.channels |> Map.keys() |> Enum.sort(),
       research_running: Enum.count(state.running, fn {_id, entry} -> research_entry?(entry) end),
       research_pending: state.autopilot.research_pending,
       research_finished_at: finished_at,

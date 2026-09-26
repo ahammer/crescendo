@@ -322,13 +322,17 @@ defmodule SymphonyElixir.ExtensionsTest do
                "today" => %{"input_tokens" => 0, "cached_input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0, "usd_micro" => 0, "unpriced_tokens" => 0},
                "recorded" => %{"input_tokens" => 0, "cached_input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0, "usd_micro" => 0, "unpriced_tokens" => 0},
                "by_model" => [],
-               "activity" => []
+               "activity" => [],
+               "daily" => state_payload["usage"]["daily"]
              },
              "usage_error" => nil,
              "upcoming" => %{"ready" => [], "waiting" => [], "observed_at" => nil, "error" => nil, "available_slots" => nil},
              "autopilot" => %{"enabled" => false},
              "pull_requests" => %{"items" => [], "observed_at" => nil, "error" => nil, "enabled" => false}
            }
+
+    assert length(state_payload["usage"]["daily"]) == 14
+    assert List.last(state_payload["usage"]["daily"])["date"] == Date.utc_today() |> Date.to_iso8601()
 
     conn = get(build_conn(), "/api/v1/MT-HTTP")
     issue_payload = json_response(conn, 200)

@@ -175,7 +175,17 @@ defmodule SymphonyElixir.Operations do
   end
 
   @spec snapshot(handle()) :: map()
-  def snapshot(nil), do: %{status: "unavailable", pricing_as_of: @price_date, today: empty_usage(), recorded: empty_usage(), by_model: [], activity: []}
+  def snapshot(nil) do
+    %{
+      status: "unavailable",
+      pricing_as_of: @price_date,
+      today: empty_usage(),
+      recorded: empty_usage(),
+      by_model: [],
+      activity: [],
+      daily: daily_series(%{}, [])
+    }
+  end
 
   def snapshot(table) do
     do_snapshot(table)
@@ -192,21 +202,23 @@ defmodule SymphonyElixir.Operations do
   defp do_snapshot(table) do
     today = Date.utc_today() |> Date.to_iso8601()
 
-    {recorded, daily, by_model, model_runs, events} =
+    {recorded, daily, by_model, model_runs, events, spend} =
       :dets.foldl(
         fn
-          {{:usage, run, date, model}, value}, {all, day, models, runs, events} ->
+          {{:usage, run, date, model}, value}, {all, day, models, runs, events, spend} ->
             models = Map.update(models, model, Map.take(value, Map.keys(empty_usage())), &add_usage(&1, value))
             runs = Map.update(runs, model, MapSet.new([run]), &MapSet.put(&1, run))
-            {add_usage(all, value), if(date == today, do: add_usage(day, value), else: day), models, runs, events}
+            spend = Map.update(spend, {date, model}, value.usd_micro, &(&1 + value.usd_micro))
+            day = if date == today, do: add_usage(day, value), else: day
+            {add_usage(all, value), day, models, runs, events, spend}
 
-          {{:event, sequence}, entry}, {all, day, models, runs, events} ->
-            {all, day, models, runs, [{sequence, entry} | events]}
+          {{:event, sequence}, entry}, {all, day, models, runs, events, spend} ->
+            {all, day, models, runs, [{sequence, entry} | events], spend}
 
           _, acc ->
             acc
         end,
-        {empty_usage(), empty_usage(), %{}, %{}, []},
+        {empty_usage(), empty_usage(), %{}, %{}, [], %{}},
         table
       )
 
@@ -216,8 +228,40 @@ defmodule SymphonyElixir.Operations do
       today: daily,
       recorded: recorded,
       by_model: by_model |> Enum.map(fn {model, usage} -> usage |> Map.put(:model, model) |> Map.put(:runs, model_runs |> Map.fetch!(model) |> MapSet.size()) end) |> Enum.sort_by(& &1.model),
-      activity: events |> Enum.sort_by(fn {sequence, _} -> -sequence end) |> Enum.take(100) |> Enum.map(&elem(&1, 1))
+      activity: events |> Enum.sort_by(fn {sequence, _} -> -sequence end) |> Enum.take(100) |> Enum.map(&elem(&1, 1)),
+      daily: daily_series(spend, Enum.map(events, &elem(&1, 1)))
     }
+  end
+
+  @series_days 14
+  @outcome_kinds %{"completed" => :completed, "failed" => :failed, "interrupted" => :interrupted, "pr_merged" => :merged}
+
+  # The last two weeks (UTC), oldest first: estimated spend per model plus run
+  # outcomes and merged pull requests counted from the retained event ring.
+  defp daily_series(spend, events) do
+    today = Date.utc_today()
+    dates = for offset <- (@series_days - 1)..0//-1, do: today |> Date.add(-offset) |> Date.to_iso8601()
+
+    outcomes =
+      Enum.reduce(events, %{}, fn event, acc ->
+        with kind when is_atom(kind) <- Map.get(@outcome_kinds, event[:kind]),
+             at when is_binary(at) <- event[:at] do
+          Map.update(acc, {String.slice(at, 0, 10), kind}, 1, &(&1 + 1))
+        else
+          _ -> acc
+        end
+      end)
+
+    Enum.map(dates, fn date ->
+      %{
+        date: date,
+        spend_by_model: for({{^date, model}, usd_micro} <- spend, usd_micro > 0, into: %{}, do: {model, usd_micro}),
+        completed: Map.get(outcomes, {date, :completed}, 0),
+        failed: Map.get(outcomes, {date, :failed}, 0),
+        interrupted: Map.get(outcomes, {date, :interrupted}, 0),
+        merged: Map.get(outcomes, {date, :merged}, 0)
+      }
+    end)
   end
 
   defp interrupt_active_runs(table) do
