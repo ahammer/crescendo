@@ -54,7 +54,7 @@ defmodule SymphonyElixir.Orchestrator do
       next_pulls_due_at_ms: 0,
       codex_totals: nil,
       codex_rate_limits: nil,
-      autopilot: %{pr_handled: %{}, research_finished_at: nil, research_pending: []}
+      autopilot: %{pr_handled: %{}, research_finished_at: nil, research_pending: [], item_attempts: %{}}
     ]
   end
 
@@ -353,7 +353,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
 
-    block_issue_from_entry(state, issue_id, running_entry, error)
+    fail_attempt_or_block(state, issue_id, running_entry, error, "Operator input or approval required")
   end
 
   defp retry_agent_down(state, issue_id, running_entry, session_id, reason) do
@@ -376,8 +376,8 @@ defmodule SymphonyElixir.Orchestrator do
 
     if is_integer(max_attempts) and attempt > max_attempts do
       error = "gave up after #{max_attempts} attempts; last error: #{metadata.error}"
-      Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{metadata.identifier}; #{error}")
-      block_issue_from_entry(state, issue_id, running_entry, error, "Gave up after #{max_attempts} attempts")
+      Logger.warning("Issue failed: issue_id=#{issue_id} issue_identifier=#{metadata.identifier}; #{error}")
+      fail_attempt_or_block(state, issue_id, running_entry, error, "Gave up after #{max_attempts} attempts")
     else
       schedule_issue_retry(state, issue_id, attempt, metadata)
     end
@@ -400,6 +400,7 @@ defmodule SymphonyElixir.Orchestrator do
         }
         |> put_autopilot(Autopilot.prune_pull_requests(state.autopilot, issues))
 
+      {state, issues} = settle_autopilot_items(state, issues)
       state = if available_slots(state) > 0, do: choose_issues(issues, state), else: state
       maybe_dispatch_research(state, issues)
     else
@@ -895,7 +896,60 @@ defmodule SymphonyElixir.Orchestrator do
 
     record_stopped_run(state, running_entry, "Worker stopped for operator input")
 
-    block_issue_from_entry(state, issue_id, running_entry, error)
+    fail_attempt_or_block(state, issue_id, running_entry, error, "Operator input or approval required")
+  end
+
+  # Autopilot never parks work: a failed run counts one attempt, the item goes
+  # back behind other work, and it is retired after `max_item_attempts`.
+  # Without autopilot the item is blocked for an operator as before.
+  defp fail_attempt_or_block(state, issue_id, running_entry, error, summary) do
+    case Map.get(running_entry, :issue) do
+      %Issue{kind: kind} = issue when kind != :research ->
+        if Config.settings!().autopilot.enabled do
+          state
+          |> Map.update!(:running, &Map.delete(&1, issue_id))
+          |> record_failed_attempt(issue, error)
+        else
+          block_issue_from_entry(state, issue_id, running_entry, error, summary)
+        end
+
+      _ ->
+        block_issue_from_entry(state, issue_id, running_entry, error, summary)
+    end
+  end
+
+  defp record_failed_attempt(state, %Issue{} = issue, reason) do
+    settings = Config.settings!().autopilot
+    {autopilot, attempts} = Autopilot.record_failed_attempt(state.autopilot, issue.id)
+
+    Logger.info("Autopilot attempt failed: #{issue_context(issue)} attempt=#{attempts}/#{settings.max_item_attempts} reason=#{inspect(reason)}")
+
+    Operations.event(state.operations, "attempt_failed", %{
+      issue_identifier: issue.identifier,
+      issue_url: issue.url,
+      summary: "Attempt #{attempts}/#{settings.max_item_attempts}: #{reason}"
+    })
+
+    state = state |> put_autopilot(autopilot) |> release_issue_claim(issue.id)
+    if attempts >= settings.max_item_attempts, do: retire_item(state, issue, reason), else: state
+  end
+
+  defp retire_item(state, %Issue{} = issue, reason) do
+    comment =
+      "Symphony retired this #{if issue.kind == :pull_request, do: "pull request", else: "issue"} " <>
+        "after exhausting its attempts, so it will not be retried. Last blocker: #{reason}"
+
+    case Tracker.retire(issue, comment) do
+      :ok ->
+        Logger.info("Autopilot retired #{issue_context(issue)}: #{reason}")
+        Operations.event(state.operations, "retired", %{issue_identifier: issue.identifier, issue_url: issue.url, summary: reason})
+        cleanup_issue_workspace(issue)
+
+      {:error, error} ->
+        Logger.warning("Autopilot could not retire #{issue_context(issue)}: #{inspect(error)}; retrying next poll")
+    end
+
+    state
   end
 
   # A stopped task delivers no :DOWN, so its run is closed here; otherwise the
@@ -909,7 +963,7 @@ defmodule SymphonyElixir.Orchestrator do
     })
   end
 
-  defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error, summary \\ "Operator input or approval required") do
+  defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error, summary) do
     Operations.event(state.operations, "blocked", %{
       issue_identifier: Map.get(running_entry, :identifier, issue_id),
       issue_url: Map.get(Map.get(running_entry, :issue) || %{}, :url),
@@ -939,12 +993,65 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
+  # Consumes blocked markers left by workers (each is one failed attempt) and
+  # retires items that exhausted their attempts or review runs, so nothing waits
+  # on an operator. Returns the items still eligible for this poll.
+  defp settle_autopilot_items(%State{} = state, issues) do
+    settings = Config.settings!().autopilot
+
+    if settings.enabled do
+      {kept, state} = Enum.flat_map_reduce(issues, state, &settle_autopilot_item(&2, &1, settings))
+      {state, kept}
+    else
+      {state, issues}
+    end
+  end
+
+  defp settle_autopilot_item(state, %Issue{} = issue, settings) do
+    case autopilot_item_status(state, issue, settings) do
+      :blocked -> consume_blocked_marker(state, issue, settings)
+      :exhausted -> {[], retire_item(state, issue, "attempts exhausted")}
+      :review_capped -> {[], retire_item(state, issue, "review run cap reached without merging")}
+      :active -> {[issue], state}
+    end
+  end
+
+  defp autopilot_item_status(state, issue, settings) do
+    cond do
+      Map.has_key?(state.running, issue.id) or not Issue.tracker_backed?(issue) -> :active
+      issue.kind == :issue and settings.blocked_label in Issue.label_names(issue) -> :blocked
+      issue.kind == :issue and Autopilot.exhausted?(state.autopilot, issue.id, settings) -> :exhausted
+      review_capped?(state, issue, settings) -> :review_capped
+      true -> :active
+    end
+  end
+
+  defp review_capped?(state, %Issue{kind: :pull_request} = issue, settings),
+    do: Autopilot.pull_request_waiting_reason(issue, state.autopilot, settings) == "review run cap reached"
+
+  defp review_capped?(_state, _issue, _settings), do: false
+
+  # A worker ends a failed attempt with the blocked label; clearing it here
+  # records the attempt exactly once and requeues the item behind fresh work.
+  defp consume_blocked_marker(state, issue, settings) do
+    case Tracker.clear_label(issue, settings.blocked_label) do
+      :ok ->
+        state = record_failed_attempt(state, issue, "worker reported a blocker (see workpad)")
+        remaining = %{issue | labels: List.delete(issue.labels, settings.blocked_label)}
+        {if(Autopilot.exhausted?(state.autopilot, issue.id, settings), do: [], else: [remaining]), state}
+
+      {:error, error} ->
+        Logger.warning("Could not clear #{settings.blocked_label} on #{issue_context(issue)}: #{inspect(error)}")
+        {[issue], state}
+    end
+  end
+
   defp choose_issues(issues, state) do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
 
     issues
-    |> sort_issues_for_dispatch()
+    |> sort_issues_for_dispatch(state.autopilot)
     |> Enum.reduce(state, fn issue, state_acc ->
       if should_dispatch_issue?(issue, state_acc, active_states, terminal_states) do
         dispatch_issue(state_acc, issue)
@@ -954,13 +1061,15 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  defp sort_issues_for_dispatch(issues) when is_list(issues) do
+  # Items that already failed go behind fresh work, so a blocked item is
+  # retried later instead of starving the queue.
+  defp sort_issues_for_dispatch(issues, autopilot \\ %{}) when is_list(issues) do
     Enum.sort_by(issues, fn
       %Issue{} = issue ->
-        {kind_rank(issue.kind), priority_rank(issue.priority), issue_created_at_sort_key(issue), issue.identifier || issue.id || ""}
+        {kind_rank(issue.kind), Autopilot.failed_attempts(autopilot, issue.id), priority_rank(issue.priority), issue_created_at_sort_key(issue), issue.identifier || issue.id || ""}
 
       _ ->
-        {kind_rank(nil), priority_rank(nil), issue_created_at_sort_key(nil), ""}
+        {kind_rank(nil), 0, priority_rank(nil), issue_created_at_sort_key(nil), ""}
     end)
   end
 
@@ -1147,8 +1256,17 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
+    settings = Config.settings!().autopilot
+    item_attempt = Autopilot.failed_attempts(state.autopilot, issue.id) + 1
+    final_attempt = settings.enabled and issue.kind == :issue and Autopilot.final_attempt?(state.autopilot, issue.id, settings)
+
     case Task.Supervisor.start_child(state.task_supervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           AgentRunner.run(issue, recipient,
+             attempt: attempt,
+             worker_host: worker_host,
+             item_attempt: item_attempt,
+             final_attempt: final_attempt
+           )
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -1181,6 +1299,8 @@ defmodule SymphonyElixir.Orchestrator do
             retry_attempt: normalize_retry_attempt(attempt),
             # Reconciliation refreshes `issue`; the reviewed head stays the dispatched one.
             dispatched_head: Autopilot.dispatched_head(issue),
+            item_attempt: item_attempt,
+            final_attempt: final_attempt,
             started_at: DateTime.utc_now()
           })
 
@@ -1709,6 +1829,8 @@ defmodule SymphonyElixir.Orchestrator do
           pull_request: metadata.issue.pull_request,
           research: metadata.issue.research,
           attempt: Map.get(metadata, :retry_attempt, 0),
+          item_attempt: Map.get(metadata, :item_attempt, 1),
+          final_attempt: Map.get(metadata, :final_attempt, false),
           recent_events: Map.get(metadata, :recent_events, []),
           codex_cached_input_tokens: Map.get(metadata, :codex_cached_input_tokens, 0),
           run_usage: Operations.run_usage(state.operations, Map.get(metadata, :run_id)),
@@ -2511,11 +2633,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp item_waiting_reason(issue, state) do
-    labels = MapSet.new(Issue.label_names(issue), &String.downcase/1)
     config = Config.settings!()
 
     cond do
-      MapSet.member?(labels, "symphony:needs-attention") -> "needs attention"
       label = Issue.excluded_label(issue, config.tracker.excluded_labels) -> "excluded by #{label}"
       reason = pull_request_admission_reason(issue) -> reason
       true -> Autopilot.pull_request_waiting_reason(issue, state.autopilot, config.autopilot)

@@ -298,8 +298,12 @@ codex:
    research on a stronger model than the default issue route. Research pauses while
    `max_open_issues` are open and for `research_cooldown_ms` after a round's last channel ends.
 
-Agents may abandon work: issues close as `not planned`, and pull requests close with a comment.
-`agent.max_attempts` stops retrying crashing runs. Add `symphony:hold` to any issue or pull request
+Nothing is parked waiting for an operator. A worker that hits a blocker records it and adds
+`symphony:blocked`; Symphony counts a failed attempt, clears the label, and retries the issue behind
+other work. Exhausted crash retries and stops for operator input count the same way. The third
+attempt (`autopilot.max_item_attempts`) is final: the worker delivers, splits and delivers, or closes
+the issue, and if it still fails Symphony closes the issue as not planned along with its draft pull
+requests. Pull requests that reach `max_pr_runs` without merging are closed too. Add `symphony:hold` to any issue or pull request
 to stop and hold it. Handled pull request heads and the research cooldown survive restarts.
 
 ```bash

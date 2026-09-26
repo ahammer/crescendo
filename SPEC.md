@@ -2356,7 +2356,10 @@ Extension config (`autopilot` object):
   issues carry every `tracker.required_labels` label.
 - `research_cooldown_ms` (non-negative integer, default `1800000`): minimum time between the end of
   the last research run and the next research round.
-- `max_pr_runs` (positive integer, default `5`): review runs per pull request.
+- `max_pr_runs` (positive integer, default `5`): review runs per pull request; a pull request that
+  reaches it without merging is retired (commented and closed).
+- `max_item_attempts` (positive integer, default `3`) and `blocked_label` (default
+  `symphony:blocked`): see B.3. The blocked label is added to `tracker.excluded_labels`.
 - `trusted_associations` (list, default `[OWNER, MEMBER, COLLABORATOR]`) and `trusted_authors`
   (list of logins, default `[]`): pull request authors trusted to have their code run and merged.
 - `prompts.pull_request` and `prompts.research` (paths relative to `WORKFLOW.md`, REQUIRED when
@@ -2400,7 +2403,24 @@ Work items carry a `kind`:
 - Handled heads, per-PR run counts, the channels left in the current round, and the last round's
   finish time persist across restarts.
 
-### B.3 Workflow Contract
+### B.3 Attempts and Retirement
+
+Autopilot never parks work waiting for an operator.
+
+- A failed attempt is any of: a worker ending its run with `blocked_label` on the issue, crash
+  retries exhausting `agent.max_attempts`, or a stop for operator input or approval. The
+  orchestrator records it (persisted), clears the label, and requeues the item; items sort behind
+  others with fewer failed attempts.
+- The run after `max_item_attempts - 1` failures is the final attempt; prompts receive
+  `item_attempt` and `final_attempt`. A final attempt should deliver, split and deliver (land the
+  verified part and file a follow-up for the rest), or close the item as not planned.
+- When an item reaches `max_item_attempts` failed attempts, the orchestrator retires it through the
+  tracker: a comment with the last blocker, closing it as not planned, and closing its open draft
+  pull requests (those referencing `#N` or on an `issue-N` branch).
+- Adapters implement the optional tracker writes `clear_label/2` and `retire/2`; an adapter without
+  them reports `unsupported_tracker_operation` and the item is retried on the next poll.
+
+### B.4 Workflow Contract
 
 The reference `WORKFLOW.autopilot.md` uses these conventions:
 

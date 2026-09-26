@@ -12,7 +12,8 @@ defmodule SymphonyElixir.Autopilot do
   @type state :: %{
           pr_handled: %{optional(String.t()) => map()},
           research_finished_at: DateTime.t() | nil,
-          research_pending: [String.t()]
+          research_pending: [String.t()],
+          item_attempts: %{optional(String.t()) => pos_integer()}
         }
 
   @research_state "research"
@@ -68,12 +69,41 @@ defmodule SymphonyElixir.Autopilot do
   def dispatched_head(%Issue{kind: :pull_request, pull_request: %{head_sha: head_sha}}), do: head_sha
   def dispatched_head(%Issue{}), do: nil
 
-  @doc "Drops handled records for pull requests that are no longer open."
+  @doc "Drops pull request and attempt records for items that are no longer open."
   @spec prune_pull_requests(state(), [Issue.t()]) :: state()
   def prune_pull_requests(state, open_issues) do
-    open_ids = for %Issue{kind: :pull_request, id: id} <- open_issues, into: MapSet.new(), do: id
-    %{state | pr_handled: Map.filter(state.pr_handled, fn {id, _} -> MapSet.member?(open_ids, id) end)}
+    open_prs = for %Issue{kind: :pull_request, id: id} <- open_issues, into: MapSet.new(), do: id
+    open_items = for %Issue{id: id} <- open_issues, into: MapSet.new(), do: id
+
+    state
+    |> Map.put(:pr_handled, Map.filter(state.pr_handled, fn {id, _} -> MapSet.member?(open_prs, id) end))
+    |> Map.put(:item_attempts, state |> item_attempts() |> Map.filter(fn {id, _} -> MapSet.member?(open_items, id) end))
   end
+
+  @doc """
+  Records one failed attempt at an item (a blocked run, exhausted crash
+  retries, or a stop for operator input). Nothing is parked: the item is
+  retried behind other work until `max_item_attempts`, then retired.
+  """
+  @spec record_failed_attempt(state(), String.t()) :: {state(), pos_integer()}
+  def record_failed_attempt(state, id) do
+    attempts = Map.get(item_attempts(state), id, 0) + 1
+    {Map.put(state, :item_attempts, Map.put(item_attempts(state), id, attempts)), attempts}
+  end
+
+  @spec failed_attempts(state(), String.t()) :: non_neg_integer()
+  def failed_attempts(state, id), do: Map.get(item_attempts(state), id, 0)
+
+  @doc "Whether the item has used up its attempts and must be retired."
+  @spec exhausted?(state(), String.t(), map()) :: boolean()
+  def exhausted?(state, id, autopilot_settings), do: failed_attempts(state, id) >= autopilot_settings.max_item_attempts
+
+  @doc "Whether the next run of the item is its last chance to deliver."
+  @spec final_attempt?(state(), String.t(), map()) :: boolean()
+  def final_attempt?(state, id, autopilot_settings),
+    do: failed_attempts(state, id) + 1 >= autopilot_settings.max_item_attempts
+
+  defp item_attempts(state), do: Map.get(state, :item_attempts, %{})
 
   @doc """
   Picks the next research channel to run, if any. Research runs as rounds:

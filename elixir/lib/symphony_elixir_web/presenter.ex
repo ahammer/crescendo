@@ -143,6 +143,8 @@ defmodule SymphonyElixirWeb.Presenter do
       pull_request: Map.get(entry, :pull_request),
       research: Map.get(entry, :research),
       attempt: Map.get(entry, :attempt, 0),
+      item_attempt: Map.get(entry, :item_attempt, 1),
+      final_attempt: Map.get(entry, :final_attempt, false),
       recent_events: Enum.map(Map.get(entry, :recent_events, []), &%{at: iso8601(&1.at), event: &1.event, text: &1.text}),
       cost: %{run: Map.get(entry, :run_usage), item: Map.get(entry, :item_usage)},
       last_event: entry.last_codex_event,

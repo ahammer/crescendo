@@ -25,10 +25,14 @@ defmodule SymphonyElixir.Tracker do
   @callback execute_agent_tool(String.t(), term(), keyword()) :: map()
   @callback secret_environment_names(map()) :: [String.t()]
   @callback validate_config(map()) :: :ok | {:error, term()}
+  @callback clear_label(Issue.t(), String.t()) :: :ok | {:error, term()}
+  @callback retire(Issue.t(), String.t()) :: :ok | {:error, term()}
 
   @optional_callbacks agent_tool_specs: 0,
                       execute_agent_tool: 3,
-                      validate_config: 1
+                      validate_config: 1,
+                      clear_label: 2,
+                      retire: 2
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(states) do
@@ -38,6 +42,27 @@ defmodule SymphonyElixir.Tracker do
   @spec fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_ids(issue_ids) do
     adapter().fetch_issues_by_ids(issue_ids)
+  end
+
+  @doc "Removes a label from a work item (autopilot consumes the blocked marker)."
+  @spec clear_label(Issue.t(), String.t()) :: :ok | {:error, term()}
+  def clear_label(%Issue{} = issue, label), do: call_optional(:clear_label, [issue, label])
+
+  @doc """
+  Closes a work item as not planned with a comment explaining why, along with
+  any open draft pull requests that belong to it. Autopilot uses this when an
+  item exhausts its attempts, so nothing stays parked.
+  """
+  @spec retire(Issue.t(), String.t()) :: :ok | {:error, term()}
+  def retire(%Issue{} = issue, reason), do: call_optional(:retire, [issue, reason])
+
+  defp call_optional(function, args) do
+    adapter = adapter()
+    Code.ensure_loaded(adapter)
+
+    if function_exported?(adapter, function, length(args)),
+      do: apply(adapter, function, args),
+      else: {:error, {:unsupported_tracker_operation, function}}
   end
 
   @doc """

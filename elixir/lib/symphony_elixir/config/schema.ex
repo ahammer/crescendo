@@ -327,6 +327,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:max_open_issues, :integer, default: 10)
       field(:research_cooldown_ms, :integer, default: 1_800_000)
       field(:max_pr_runs, :integer, default: 5)
+      field(:max_item_attempts, :integer, default: 3)
+      field(:blocked_label, :string, default: "symphony:blocked")
       field(:trusted_associations, {:array, :string}, default: ["OWNER", "MEMBER", "COLLABORATOR"])
       field(:trusted_authors, {:array, :string}, default: [])
       field(:prompts, :map, default: %{})
@@ -349,6 +351,8 @@ defmodule SymphonyElixir.Config.Schema do
           :max_open_issues,
           :research_cooldown_ms,
           :max_pr_runs,
+          :max_item_attempts,
+          :blocked_label,
           :trusted_associations,
           :trusted_authors,
           :prompts
@@ -367,6 +371,8 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:max_open_issues, greater_than: 0)
       |> validate_number(:research_cooldown_ms, greater_than_or_equal_to: 0)
       |> validate_number(:max_pr_runs, greater_than: 0)
+      |> validate_number(:max_item_attempts, greater_than: 0)
+      |> update_change(:blocked_label, &(&1 |> String.trim() |> String.downcase()))
       |> update_change(:trusted_associations, fn values -> Enum.map(values, &(String.trim(&1) |> String.upcase())) end)
       |> update_change(:trusted_authors, fn values -> Enum.map(values, &(String.trim(&1) |> String.downcase())) end)
       |> validate_change(:channels, &validate_channels/2)
@@ -507,6 +513,14 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:autopilot, with: &Autopilot.changeset/2)
   end
 
+  # Under autopilot a worker ends a failed attempt by adding the blocked label;
+  # excluding it stops the item from being redispatched until the orchestrator
+  # records the attempt and clears the label.
+  defp exclude_blocked_label(tracker, %{enabled: true, blocked_label: label}) when is_binary(label) and label != "",
+    do: %{tracker | excluded_labels: Enum.uniq(tracker.excluded_labels ++ [label])}
+
+  defp exclude_blocked_label(tracker, _autopilot), do: tracker
+
   defp finalize_settings(settings) do
     provider = normalize_optional_map(settings.tracker.provider) || %{}
 
@@ -572,7 +586,7 @@ defmodule SymphonyElixir.Config.Schema do
         turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
     }
 
-    %{settings | tracker: tracker, workspace: workspace, codex: codex}
+    %{settings | tracker: exclude_blocked_label(tracker, settings.autopilot), workspace: workspace, codex: codex}
   end
 
   defp normalize_keys(value) when is_map(value) do

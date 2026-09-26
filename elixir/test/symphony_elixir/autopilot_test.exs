@@ -10,10 +10,11 @@ defmodule SymphonyElixir.AutopilotTest do
     max_issues_per_channel: 2,
     max_open_issues: 3,
     research_cooldown_ms: 60_000,
-    max_pr_runs: 2
+    max_pr_runs: 2,
+    max_item_attempts: 3
   }
 
-  @empty %{pr_handled: %{}, research_finished_at: nil, research_pending: []}
+  @empty %{pr_handled: %{}, research_finished_at: nil, research_pending: [], item_attempts: %{}}
 
   defmodule CiClient do
     def fetch_commit_ci_state(sha) do
@@ -69,6 +70,40 @@ defmodule SymphonyElixir.AutopilotTest do
 
       assert Autopilot.prune_pull_requests(state, [%Issue{kind: :issue, id: "7"}]).pr_handled == %{}
       assert Autopilot.prune_pull_requests(state, [pr]).pr_handled == state.pr_handled
+    end
+  end
+
+  describe "attempt policy" do
+    test "failed attempts accumulate to a final attempt, then exhaust" do
+      refute Autopilot.final_attempt?(@empty, "5", @settings)
+      {state, 1} = Autopilot.record_failed_attempt(@empty, "5")
+      refute Autopilot.final_attempt?(state, "5", @settings)
+      {state, 2} = Autopilot.record_failed_attempt(state, "5")
+      assert Autopilot.final_attempt?(state, "5", @settings)
+      refute Autopilot.exhausted?(state, "5", @settings)
+      {state, 3} = Autopilot.record_failed_attempt(state, "5")
+      assert Autopilot.exhausted?(state, "5", @settings)
+      assert Autopilot.failed_attempts(state, "6") == 0
+
+      assert Autopilot.prune_pull_requests(state, [%Issue{id: "5"}]).item_attempts == %{"5" => 3}
+      assert Autopilot.prune_pull_requests(state, []).item_attempts == %{}
+      # State persisted before attempts were tracked still loads.
+      assert Autopilot.failed_attempts(Map.delete(@empty, :item_attempts), "5") == 0
+    end
+  end
+
+  describe "tracker writes" do
+    test "trackers without write support report it instead of failing silently" do
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
+      issue = %Issue{id: "x", identifier: "MT-1"}
+      assert {:error, {:unsupported_tracker_operation, :retire}} = Tracker.retire(issue, "why")
+      assert {:error, {:unsupported_tracker_operation, :clear_label}} = Tracker.clear_label(issue, "symphony:blocked")
+    end
+
+    test "final and item attempt numbers render into prompts" do
+      write_workflow_file!(Workflow.workflow_file_path(), prompt: "{{ item_attempt }}{% if final_attempt %} final{% endif %}")
+      assert PromptBuilder.build_prompt(%Issue{identifier: "GH-1"}) == "1"
+      assert PromptBuilder.build_prompt(%Issue{identifier: "GH-1"}, item_attempt: 3, final_attempt: true) == "3 final"
     end
   end
 
@@ -133,6 +168,7 @@ defmodule SymphonyElixir.AutopilotTest do
           enabled: true,
           trusted_associations: [" owner "],
           trusted_authors: [" AdamH "],
+          blocked_label: " Symphony:Blocked ",
           prompts: %{pull_request: "prompts/pr.md", research: "prompts/research.md"}
         }
       )
@@ -141,6 +177,8 @@ defmodule SymphonyElixir.AutopilotTest do
       autopilot = Config.settings!().autopilot
       assert autopilot.trusted_associations == ["OWNER"]
       assert autopilot.trusted_authors == ["adamh"]
+      assert autopilot.blocked_label == "symphony:blocked"
+      assert "symphony:blocked" in Config.settings!().tracker.excluded_labels
       assert Map.keys(autopilot.channels) == ["cleanup", "optimization", "testing"]
 
       assert PromptBuilder.build_prompt(pull_request("7", "sha-1")) == "Review PR-7 at sha-1 (pull_request)"
@@ -168,6 +206,7 @@ defmodule SymphonyElixir.AutopilotTest do
         {%{channels: %{"Bad Name" => "x"}}, "autopilot.channels"},
         {%{prompts: %{other: "x.md"}}, "autopilot.prompts"},
         {%{max_pr_runs: 0}, "autopilot.max_pr_runs"},
+        {%{max_item_attempts: 0}, "autopilot.max_item_attempts"},
         {%{min_issues_per_channel: 4, max_issues_per_channel: 3}, "autopilot.min_issues_per_channel"},
         {%{research_route: %{model: "astra", effort: "extreme"}}, "autopilot.research_route"}
       ]
@@ -203,7 +242,7 @@ defmodule SymphonyElixir.AutopilotTest do
         assert :ok = Config.validate!()
         settings = Config.settings!()
         assert settings.autopilot.enabled
-        assert settings.tracker.excluded_labels == ["symphony:in-review", "symphony:hold", "symphony:needs-attention"]
+        assert settings.tracker.excluded_labels == ["symphony:in-review", "symphony:hold", "symphony:blocked"]
 
         issue = %Issue{id: "5", identifier: "GH-5", title: "Fix it", state: "open", url: "https://github.test/5", labels: ["symphony"]}
         assert PromptBuilder.build_prompt(issue, attempt: 2) =~ "symphony/gh-5"
@@ -248,7 +287,13 @@ defmodule SymphonyElixir.AutopilotTest do
         {:ok, ^table} = Operations.open(path, table)
         assert Operations.autopilot_state(table) == @empty
 
-        saved = %{pr_handled: %{"7" => %{runs: 1, head_sha: "sha"}}, research_finished_at: ~U[2026-09-25 00:00:00Z], research_pending: ["testing"]}
+        saved = %{
+          pr_handled: %{"7" => %{runs: 1, head_sha: "sha"}},
+          research_finished_at: ~U[2026-09-25 00:00:00Z],
+          research_pending: ["testing"],
+          item_attempts: %{"9" => 2}
+        }
+
         :ok = Operations.save_autopilot_state(table, saved)
         :ok = Operations.close(table)
 
@@ -455,6 +500,76 @@ defmodule SymphonyElixir.AutopilotTest do
       assert hd(texts) =~ "item-8"
     end
 
+    test "blocked attempts are retried behind fresh work, flagged final, then retired" do
+      write_autopilot_workflow!(max_concurrent_agents: 1)
+      Application.delete_env(:symphony_elixir, :memory_tracker_writes)
+      blocked = %Issue{id: "1", identifier: "GH-1", title: "Blocked", state: "open", dispatchable: true, labels: ["symphony:blocked"], priority: 1}
+      fresh = %Issue{id: "2", identifier: "GH-2", title: "Fresh", state: "open", dispatchable: true, labels: [], priority: 2}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [blocked, fresh])
+
+      {pid, name} = start_orchestrator!()
+      cool_down_research(pid)
+      send(pid, :run_poll_cycle)
+      state = :sys.get_state(pid)
+
+      # The marker became one failed attempt and was cleared; the fresh issue goes first.
+      assert state.autopilot.item_attempts == %{"1" => 1}
+      assert {:clear_label, "1", "symphony:blocked"} in Application.get_env(:symphony_elixir, :memory_tracker_writes)
+      assert Map.keys(state.running) == ["2"]
+
+      # Attempt 2 fails the same way; the third run is flagged final.
+      :sys.replace_state(pid, fn state -> %{state | running: %{}, claimed: MapSet.new()} end)
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{blocked | labels: ["symphony:blocked"]}])
+      send(pid, :run_poll_cycle)
+      state = :sys.get_state(pid)
+      assert state.autopilot.item_attempts == %{"1" => 2}
+      assert %{item_attempt: 3, final_attempt: true} = state.running["1"]
+      assert [%{item_attempt: 3, final_attempt: true}] = Orchestrator.snapshot(name, 5_000).running |> Enum.map(&Map.take(&1, [:item_attempt, :final_attempt]))
+
+      # The final attempt also ends blocked: the issue is retired, never parked.
+      :sys.replace_state(pid, fn state -> %{state | running: %{}, claimed: MapSet.new()} end)
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{blocked | labels: ["symphony:blocked"]}])
+      send(pid, :run_poll_cycle)
+      state = :sys.get_state(pid)
+      assert state.running == %{}
+      assert Enum.any?(Application.get_env(:symphony_elixir, :memory_tracker_writes), &match?({:retire, "1", _}, &1))
+    end
+
+    test "exhausted crash retries count as a failed attempt instead of blocking" do
+      write_autopilot_workflow!(max_attempts: 1)
+      issue = %Issue{id: "3", identifier: "GH-3", title: "Crashy", state: "open", dispatchable: true, labels: []}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      {pid, _name} = start_orchestrator!()
+      ref = make_ref()
+
+      :sys.replace_state(pid, fn state ->
+        entry = Map.put(running_entry(issue, ref), :retry_attempt, 1)
+        %{state | running: %{"3" => entry}, claimed: MapSet.new(["3"]), autopilot: %{state.autopilot | research_finished_at: DateTime.utc_now()}}
+      end)
+
+      send(pid, {:DOWN, ref, :process, self(), :boom})
+      state = :sys.get_state(pid)
+      assert state.blocked == %{}
+      assert state.autopilot.item_attempts == %{"3" => 1}
+      refute MapSet.member?(state.claimed, "3")
+    end
+
+    test "a pull request at its review cap is retired" do
+      write_autopilot_workflow!(autopilot: %{max_pr_runs: 1})
+      Application.delete_env(:symphony_elixir, :memory_tracker_writes)
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [pull_request("8", "sha-9")])
+      {pid, _name} = start_orchestrator!()
+
+      :sys.replace_state(pid, fn state ->
+        handled = %{"8" => %{runs: 1, head_sha: "sha-8"}}
+        %{state | autopilot: %{state.autopilot | pr_handled: handled, research_finished_at: DateTime.utc_now()}}
+      end)
+
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).running == %{}
+      assert Enum.any?(Application.get_env(:symphony_elixir, :memory_tracker_writes), &match?({:retire, "8", _}, &1))
+    end
+
     test "research waits while the backlog is full" do
       write_autopilot_workflow!(autopilot: %{max_open_issues: 1})
       held = %Issue{id: "1", identifier: "GH-1", title: "Held", state: "open", dispatchable: true, labels: ["symphony:hold"]}
@@ -478,6 +593,12 @@ defmodule SymphonyElixir.AutopilotTest do
       labels: [],
       pull_request: %{number: String.to_integer(id), head_sha: head_sha, can_push: true, trusted: true}
     }
+  end
+
+  defp cool_down_research(pid) do
+    :sys.replace_state(pid, fn state ->
+      %{state | autopilot: Map.put(state.autopilot, :research_finished_at, DateTime.utc_now())}
+    end)
   end
 
   defp finish_running_research(pid, id) do
@@ -527,6 +648,7 @@ defmodule SymphonyElixir.AutopilotTest do
       # Workers park in the hook so no Codex session starts; the tests observe dispatch state.
       hook_before_run: "sleep 30",
       max_concurrent_agents: Keyword.get(overrides, :max_concurrent_agents, 10),
+      max_attempts: Keyword.get(overrides, :max_attempts),
       autopilot: autopilot
     )
   end

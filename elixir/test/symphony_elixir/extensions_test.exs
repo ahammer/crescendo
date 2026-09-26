@@ -281,6 +281,8 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "pull_request" => nil,
                  "research" => nil,
                  "attempt" => 0,
+                 "item_attempt" => 1,
+                 "final_attempt" => false,
                  "recent_events" => [],
                  "cost" => %{"run" => nil, "item" => nil},
                  "last_event" => "notification",
@@ -633,7 +635,8 @@ defmodule SymphonyElixir.ExtensionsTest do
       kind: :pull_request,
       pull_request: %{author: "ahammer", author_association: "OWNER", head_ref: "symphony/issue-711", head_sha: "abcdef1234", ci_state: "success", can_push: true},
       research: nil,
-      attempt: 2,
+      attempt: 0,
+      item_attempt: 2,
       recent_events: [
         %{at: now, event: :notification, text: "reviewing the diff"},
         %{at: DateTime.add(now, -90, :second), event: :notification, text: "ran cargo xtask ci worker"}

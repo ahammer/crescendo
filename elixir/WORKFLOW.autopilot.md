@@ -17,11 +17,12 @@ tracker:
   required_labels:
     - symphony
   # `in-review` hands an issue to its PR; `hold` is the operator kill switch
-  # for issues and pull requests alike.
+  # for issues and pull requests alike. Nothing is parked: a blocked attempt is
+  # marked with `autopilot.blocked_label`, retried behind other work, and
+  # retired after `autopilot.max_item_attempts`.
   excluded_labels:
     - symphony:in-review
     - symphony:hold
-    - symphony:needs-attention
   active_states: [open]
   terminal_states: [closed]
 polling:
@@ -110,11 +111,20 @@ No description provided.
 6. Push, then mark the pull request ready for review and add the `symphony` label to it.
 7. As your very last action, add the `symphony:in-review` label to the issue. This hands the work to a separate reviewer run, which merges the pull request and thereby closes the issue.
 
-## Abandoning
+## When you are blocked
 
-You may abandon the issue when it is blocked, wrong, not worth doing, or already fixed:
+This is attempt {{ item_attempt }}. Nothing is parked: never wait for a human.
 
-- Close any draft pull request you opened, with a comment explaining why.
-- Close the issue as `not planned` with a short comment explaining the blocker or reason.
+{% if final_attempt %}
+**This is the final attempt.** Resolve the issue now, one of three ways:
+
+1. Deliver it in full.
+2. Split and deliver: land the part you have verified (mark the PR ready and hand it off as above), and file a new issue labeled `symphony` for the unmet criterion with its evidence.
+3. If nothing is independently landable, close your draft pull request and close the issue as `not planned` (won't fix), each with a comment giving the reason.
+{% else %}
+If a real blocker stops you (missing capability, unavailable environment, failure outside this issue), record the blocker and what you tried in the pull request or issue, keep your branch, and add the `symphony:blocked` label to the issue as your very last action. Symphony retries the issue later behind other work; after the final attempt it is delivered in reduced scope or closed.
+
+You may also close the issue as `not planned` right away when it is wrong, not worth doing, or already fixed, closing any draft pull request you opened, each with a reason.
+{% endif %}
 
 Your final message must list completed actions and any blocker only.

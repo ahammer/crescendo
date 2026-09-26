@@ -35,6 +35,12 @@ defmodule SymphonyElixir.GitHub.Adapter do
   @spec fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_ids(issue_ids), do: client_module().fetch_issues_by_ids(issue_ids)
 
+  @spec clear_label(Issue.t(), String.t()) :: :ok | {:error, term()}
+  def clear_label(issue, label), do: client_module().clear_label(issue, label)
+
+  @spec retire(Issue.t(), String.t()) :: :ok | {:error, term()}
+  def retire(issue, reason), do: client_module().retire(issue, reason)
+
   @spec agent_tool_specs() :: [map()]
   def agent_tool_specs, do: AgentTool.tool_specs()
 

@@ -15,6 +15,16 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
       send(self(), {:github_ids_called, ids})
       {:ok, ids}
     end
+
+    def clear_label(issue, label) do
+      send(self(), {:github_clear_label, issue.id, label})
+      :ok
+    end
+
+    def retire(issue, reason) do
+      send(self(), {:github_retire, issue.id, reason})
+      :ok
+    end
   end
 
   defmodule InventoryGitHubClient do
@@ -86,6 +96,11 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
 
     assert {:ok, ["42"]} = GitHubAdapter.fetch_issues_by_ids(["42"])
     assert_receive {:github_ids_called, ["42"]}
+
+    assert :ok = GitHubAdapter.clear_label(%SymphonyElixir.Tracker.Issue{id: "42"}, "symphony:blocked")
+    assert_receive {:github_clear_label, "42", "symphony:blocked"}
+    assert :ok = GitHubAdapter.retire(%SymphonyElixir.Tracker.Issue{id: "42"}, "why")
+    assert_receive {:github_retire, "42", "why"}
 
     assert [%{"name" => "github_api"}] = GitHubAdapter.agent_tool_specs()
 
@@ -278,6 +293,52 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
                  {:ok, %{status: 200, body: Map.put(raw_issue(3), "title", "")}}
                end
              )
+  end
+
+  test "client clears labels and retires items with their draft pull requests" do
+    parent = self()
+
+    request_fun = fn method, path, _params, body, _settings ->
+      send(parent, {:github_write, method, path, body})
+
+      case {method, path} do
+        {"GET", "/repos/octo/repo/pulls"} ->
+          {:ok,
+           %{
+             status: 200,
+             body: [
+               raw_pull(20, "OWNER", "octo/repo", %{"draft" => true, "body" => "Symphony issue: #5"}),
+               raw_pull(21, "OWNER", "octo/repo", %{"draft" => true, "body" => "Unrelated #50", "head" => %{"sha" => "s", "ref" => "symphony/issue-5", "repo" => %{"full_name" => "octo/repo"}}}),
+               raw_pull(22, "OWNER", "octo/repo", %{"draft" => false, "body" => "Closes #5"}),
+               raw_pull(23, "OWNER", "octo/repo", %{"draft" => true, "body" => "Fixes #50"})
+             ]
+           }}
+
+        {"DELETE", _} ->
+          {:ok, %{status: 404, body: %{}}}
+
+        _ ->
+          {:ok, %{status: 200, body: %{}}}
+      end
+    end
+
+    assert :ok = GitHubClient.clear_label_for_test(%Issue{id: "5"}, "symphony:blocked", tracker_settings(), request_fun)
+    assert_receive {:github_write, "DELETE", "/repos/octo/repo/issues/5/labels/symphony%3Ablocked", nil}
+
+    assert :ok = GitHubClient.retire_for_test(%Issue{id: "5", kind: :issue}, "Retired.", tracker_settings(), request_fun)
+    assert_receive {:github_write, "POST", "/repos/octo/repo/issues/5/comments", %{"body" => "Retired."}}
+    assert_receive {:github_write, "PATCH", "/repos/octo/repo/issues/5", %{"state" => "closed", "state_reason" => "not_planned"}}
+    assert_receive {:github_write, "PATCH", "/repos/octo/repo/pulls/20", %{"state" => "closed"}}
+    assert_receive {:github_write, "PATCH", "/repos/octo/repo/pulls/21", %{"state" => "closed"}}
+    refute_receive {:github_write, "PATCH", "/repos/octo/repo/pulls/22", _}
+    refute_receive {:github_write, "PATCH", "/repos/octo/repo/pulls/23", _}
+
+    assert :ok = GitHubClient.retire_for_test(%Issue{id: "22", kind: :pull_request}, "Capped.", tracker_settings(), request_fun)
+    assert_receive {:github_write, "PATCH", "/repos/octo/repo/pulls/22", %{"state" => "closed"}}
+
+    failing = fn _method, _path, _params, _body, _settings -> {:ok, %{status: 500, body: %{}}} end
+    retired = %Issue{id: "5", kind: :issue}
+    assert {:error, {:github_api_status, 500}} = GitHubClient.retire_for_test(retired, "x", tracker_settings(), failing)
   end
 
   test "client reports externally deleted issues as closed so reconciliation retires them" do
@@ -691,7 +752,7 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
     start_supervised!({Orchestrator, name: orchestrator, task_supervisor: supervisor})
 
     expected_pull = %{number: 12, title: "Finish water", url: "https://github.test/pull/12", draft: true, updated_at: "2026-09-01T00:00:00Z"}
-    expected_issue = %{issue_identifier: "GH-42", reason: "needs attention", title: "Blocked water", issue_url: nil, priority: nil, blocked_by: []}
+    expected_issue = %{issue_identifier: "GH-42", reason: "excluded by symphony:needs-attention", title: "Blocked water", issue_url: nil, priority: nil, blocked_by: []}
 
     assert Enum.any?(1..30, fn _ ->
              snapshot = Orchestrator.snapshot(orchestrator, 5_000)
@@ -772,6 +833,7 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
           token: #{Jason.encode!(token)}
         active_states: ["open"]
         terminal_states: ["closed"]
+        excluded_labels: ["symphony:needs-attention"]
       ---
 
       You are working on {{ issue.identifier }}.

@@ -34,6 +34,6 @@ You can push to the head branch: {{ issue.pull_request.can_push }}
 Abandon when the pull request is unsalvageable, out of scope, duplicated, or blocked on something you cannot resolve:
 
 - Comment with the concrete reason, then close the pull request.
-- If it closes an issue labeled `symphony:in-review`, either close that issue as `not planned` or replace `symphony:in-review` with `symphony:needs-attention`, so the issue is never stranded.
+- If it closes an issue labeled `symphony:in-review`, close that issue as `not planned` too, with the reason, so it is never stranded.
 
 Your final message must state the outcome (merged, fixes pushed, changes requested, waiting on CI, or abandoned) and any blocker.

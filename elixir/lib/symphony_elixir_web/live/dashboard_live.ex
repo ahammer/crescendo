@@ -311,7 +311,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <span class={"kind-chip kind-#{@kind}"}><%= kind_label(@kind) %></span>
           <.issue_identifier identifier={@entry.issue_identifier} url={@entry.issue_url} />
           <span class={state_badge_class(@entry.state)}><%= @entry.state %></span>
-          <span :if={(@entry[:attempt] || 0) > 1} class="status-tag status-warning">Attempt <%= @entry.attempt %></span>
+          <span :if={(@entry[:item_attempt] || 1) > 1 or @entry[:final_attempt]} class={if @entry[:final_attempt], do: "status-tag status-critical", else: "status-tag status-warning"}>
+            Attempt <%= @entry[:item_attempt] || 1 %><%= if @entry[:final_attempt], do: " · final" %>
+          </span>
         </div>
         <h3 class="agent-title" title={@entry[:title]}><%= @entry[:title] || @entry.issue_identifier %></h3>
         <p :if={@detail} class="agent-detail"><%= @detail %></p>

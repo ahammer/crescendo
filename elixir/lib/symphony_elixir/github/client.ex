@@ -42,6 +42,72 @@ defmodule SymphonyElixir.GitHub.Client do
     fetch_issues_by_ids(issue_ids, config.tracker, &perform_request/5, pull_policy(config))
   end
 
+  @spec clear_label(Issue.t(), String.t()) :: :ok | {:error, term()}
+  def clear_label(issue, label), do: clear_label_for_test(issue, label, Config.settings!().tracker, &perform_request/5)
+
+  @spec retire(Issue.t(), String.t()) :: :ok | {:error, term()}
+  def retire(issue, reason), do: retire_for_test(issue, reason, Config.settings!().tracker, &perform_request/5)
+
+  @doc false
+  @spec clear_label_for_test(Issue.t(), String.t(), map(), function()) :: :ok | {:error, term()}
+  def clear_label_for_test(%Issue{id: id}, label, tracker_settings, request_fun) do
+    with {:ok, settings} <- settings(tracker_settings),
+         path = "#{repository_issues_path(settings)}/#{id}/labels/#{URI.encode(label, &URI.char_unreserved?/1)}",
+         {:ok, _} <- request_with_settings("DELETE", path, %{}, nil, settings, request_fun, true) do
+      :ok
+    end
+  end
+
+  @doc false
+  @spec retire_for_test(Issue.t(), String.t(), map(), function()) :: :ok | {:error, term()}
+  def retire_for_test(%Issue{} = issue, reason, tracker_settings, request_fun) do
+    with {:ok, settings} <- settings(tracker_settings),
+         :ok <- comment_and_close(settings, request_fun, issue.kind, issue.id, reason) do
+      close_draft_pulls(settings, request_fun, issue)
+    end
+  end
+
+  defp comment_and_close(settings, request_fun, kind, number, reason) do
+    {path, body} =
+      if kind == :pull_request,
+        do: {"#{repository_pulls_path(settings)}/#{number}", %{"state" => "closed"}},
+        else: {"#{repository_issues_path(settings)}/#{number}", %{"state" => "closed", "state_reason" => "not_planned"}}
+
+    comments = "#{repository_issues_path(settings)}/#{number}/comments"
+
+    with {:ok, _} <- request_with_settings("POST", comments, %{}, %{"body" => reason}, settings, request_fun, true),
+         {:ok, _} <- request_with_settings("PATCH", path, %{}, body, settings, request_fun, true) do
+      :ok
+    end
+  end
+
+  # Drafts left behind by an issue's worker would otherwise linger forever:
+  # close every open draft that references the issue or uses its branch.
+  defp close_draft_pulls(_settings, _request_fun, %Issue{kind: :pull_request}), do: :ok
+
+  defp close_draft_pulls(settings, request_fun, %Issue{id: id}) do
+    reference = ~r/#{Regex.escape("#" <> id)}\b|issue-#{Regex.escape(id)}\b/
+    reason = "Closed by Symphony: issue ##{id} was retired after exhausting its attempts."
+
+    with {:ok, pulls} <- fetch_raw_pull_pages(settings, request_fun, 1, []) do
+      pulls
+      |> Enum.filter(&draft_for_issue?(&1, reference))
+      |> Enum.reduce_while(:ok, &close_pull(&1, &2, settings, request_fun, reason))
+    end
+  end
+
+  defp draft_for_issue?(pull, reference) do
+    pull["draft"] == true and
+      (Regex.match?(reference, pull["body"] || "") or Regex.match?(reference, get_in(pull, ["head", "ref"]) || ""))
+  end
+
+  defp close_pull(pull, :ok, settings, request_fun, reason) do
+    case comment_and_close(settings, request_fun, :pull_request, Integer.to_string(pull["number"]), reason) do
+      :ok -> {:cont, :ok}
+      error -> {:halt, error}
+    end
+  end
+
   @doc """
   Summarizes CI for a commit as `"pending"`, `"failure"`, `"success"`, or
   `"none"` from both commit statuses and check runs.
