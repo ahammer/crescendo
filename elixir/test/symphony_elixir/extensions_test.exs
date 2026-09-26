@@ -274,11 +274,20 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "session_id" => "thread-http",
                  "turn_count" => 7,
                  "model" => nil,
+                 "route" => nil,
+                 "title" => nil,
+                 "labels" => [],
+                 "kind" => "issue",
+                 "pull_request" => nil,
+                 "research" => nil,
+                 "attempt" => 0,
+                 "recent_events" => [],
+                 "cost" => %{"run" => nil, "item" => nil},
                  "last_event" => "notification",
                  "last_message" => "rendered",
                  "started_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),
                  "last_event_at" => nil,
-                 "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
+                 "tokens" => %{"input_tokens" => 4, "cached_input_tokens" => 0, "output_tokens" => 8, "total_tokens" => 12}
                }
              ],
              "retrying" => [
@@ -594,6 +603,71 @@ defmodule SymphonyElixir.ExtensionsTest do
     {:ok, _view, html} = live(build_conn(), "/")
     assert html =~ "Snapshot unavailable"
     assert html =~ "snapshot_unavailable"
+  end
+
+  test "dashboard agent cards show the work item, route, costs, and recent activity" do
+    orchestrator_name = Module.concat(__MODULE__, :AgentCardOrchestrator)
+    now = DateTime.utc_now()
+
+    agent = %{
+      issue_id: "7",
+      identifier: "PR-7",
+      issue_url: "https://example.org/pull/7",
+      state: "open",
+      session_id: "thread-pr",
+      turn_count: 3,
+      codex_app_server_pid: nil,
+      last_codex_message: "reviewing the diff",
+      last_codex_timestamp: now,
+      last_codex_event: :notification,
+      codex_input_tokens: 40_000,
+      codex_cached_input_tokens: 30_000,
+      codex_output_tokens: 2_000,
+      codex_total_tokens: 42_000,
+      started_at: DateTime.add(now, -600, :second),
+      workspace_path: "/home/me/workspaces/PR-7",
+      model: "gpt-6-sol",
+      route: %{model: "gpt-6-sol", effort: "medium", label: "default"},
+      title: "Parallelize boundary exchange reduction",
+      labels: ["performance", "symphony:ready"],
+      kind: :pull_request,
+      pull_request: %{author: "ahammer", author_association: "OWNER", head_ref: "symphony/issue-711", head_sha: "abcdef1234", ci_state: "success", can_push: true},
+      research: nil,
+      attempt: 2,
+      recent_events: [
+        %{at: now, event: :notification, text: "reviewing the diff"},
+        %{at: DateTime.add(now, -90, :second), event: :notification, text: "ran cargo xtask ci worker"}
+      ],
+      run_usage: %{usd_micro: 420_000, total_tokens: 42_000, unpriced_tokens: 0},
+      item_usage: %{usd_micro: 3_250_000, total_tokens: 900_000, unpriced_tokens: 0, runs: 4, since: "2026-09-26"}
+    }
+
+    snapshot = %{static_snapshot() | running: [agent]}
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/")
+
+    for text <- [
+          "Parallelize boundary exchange reduction",
+          "by ahammer (owner)",
+          "symphony/issue-711@abcdef1",
+          "CI success",
+          "Attempt 2",
+          "performance",
+          "$0.420",
+          "$3.25",
+          "4 runs since 2026-09-26",
+          "medium effort",
+          "via default",
+          "cached 30.0K",
+          "ran cargo xtask ci worker",
+          "workspaces/PR-7"
+        ] do
+      assert html =~ text
+    end
+
+    refute html =~ ~s(<li class="label-chip">symphony:ready</li>)
   end
 
   test "dashboard warns at the daily worker estimate threshold" do

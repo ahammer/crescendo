@@ -187,7 +187,9 @@ defmodule SymphonyElixir.Orchestrator do
 
       entry ->
         model = route && route["model"]
-        {:noreply, %{state | running: Map.put(running, issue_id, Map.put(entry, :model, model))}}
+        route = route && %{model: route["model"], effort: route["effort"], label: route["label"]}
+        entry = entry |> Map.put(:model, model) |> Map.put(:route, route)
+        {:noreply, %{state | running: Map.put(running, issue_id, entry)}}
     end
   end
 
@@ -234,7 +236,14 @@ defmodule SymphonyElixir.Orchestrator do
           |> apply_codex_token_delta(token_delta)
           |> apply_codex_rate_limits(update)
 
-        Operations.usage(state.operations, Map.get(updated_running_entry, :run_id), Map.get(updated_running_entry, :model), token_delta)
+        Operations.usage(
+          state.operations,
+          Map.get(updated_running_entry, :run_id),
+          Map.get(updated_running_entry, :model),
+          token_delta,
+          updated_running_entry.identifier
+        )
+
         maybe_record_turn_event(state.operations, updated_running_entry, update)
 
         notify_dashboard()
@@ -1693,6 +1702,17 @@ defmodule SymphonyElixir.Orchestrator do
           codex_output_tokens: metadata.codex_output_tokens,
           codex_total_tokens: metadata.codex_total_tokens,
           model: Map.get(metadata, :model),
+          route: Map.get(metadata, :route),
+          title: metadata.issue.title,
+          labels: metadata.issue.labels,
+          kind: metadata.issue.kind,
+          pull_request: metadata.issue.pull_request,
+          research: metadata.issue.research,
+          attempt: Map.get(metadata, :retry_attempt, 0),
+          recent_events: Map.get(metadata, :recent_events, []),
+          codex_cached_input_tokens: Map.get(metadata, :codex_cached_input_tokens, 0),
+          run_usage: Operations.run_usage(state.operations, Map.get(metadata, :run_id)),
+          item_usage: Operations.item_usage(state.operations, metadata.identifier),
           turn_count: Map.get(metadata, :turn_count, 0),
           started_at: metadata.started_at,
           last_codex_timestamp: metadata.last_codex_timestamp,
@@ -1809,17 +1829,20 @@ defmodule SymphonyElixir.Orchestrator do
     last_reported_total = Map.get(running_entry, :codex_last_reported_total_tokens, 0)
     last_reported_cached = Map.get(running_entry, :codex_last_reported_cached_input_tokens, 0)
     turn_count = Map.get(running_entry, :turn_count, 0)
+    summary = summarize_codex_update(update)
 
     {
       Map.merge(running_entry, %{
         last_codex_timestamp: timestamp,
-        last_codex_message: summarize_codex_update(update),
+        last_codex_message: summary,
+        recent_events: remember_event(Map.get(running_entry, :recent_events, []), summary, timestamp),
         session_id: session_id_for_update(running_entry.session_id, update),
         last_codex_event: event,
         codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
         codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
         codex_output_tokens: codex_output_tokens + token_delta.output_tokens,
         codex_total_tokens: codex_total_tokens + token_delta.total_tokens,
+        codex_cached_input_tokens: Map.get(running_entry, :codex_cached_input_tokens, 0) + token_delta.cached_input_tokens,
         codex_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
         codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
@@ -1866,6 +1889,24 @@ defmodule SymphonyElixir.Orchestrator do
        do: existing_count
 
   defp turn_count_for_update(_existing_count, _existing_session_id, _update), do: 0
+
+  @recent_event_limit 6
+  @noisy_methods ~r/delta|tokenUsage|rateLimits|status\/changed|item\/started/
+
+  # A short, human-readable history of what the agent did: streaming deltas and
+  # token or rate-limit bookkeeping are skipped, and repeats collapse.
+  defp remember_event(events, summary, timestamp) do
+    if Regex.match?(@noisy_methods, to_string(codex_message_method(summary))) do
+      events
+    else
+      text = StatusDashboard.humanize_codex_message(summary)
+
+      case events do
+        [%{text: ^text} | _] -> events
+        _ -> Enum.take([%{at: timestamp, event: summary.event, text: text} | events], @recent_event_limit)
+      end
+    end
+  end
 
   defp summarize_codex_update(update) do
     %{

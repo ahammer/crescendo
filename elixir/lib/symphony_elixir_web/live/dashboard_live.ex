@@ -101,39 +101,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
               <p class="empty-state">No active sessions. <%= idle_reason(@payload) %></p>
             <% else %>
               <div class="agent-list">
-                <article :for={entry <- @payload.running} class="agent-card">
-                  <header class="agent-head">
-                    <span class={"kind-chip kind-#{work_kind(entry.issue_identifier)}"}><%= kind_label(work_kind(entry.issue_identifier)) %></span>
-                    <.issue_identifier identifier={entry.issue_identifier} url={entry.issue_url} />
-                    <span class={state_badge_class(entry.state)}><%= entry.state %></span>
-                    <span class="agent-model mono"><%= entry.model || "model unknown" %></span>
-                    <span class="agent-spacer"></span>
-                    <span class="mono numeric" title="Runtime / turns"><%= format_runtime_and_turns(entry.started_at, entry.turn_count, @now) %></span>
-                  </header>
-                  <div class="agent-body">
-                    <p class="agent-label">Codex update</p>
-                    <%= if entry.last_message || entry.last_event do %>
-                      <p class="agent-message" title={entry.last_message || to_string(entry.last_event)}><%= entry.last_message || to_string(entry.last_event) %></p>
-                      <p class="agent-meta muted">
-                        <%= entry.last_event || "update" %><%= if entry.last_event_at do %> · <span title={entry.last_event_at}><%= ago(entry.last_event_at, @now) %></span><% end %>
-                      </p>
-                    <% else %>
-                      <p class="agent-message muted">Waiting for the first Codex event…</p>
-                    <% end %>
-                  </div>
-                  <div :if={@payload.runtime.max_turns} class="turn-budget" title={"Turn #{entry.turn_count} of #{@payload.runtime.max_turns}"}>
-                    <span class="turn-budget-label">Turns <%= entry.turn_count %>/<%= @payload.runtime.max_turns %></span>
-                    <span class="turn-budget-track"><span class="turn-budget-fill" style={"width: #{turn_percent(entry.turn_count, @payload.runtime.max_turns)}%"}></span></span>
-                  </div>
-                  <footer class="agent-foot">
-                    <span class="numeric">Tokens <strong><%= format_int(entry.tokens.total_tokens) %></strong> <span class="muted">in <%= compact(entry.tokens.input_tokens) %> / out <%= compact(entry.tokens.output_tokens) %> · <%= token_rate(entry, @now) %></span></span>
-                    <span class="agent-spacer"></span>
-                    <%= if entry.session_id do %>
-                      <.copy_button value={entry.session_id} />
-                    <% end %>
-                    <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON</a>
-                  </footer>
-                </article>
+                <.agent_card :for={entry <- @payload.running} entry={entry} now={@now} max_turns={@payload.runtime.max_turns} />
               </div>
             <% end %>
           </article>
@@ -312,6 +280,166 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <p :if={@detail} class="tile-detail"><%= @detail %></p>
     </article>
     """
+  end
+
+  attr(:entry, :map, required: true)
+  attr(:now, :any, required: true)
+  attr(:max_turns, :any, default: nil)
+
+  defp agent_card(assigns) do
+    entry = assigns.entry
+    run = get_in(entry, [:cost, :run]) || %{usd_micro: 0, unpriced_tokens: 0}
+    item = get_in(entry, [:cost, :item]) || %{usd_micro: 0, runs: 0, since: nil}
+    seconds = runtime_seconds_from_started_at(entry.started_at, assigns.now)
+    kind = kind_name(entry)
+
+    assigns =
+      assign(assigns,
+        kind: kind,
+        run: run,
+        item: item,
+        seconds: seconds,
+        labels: visible_labels(entry),
+        events: Map.get(entry, :recent_events, []),
+        detail: kind_detail(kind, entry)
+      )
+
+    ~H"""
+    <article class={"agent-card agent-#{@kind}"}>
+      <header class="agent-identity">
+        <div class="agent-title-row">
+          <span class={"kind-chip kind-#{@kind}"}><%= kind_label(@kind) %></span>
+          <.issue_identifier identifier={@entry.issue_identifier} url={@entry.issue_url} />
+          <span class={state_badge_class(@entry.state)}><%= @entry.state %></span>
+          <span :if={(@entry[:attempt] || 0) > 1} class="status-tag status-warning">Attempt <%= @entry.attempt %></span>
+        </div>
+        <h3 class="agent-title" title={@entry[:title]}><%= @entry[:title] || @entry.issue_identifier %></h3>
+        <p :if={@detail} class="agent-detail"><%= @detail %></p>
+        <ul :if={@labels != []} class="label-list">
+          <li :for={label <- @labels} class="label-chip"><%= label %></li>
+        </ul>
+      </header>
+
+      <dl class="agent-metrics">
+        <div class="metric metric-money">
+          <dt>This run</dt>
+          <dd><%= format_money(@run.usd_micro) %><span :if={@run.unpriced_tokens > 0} class="muted"> partly unpriced</span></dd>
+          <dd class="metric-sub"><%= spend_rate(@run.usd_micro, @seconds) %></dd>
+        </div>
+        <div class="metric metric-money">
+          <dt>Item total</dt>
+          <dd><%= format_money(@item.usd_micro) %></dd>
+          <dd class="metric-sub"><%= item_runs(@item) %></dd>
+        </div>
+        <div class="metric">
+          <dt>Tokens</dt>
+          <dd><%= compact(@entry.tokens.total_tokens) %></dd>
+          <dd class="metric-sub">in <%= compact(@entry.tokens.input_tokens) %> · cached <%= compact(@entry.tokens[:cached_input_tokens] || 0) %> · out <%= compact(@entry.tokens.output_tokens) %></dd>
+        </div>
+        <div class="metric">
+          <dt>Runtime</dt>
+          <dd><%= format_runtime_seconds(@seconds) %></dd>
+          <dd class="metric-sub"><%= token_rate(@entry, @now) %></dd>
+        </div>
+        <div class="metric">
+          <dt>Route</dt>
+          <dd class="mono"><%= route_model(@entry) %></dd>
+          <dd class="metric-sub"><%= route_detail(@entry) %></dd>
+        </div>
+        <div :if={@max_turns} class="metric metric-turns">
+          <dt>Turns</dt>
+          <dd><%= @entry.turn_count %><span class="muted">/<%= @max_turns %></span></dd>
+          <dd class="turn-budget-track" title={"Turn #{@entry.turn_count} of #{@max_turns}"}><span class="turn-budget-fill" style={"width: #{turn_percent(@entry.turn_count, @max_turns)}%"}></span></dd>
+        </div>
+      </dl>
+
+      <section class="agent-activity" aria-label="Recent Codex activity">
+        <p class="agent-label">Codex update</p>
+        <%= if @entry.last_message || @entry.last_event do %>
+          <p class="agent-message" title={@entry.last_message || to_string(@entry.last_event)}><%= @entry.last_message || to_string(@entry.last_event) %></p>
+          <p class="agent-meta muted">
+            <%= @entry.last_event || "update" %><%= if @entry.last_event_at do %> · <span title={@entry.last_event_at}><%= ago(@entry.last_event_at, @now) %></span><% end %>
+          </p>
+        <% else %>
+          <p class="agent-message muted">Waiting for the first Codex event…</p>
+        <% end %>
+        <ol :if={length(@events) > 1} class="agent-events">
+          <li :for={event <- tl(@events)}>
+            <time class="muted numeric" datetime={event.at} title={event.at}><%= ago(event.at, @now) %></time>
+            <span class="agent-event-text" title={event.text}><%= event.text %></span>
+          </li>
+        </ol>
+      </section>
+
+      <footer class="agent-foot">
+        <span class="mono muted workspace" title={@entry[:workspace_path]}><%= short_path(@entry[:workspace_path]) %><%= if @entry[:worker_host], do: " @ #{@entry.worker_host}" %></span>
+        <span class="agent-spacer"></span>
+        <.copy_button :if={@entry.session_id} value={@entry.session_id} />
+        <a class="issue-link" href={"/api/v1/#{@entry.issue_identifier}"}>JSON</a>
+      </footer>
+    </article>
+    """
+  end
+
+  defp kind_name(%{kind: kind}) when kind in [:pull_request, "pull_request"], do: "pr"
+  defp kind_name(%{kind: kind}) when kind in [:research, "research"], do: "research"
+  defp kind_name(%{issue_identifier: identifier}), do: work_kind(identifier)
+
+  defp kind_detail("pr", %{pull_request: %{} = pr}) do
+    sha = pr |> Map.get(:head_sha, "") |> to_string() |> String.slice(0, 7)
+
+    [
+      pr[:author] && "by #{pr.author}#{if pr[:author_association], do: " (#{String.downcase(pr.author_association)})"}",
+      pr[:head_ref] && "#{pr.head_ref}@#{sha}",
+      pr[:ci_state] && "CI #{pr.ci_state}",
+      pr[:can_push] == false && "comment-only (cannot push)"
+    ]
+    |> Enum.filter(& &1)
+    |> Enum.join(" · ")
+  end
+
+  defp kind_detail("research", %{research: %{} = research}),
+    do: "Channel #{research[:channel]} · #{research[:focus]}"
+
+  defp kind_detail(_kind, _entry), do: nil
+
+  # Scheduling labels are shown elsewhere (route, channel); the rest describe the work.
+  defp visible_labels(entry) do
+    entry
+    |> Map.get(:labels, [])
+    |> Enum.reject(&(String.starts_with?(&1, "symphony:") or &1 == "symphony"))
+    |> Enum.take(8)
+  end
+
+  defp route_model(%{route: %{model: model}}) when is_binary(model), do: model
+  defp route_model(entry), do: entry[:model] || "pending"
+
+  defp route_detail(%{route: %{} = route}) do
+    [route[:effort] && "#{route.effort} effort", route[:label] && "via #{route.label}"]
+    |> Enum.filter(& &1)
+    |> Enum.join(" · ")
+  end
+
+  defp route_detail(_entry), do: "route pending"
+
+  defp format_money(micro) when is_integer(micro) and micro >= 1_000_000, do: format_usd(micro)
+  defp format_money(micro) when is_integer(micro), do: "$" <> :erlang.float_to_binary(micro / 1_000_000, decimals: 3)
+  defp format_money(_micro), do: "n/a"
+
+  defp spend_rate(micro, seconds) when is_integer(micro) and micro > 0 and seconds >= 60,
+    do: "#{format_money(round(micro * 3_600 / seconds))}/h"
+
+  defp spend_rate(_micro, _seconds), do: "rate pending"
+
+  defp item_runs(%{runs: runs, since: since}) when is_integer(runs) and runs > 0,
+    do: "#{runs} run#{if runs == 1, do: "", else: "s"} since #{since}"
+
+  defp item_runs(_item), do: "first run"
+
+  defp short_path(nil), do: "workspace pending"
+
+  defp short_path(path) do
+    path |> Path.split() |> Enum.take(-2) |> Path.join()
   end
 
   attr(:value, :string, required: true)
@@ -608,13 +736,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
       end)
   end
 
-  defp format_runtime_and_turns(started_at, turn_count, now) when is_integer(turn_count) and turn_count > 0 do
-    "#{format_runtime_seconds(runtime_seconds_from_started_at(started_at, now))} / #{turn_count}"
-  end
-
-  defp format_runtime_and_turns(started_at, _turn_count, now),
-    do: format_runtime_seconds(runtime_seconds_from_started_at(started_at, now))
-
   defp format_runtime_seconds(seconds) when is_number(seconds) do
     whole_seconds = max(trunc(seconds), 0)
     mins = div(whole_seconds, 60)
@@ -642,8 +763,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
     |> String.replace(~r/.{3}(?=.)/, "\\0,")
     |> String.reverse()
   end
-
-  defp format_int(_value), do: "n/a"
 
   defp format_usd(value) when is_integer(value) do
     value |> Kernel./(1_000_000) |> then(&:io_lib.format("$~.2f", [&1])) |> to_string()

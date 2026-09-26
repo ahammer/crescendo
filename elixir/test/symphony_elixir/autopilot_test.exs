@@ -423,6 +423,38 @@ defmodule SymphonyElixir.AutopilotTest do
       assert Enum.any?(activity, &(&1.kind == "stopped" and &1.issue_identifier == "PR-2"))
     end
 
+    test "agents keep a short, readable history of Codex events and their route" do
+      write_autopilot_workflow!()
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+      {pid, _name} = start_orchestrator!()
+      ref = make_ref()
+      issue = %Issue{id: "9", identifier: "GH-9", title: "Nine", state: "open", url: nil, labels: []}
+
+      :sys.replace_state(pid, fn state ->
+        %{state | running: %{"9" => running_entry(issue, ref)}, claimed: MapSet.new(["9"]), autopilot: %{state.autopilot | research_finished_at: DateTime.utc_now()}}
+      end)
+
+      send(pid, {:worker_model_route, "9", %{"model" => "gpt-6-sol", "effort" => "high", "label" => "default"}})
+
+      update = fn method, item_id ->
+        payload = %{"method" => method, "params" => %{"item" => %{"id" => item_id, "type" => "commandExecution"}, "delta" => "streaming"}}
+        send(pid, {:codex_worker_update, "9", %{event: :notification, timestamp: DateTime.utc_now(), payload: payload}})
+      end
+
+      update.("item/agentMessage/delta", "delta-item")
+      update.("thread/tokenUsage/updated", "usage-item")
+      for n <- 1..8, do: update.("item/completed", "item-#{n}")
+      update.("item/completed", "item-8")
+
+      entry = :sys.get_state(pid).running["9"]
+      assert entry.route == %{model: "gpt-6-sol", effort: "high", label: "default"}
+      assert length(entry.recent_events) == 6
+      texts = Enum.map(entry.recent_events, & &1.text)
+      assert texts == Enum.uniq(texts)
+      refute Enum.any?(texts, &(&1 =~ "streaming" or &1 =~ "delta-item" or &1 =~ "usage-item"))
+      assert hd(texts) =~ "item-8"
+    end
+
     test "research waits while the backlog is full" do
       write_autopilot_workflow!(autopilot: %{max_open_issues: 1})
       held = %Issue{id: "1", identifier: "GH-1", title: "Held", state: "open", dispatchable: true, labels: ["symphony:hold"]}

@@ -61,16 +61,97 @@ defmodule SymphonyElixir.Operations do
   end
 
   @spec usage(handle(), String.t() | nil, String.t() | nil, map()) :: :ok
-  def usage(nil, _run_id, _model, _delta), do: :ok
-  def usage(_table, nil, _model, _delta), do: :ok
+  def usage(table, run_id, model, delta), do: usage(table, run_id, model, delta, nil)
 
-  def usage(table, run_id, model, delta) do
+  @doc """
+  Records a token delta for one run. With a work-item identifier, the delta
+  also accumulates into that item's running total across all of its runs.
+  """
+  @spec usage(handle(), String.t() | nil, String.t() | nil, map(), String.t() | nil) :: :ok
+  def usage(nil, _run_id, _model, _delta, _item), do: :ok
+  def usage(_table, nil, _model, _delta, _item), do: :ok
+
+  def usage(table, run_id, model, delta, item) do
     if Enum.any?([:input_tokens, :cached_input_tokens, :output_tokens, :total_tokens], &(Map.get(delta, &1, 0) > 0)) do
-      safe_write(fn -> do_usage(table, run_id, model, delta) end)
+      safe_write(fn -> record_usage(table, run_id, model, delta, item) end)
     else
       :ok
     end
   end
+
+  defp record_usage(table, run_id, model, delta, item) do
+    price = do_usage(table, run_id, model, delta)
+    if is_binary(item), do: add_item_usage(table, item, run_id, delta, price)
+  end
+
+  @doc "Recorded usage for one run, summed across its dates and models."
+  @spec run_usage(handle(), String.t() | nil) :: map()
+  def run_usage(nil, _run_id), do: empty_cost()
+  def run_usage(_table, nil), do: empty_cost()
+
+  def run_usage(table, run_id) do
+    table
+    |> :dets.match_object({{:usage, run_id, :_, :_}, :_})
+    |> Enum.reduce(empty_cost(), fn {_key, value}, acc ->
+      %{
+        usd_micro: acc.usd_micro + value.usd_micro,
+        total_tokens: acc.total_tokens + value.total_tokens,
+        unpriced_tokens: acc.unpriced_tokens + value.unpriced_tokens
+      }
+    end)
+  rescue
+    ArgumentError -> empty_cost()
+  catch
+    :exit, _ -> empty_cost()
+  end
+
+  @doc """
+  Recorded usage for one work item across every run that passed its
+  identifier, with the run count and when recording began.
+  """
+  @spec item_usage(handle(), String.t() | nil) :: map()
+  def item_usage(nil, _item), do: empty_item_usage()
+  def item_usage(_table, nil), do: empty_item_usage()
+
+  def item_usage(table, item) do
+    case :dets.lookup(table, {:item_usage, item}) do
+      [{_key, value}] -> value |> Map.delete(:usd_numerator) |> Map.put(:runs, MapSet.size(value.runs))
+      _ -> empty_item_usage()
+    end
+  rescue
+    ArgumentError -> empty_item_usage()
+  catch
+    :exit, _ -> empty_item_usage()
+  end
+
+  defp add_item_usage(table, item, run_id, delta, price) do
+    key = {:item_usage, item}
+
+    previous =
+      case :dets.lookup(table, key) do
+        [{^key, value}] -> value
+        _ -> %{usd_micro: 0, usd_numerator: 0, total_tokens: 0, unpriced_tokens: 0, runs: MapSet.new(), since: Date.utc_today() |> Date.to_iso8601()}
+      end
+
+    total = max(Map.get(delta, :input_tokens, 0) + Map.get(delta, :output_tokens, 0), Map.get(delta, :total_tokens, 0))
+    numerator = previous.usd_numerator + (price || 0)
+
+    :dets.insert(
+      table,
+      {key,
+       %{
+         previous
+         | usd_micro: div(numerator, 1_000_000),
+           usd_numerator: numerator,
+           total_tokens: previous.total_tokens + total,
+           unpriced_tokens: previous.unpriced_tokens + if(is_nil(price), do: total, else: 0),
+           runs: MapSet.put(previous.runs, run_id)
+       }}
+    )
+  end
+
+  defp empty_cost, do: %{usd_micro: 0, total_tokens: 0, unpriced_tokens: 0}
+  defp empty_item_usage, do: %{usd_micro: 0, total_tokens: 0, unpriced_tokens: 0, runs: 0, since: nil}
 
   defp do_usage(table, run_id, model, delta) do
     date = Date.utc_today() |> Date.to_iso8601()
@@ -99,7 +180,8 @@ defmodule SymphonyElixir.Operations do
       unpriced_tokens: previous.unpriced_tokens + if(is_nil(price), do: total, else: 0)
     }
 
-    :dets.insert(table, {key, value})
+    :ok = :dets.insert(table, {key, value})
+    price
   end
 
   @spec event(handle(), String.t(), map()) :: :ok

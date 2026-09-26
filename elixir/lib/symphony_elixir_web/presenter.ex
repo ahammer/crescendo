@@ -136,12 +136,22 @@ defmodule SymphonyElixirWeb.Presenter do
       session_id: entry.session_id,
       turn_count: Map.get(entry, :turn_count, 0),
       model: Map.get(entry, :model),
+      route: Map.get(entry, :route),
+      title: Map.get(entry, :title),
+      labels: Map.get(entry, :labels, []),
+      kind: Map.get(entry, :kind, :issue),
+      pull_request: Map.get(entry, :pull_request),
+      research: Map.get(entry, :research),
+      attempt: Map.get(entry, :attempt, 0),
+      recent_events: Enum.map(Map.get(entry, :recent_events, []), &%{at: iso8601(&1.at), event: &1.event, text: &1.text}),
+      cost: %{run: Map.get(entry, :run_usage), item: Map.get(entry, :item_usage)},
       last_event: entry.last_codex_event,
       last_message: summarize_message(entry.last_codex_message),
       started_at: iso8601(entry.started_at),
       last_event_at: iso8601(entry.last_codex_timestamp),
       tokens: %{
         input_tokens: entry.codex_input_tokens,
+        cached_input_tokens: Map.get(entry, :codex_cached_input_tokens, 0),
         output_tokens: entry.codex_output_tokens,
         total_tokens: entry.codex_total_tokens
       }
