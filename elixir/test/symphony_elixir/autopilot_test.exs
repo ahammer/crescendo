@@ -528,7 +528,7 @@ defmodule SymphonyElixir.AutopilotTest do
       update.("item/completed", "item-8")
 
       entry = :sys.get_state(pid).running["9"]
-      assert entry.route == %{model: "gpt-6-sol", effort: "high", label: "default"}
+      assert entry.route == %{model: "gpt-6-sol", effort: "high", label: "default", tier: nil}
       assert length(entry.recent_events) == 6
       texts = Enum.map(entry.recent_events, & &1.text)
       assert texts == Enum.uniq(texts)

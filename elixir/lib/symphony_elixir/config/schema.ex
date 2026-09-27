@@ -324,6 +324,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:min_issues_per_channel, :integer, default: 1)
       field(:max_issues_per_channel, :integer, default: 3)
       field(:research_route, :map)
+      field(:review_route, :map)
       field(:max_open_issues, :integer, default: 10)
       field(:research_cooldown_ms, :integer, default: 1_800_000)
       field(:max_pr_runs, :integer, default: 5)
@@ -349,6 +350,7 @@ defmodule SymphonyElixir.Config.Schema do
           :min_issues_per_channel,
           :max_issues_per_channel,
           :research_route,
+          :review_route,
           :max_open_issues,
           :research_cooldown_ms,
           :max_pr_runs,
@@ -364,12 +366,8 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:min_issues_per_channel, greater_than: 0)
       |> validate_number(:max_issues_per_channel, greater_than: 0)
       |> validate_issue_range()
-      |> validate_change(:research_route, fn field, route ->
-        case SymphonyElixir.ModelRouting.validate_route(route) do
-          :ok -> []
-          {:error, message} -> [{field, message}]
-        end
-      end)
+      |> validate_change(:research_route, &validate_fixed_route/2)
+      |> validate_change(:review_route, &validate_fixed_route/2)
       |> validate_number(:max_open_issues, greater_than: 0)
       |> validate_number(:research_cooldown_ms, greater_than_or_equal_to: 0)
       |> validate_number(:max_pr_runs, greater_than: 0)
@@ -405,6 +403,13 @@ defmodule SymphonyElixir.Config.Schema do
       if Enum.all?(prompts, fn {kind, path} -> kind in @prompt_kinds and is_binary(path) and String.trim(path) != "" end),
         do: [],
         else: [{field, "keys must be pull_request or research and values must be file paths"}]
+    end
+
+    defp validate_fixed_route(field, route) do
+      case SymphonyElixir.ModelRouting.validate_route(route) do
+        :ok -> []
+        {:error, message} -> [{field, message}]
+      end
     end
   end
 

@@ -90,8 +90,10 @@ defmodule SymphonyElixir.AgentRunner do
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
 
     settings = Config.settings!()
+    fixed_routes = %{research: settings.autopilot.research_route, pull_request: settings.autopilot.review_route}
 
-    with {:ok, route} <- ModelRouting.select_for_run(settings.codex.routing, settings.autopilot.research_route, issue),
+    with {:ok, route} <-
+           ModelRouting.select_for_run(settings.codex.routing, fixed_routes, issue, Keyword.get(opts, :item_attempt, 1)),
          :ok <- log_route(issue, route),
          :ok <- send_model_route(codex_update_recipient, issue, route),
          {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host, model_route: route) do
@@ -106,7 +108,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp log_route(_issue, nil), do: :ok
 
   defp log_route(issue, route) do
-    Logger.info("Selected model route for #{issue_context(issue)} label=#{route["label"]} model=#{route["model"]} effort=#{route["effort"]}")
+    Logger.info("Selected model route for #{issue_context(issue)} label=#{route["label"]} model=#{route["model"]} effort=#{route["effort"]} tier=#{route["tier"] || "none"}")
   end
 
   defp send_model_route(recipient, %Issue{id: issue_id}, route) when is_pid(recipient) do

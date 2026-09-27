@@ -417,7 +417,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp route_model(entry), do: entry[:model] || "pending"
 
   defp route_detail(%{route: %{} = route}) do
-    [route[:effort] && "#{route.effort} effort", route[:label] && "via #{route.label}"]
+    [route[:effort] && "#{route.effort} effort", route[:tier] && "tier #{route.tier}", route[:label] && "via #{route.label}"]
     |> Enum.filter(& &1)
     |> Enum.join(" · ")
   end

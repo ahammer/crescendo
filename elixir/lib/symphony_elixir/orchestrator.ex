@@ -187,7 +187,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       entry ->
         model = route && route["model"]
-        route = route && %{model: route["model"], effort: route["effort"], label: route["label"]}
+        route = route && %{model: route["model"], effort: route["effort"], label: route["label"], tier: route["tier"]}
         entry = entry |> Map.put(:model, model) |> Map.put(:route, route)
         {:noreply, %{state | running: Map.put(running, issue_id, entry)}}
     end

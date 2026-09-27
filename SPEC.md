@@ -640,7 +640,11 @@ not require recognizing or validating extension fields unless that extension is 
   (`model`, `effort`), and `labels` mapping full label names to routes. A configured route
   overrides model at `thread/start` and effort at `turn/start`; no routing preserves Codex
   defaults. Unknown or conflicting route labels fail the run. The selected route is fixed
-  for one agent run and may change on the next run.
+  for one agent run and may change on the next run. Optional `ladder` (routes ordered from
+  cheapest to strongest) and `escalation` (non-decreasing, non-negative step offsets, one per
+  item attempt; the last repeats) are configured together: the default and every label route
+  must be a ladder step, and a run climbs `escalation[item_attempt - 1]` steps from its starting
+  route, capped at the last step. The run keeps its starting route's label.
 - `codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
 - `codex.thread_sandbox`: Codex `SandboxMode` value, default implementation-defined
 - `codex.turn_sandbox_policy`: Codex `SandboxPolicy` value, default implementation-defined
@@ -2352,6 +2356,8 @@ Extension config (`autopilot` object):
   integer, default `3`): the issue range each research run is asked to file; min must not exceed max.
 - `research_route` (object `{model, effort}`, OPTIONAL): model route for research runs, overriding
   label routing. Planning is the loop's hardest judgment call, so a strong model is RECOMMENDED.
+- `review_route` (object `{model, effort}`, OPTIONAL): model route for pull request review runs,
+  overriding label routing and escalation.
 - `max_open_issues` (positive integer, default `10`): research pauses while at least this many open
   issues carry every `tracker.required_labels` label.
 - `research_cooldown_ms` (non-negative integer, default `1800000`): minimum time between the end of

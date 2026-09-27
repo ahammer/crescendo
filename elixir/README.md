@@ -165,6 +165,11 @@ Notes:
   prefix stop the run. Priority does not affect routing. A run keeps its selected route across
   continuation turns; a label change takes effect on a new run. Without `routing`, existing
   Codex command and account defaults continue to apply.
+  Add `ladder` (routes from cheapest to strongest) and `escalation` (steps climbed per item
+  attempt) to escalate retries: with
+  `ladder: [{model: gpt-6-sol, effort: medium}, {model: gpt-6-sol, effort: xhigh}, {model: gpt-6-astra, effort: medium}, {model: gpt-6-astra, effort: max}]`
+  and `escalation: [0, 1, 3]`, attempts 1, 2 and 3 run on sol medium, sol xhigh and astra max.
+  The default and every label route must be ladder steps; a label sets the starting step.
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`
@@ -297,7 +302,8 @@ codex:
    (`prompts/research.md`; default channels `cleanup`, `optimization`, `testing`) builds, tests,
    benchmarks, and exercises the product headed, then files between `min_issues_per_channel` and
    `max_issues_per_channel` evidence-backed `symphony` issues. `autopilot.research_route` runs
-   research on a stronger model than the default issue route. Research pauses while
+   research on a stronger model than the default issue route, and `autopilot.review_route` fixes
+   the model for pull request reviews. Research pauses while
    `max_open_issues` are open and for `research_cooldown_ms` after a round's last channel ends.
 
 Nothing is parked waiting for an operator. A worker that hits a blocker records it and adds

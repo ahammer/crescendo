@@ -62,6 +62,8 @@ autopilot:
   max_issues_per_channel: 5
   # Planning is the hardest judgment call in the loop; give it the strongest model.
   research_route: {model: gpt-6-astra, effort: high}
+  # Pull request reviews gate merges; pin them to a strong model regardless of labels.
+  review_route: {model: gpt-6-astra, effort: medium}
   # Research pauses while this many `symphony` issues are open.
   max_open_issues: 15
   research_cooldown_ms: 1800000
