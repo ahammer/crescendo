@@ -3,36 +3,52 @@ defmodule SymphonyElixirWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias SymphonyElixir.{Config, Operations, Orchestrator, StatusDashboard, Workspace}
+  alias SymphonyElixir.{Config, Operations, Orchestrator, StatusDashboard, Transcript, Workspace}
 
-  @spec state_payload(GenServer.name(), timeout()) :: map()
-  def state_payload(orchestrator, snapshot_timeout_ms) do
-    generated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+  @doc """
+  The dashboard and `/api/v1/state` projection. With `transcripts: true` each
+  running entry also carries its full transcript (the dashboard needs it; the
+  state API stays light and serves transcripts per item instead).
+  """
+  @spec state_payload(GenServer.name(), timeout(), keyword()) :: map()
+  def state_payload(orchestrator, snapshot_timeout_ms, opts \\ []) do
+    now = DateTime.utc_now()
+    generated_at = now |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+    transcripts? = Keyword.get(opts, :transcripts, false)
 
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
       %{} = snapshot ->
+        usage = Map.get(snapshot, :operations) || Operations.snapshot(nil)
+        settings = settings()
+
+        counts = %{
+          running: length(snapshot.running),
+          retrying: length(snapshot.retrying),
+          blocked: length(Map.get(snapshot, :blocked, [])),
+          ready: length(get_in(snapshot, [:upcoming, :ready]) || []),
+          waiting: length(get_in(snapshot, [:upcoming, :waiting]) || []),
+          open_prs: length(get_in(snapshot, [:pull_requests, :items]) || [])
+        }
+
         %{
           generated_at: generated_at,
-          counts: %{
-            running: length(snapshot.running),
-            retrying: length(snapshot.retrying),
-            blocked: length(Map.get(snapshot, :blocked, [])),
-            ready: length(get_in(snapshot, [:upcoming, :ready]) || []),
-            waiting: length(get_in(snapshot, [:upcoming, :waiting]) || []),
-            open_prs: length(get_in(snapshot, [:pull_requests, :items]) || [])
-          },
-          running: Enum.map(snapshot.running, &running_entry_payload/1),
+          counts: counts,
+          running: Enum.map(snapshot.running, &running_entry_payload(&1, transcripts?)),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
           codex_totals: snapshot.codex_totals,
           rate_limits: snapshot.rate_limits,
-          usage: Map.get(snapshot, :operations) || Operations.snapshot(nil),
+          usage: usage,
           usage_error: Map.get(snapshot, :operations_error),
-          upcoming: upcoming_payload(Map.get(snapshot, :upcoming)),
+          upcoming: upcoming_payload(Map.get(snapshot, :upcoming), usage, settings),
           autopilot: Map.get(snapshot, :autopilot) || %{enabled: false},
           polling: Map.get(snapshot, :polling),
           runtime: runtime_context(),
-          pull_requests: pulls_payload(Map.get(snapshot, :pull_requests))
+          pull_requests: pulls_payload(Map.get(snapshot, :pull_requests)),
+          header: header_payload(snapshot, usage, settings, counts),
+          history: history_payload(usage),
+          health: health_payload(snapshot, usage, settings, now),
+          run_stats: run_stats(usage)
         }
 
       :timeout ->
@@ -112,6 +128,15 @@ defmodule SymphonyElixirWeb.Presenter do
       last_error: (blocked && blocked.error) || (retry && retry.error),
       tracked: %{}
     }
+    |> Map.merge(transcript_payload(running))
+  end
+
+  # Only a running item has a live transcript.
+  defp transcript_payload(nil), do: %{transcript: nil, workspace_summary: nil}
+
+  defp transcript_payload(running) do
+    transcript = Map.get(running, :transcript)
+    %{transcript: transcript_entries(transcript), workspace_summary: workspace_payload(transcript)}
   end
 
   defp issue_id_from_entries(running, retry, blocked),
@@ -124,6 +149,20 @@ defmodule SymphonyElixirWeb.Presenter do
   defp issue_status(running, _retry, _blocked) when not is_nil(running), do: "running"
   defp issue_status(nil, retry, _blocked) when not is_nil(retry), do: "retrying"
   defp issue_status(nil, nil, _blocked), do: "blocked"
+
+  defp running_entry_payload(entry, transcripts?) do
+    payload =
+      entry
+      |> running_entry_payload()
+      |> Map.merge(%{
+        run_id: Map.get(entry, :run_id),
+        description: excerpt(Map.get(entry, :description)),
+        branch: Map.get(entry, :branch_name) || get_in(entry, [:pull_request, :head_ref]),
+        workspace: workspace_payload(Map.get(entry, :transcript))
+      })
+
+    if transcripts?, do: Map.put(payload, :transcript, transcript_entries(Map.get(entry, :transcript))), else: payload
+  end
 
   defp running_entry_payload(entry) do
     %{
@@ -280,8 +319,287 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp iso8601(_datetime), do: nil
 
-  defp upcoming_payload(nil), do: %{ready: [], waiting: [], observed_at: nil, error: nil, available_slots: nil}
-  defp upcoming_payload(value), do: Map.update(value, :observed_at, nil, &iso8601/1)
+  defp upcoming_payload(nil, _usage, _settings), do: %{ready: [], waiting: [], observed_at: nil, error: nil, available_slots: nil}
+
+  # Ready items get a rough ETA: the recent median run time for their kind, one
+  # wave of `max_concurrent_agents` runs per step down the queue.
+  defp upcoming_payload(value, usage, settings) do
+    medians = Map.get(usage, :median_run_seconds, %{})
+    slots = max((settings && settings.agent.max_concurrent_agents) || 1, 1)
+
+    ready =
+      value
+      |> Map.get(:ready, [])
+      |> Enum.with_index()
+      |> Enum.map(fn {item, index} ->
+        eta = with seconds when is_integer(seconds) <- Map.get(medians, item_kind(item.issue_identifier)), do: seconds * (div(index, slots) + 1)
+        Map.put(item, :eta_seconds, eta)
+      end)
+
+    value |> Map.put(:ready, ready) |> Map.update(:observed_at, nil, &iso8601/1)
+  end
+
+  defp item_kind("PR-" <> _), do: "pull_request"
+  defp item_kind("research" <> _), do: "research"
+  defp item_kind(_identifier), do: "issue"
+
+  defp settings do
+    case Config.settings() do
+      {:ok, settings} -> settings
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp header_payload(snapshot, usage, settings, counts) do
+    longest = Enum.max_by(snapshot.running, &Map.get(&1, :runtime_seconds, 0), fn -> nil end)
+    today = usage |> Map.get(:daily, []) |> List.last() || %{}
+
+    %{
+      budget_usd_micro: budget_usd_micro(settings),
+      runs_today: Map.get(today, :completed, 0) + Map.get(today, :failed, 0) + Map.get(today, :interrupted, 0),
+      max_agents: settings && settings.agent.max_concurrent_agents,
+      queued: counts.ready,
+      longest: longest && %{issue_identifier: longest.identifier, seconds: Map.get(longest, :runtime_seconds, 0), model: Map.get(longest, :model)}
+    }
+  end
+
+  @doc "The daily worker spend budget in micro-USD (`observability.daily_budget_usd`)."
+  @spec budget_usd_micro(map() | nil) :: non_neg_integer()
+  def budget_usd_micro(%{observability: %{daily_budget_usd: budget}}) when is_number(budget), do: round(budget * 1_000_000)
+  def budget_usd_micro(_settings), do: 50_000_000
+
+  # Five-minute samples are folded into 15-minute peaks so a 12-hour sparkline
+  # stays readable (48 points).
+  defp history_payload(usage) do
+    groups = usage |> Map.get(:samples, []) |> Enum.chunk_every(3)
+
+    for key <- [:running, :ready, :waiting, :attention, :open_prs, :spend_micro], into: %{} do
+      {key, Enum.map(groups, fn group -> group |> Enum.map(&Map.get(&1, key, 0)) |> Enum.max() end)}
+    end
+  end
+
+  defp run_stats(usage) do
+    days = Map.get(usage, :daily, [])
+    sum = fn key -> days |> Enum.map(&Map.get(&1, key, 0)) |> Enum.sum() end
+    [completed, interrupted, failed, merged] = Enum.map([:completed, :interrupted, :failed, :merged], sum)
+
+    %{
+      total: completed + interrupted + failed,
+      completed: completed,
+      interrupted: interrupted,
+      failed: failed,
+      merged: merged
+    }
+  end
+
+  # Health comes only from signals Symphony actually observes; a check that
+  # cannot be judged is left out rather than shown as healthy.
+  defp health_payload(snapshot, usage, settings, now) do
+    coordinator = [
+      polling_check(Map.get(snapshot, :polling)),
+      dispatch_check(snapshot, settings),
+      attention_check(snapshot),
+      research_check(Map.get(snapshot, :autopilot))
+    ]
+
+    system =
+      Enum.reject(
+        [
+          tracker_check(Map.get(snapshot, :upcoming), settings, now),
+          pulls_check(Map.get(snapshot, :pull_requests), now),
+          model_check(Map.get(snapshot, :rate_limits), usage, now),
+          store_check(usage),
+          disk_check(settings)
+        ],
+        &is_nil/1
+      )
+
+    %{
+      coordinator: %{status: overall(coordinator), checks: coordinator},
+      system: %{status: overall(system), checks: system}
+    }
+  end
+
+  defp overall(checks) do
+    cond do
+      Enum.any?(checks, &(&1.status == "critical")) -> "down"
+      Enum.any?(checks, &(&1.status == "warning")) -> "degraded"
+      true -> "operational"
+    end
+  end
+
+  defp check(name, status, detail), do: %{name: name, status: status, detail: detail}
+
+  defp polling_check(%{checking?: true}), do: check("Polling loop", "healthy", "Polling now")
+  defp polling_check(%{poll_interval_ms: ms}) when is_integer(ms), do: check("Polling loop", "healthy", "Every #{div(ms, 1_000)}s")
+  defp polling_check(_polling), do: check("Polling loop", "idle", "No polling data yet")
+
+  defp dispatch_check(snapshot, settings) do
+    max = (settings && settings.agent.max_concurrent_agents) || length(snapshot.running)
+    queued = length(get_in(snapshot, [:upcoming, :ready]) || [])
+    check("Dispatch", "healthy", "#{length(snapshot.running)} of #{max} slots busy · #{queued} queued")
+  end
+
+  # Retrying is the normal path for a failed attempt; only a blocked item,
+  # which waits on someone, is a problem.
+  defp attention_check(snapshot) do
+    blocked = length(Map.get(snapshot, :blocked, []))
+    retrying = length(snapshot.retrying)
+
+    cond do
+      blocked > 0 -> check("Retries", "warning", "#{blocked} blocked · #{retrying} retrying")
+      retrying > 0 -> check("Retries", "healthy", "#{retrying} retrying automatically")
+      true -> check("Retries", "healthy", "Nothing blocked or retrying")
+    end
+  end
+
+  defp research_check(%{enabled: true} = autopilot) do
+    cond do
+      Map.get(autopilot, :research_running, 0) > 0 -> check("Research", "healthy", "Planning new work")
+      (pending = Map.get(autopilot, :research_pending, [])) != [] -> check("Research", "healthy", "Round pending: #{Enum.join(pending, ", ")}")
+      true -> check("Research", "healthy", "Starts when the queue is empty")
+    end
+  end
+
+  defp research_check(_autopilot), do: check("Research", "idle", "Autopilot off")
+
+  defp tracker_check(%{error: error}, _settings, _now) when is_binary(error), do: check("Tracker", "critical", "Read failed: #{error}")
+
+  defp tracker_check(%{observed_at: %DateTime{} = at}, settings, now) do
+    age = DateTime.diff(now, at)
+    interval = if settings, do: div(settings.polling.interval_ms, 1_000), else: 30
+    if age > interval * 5, do: check("Tracker", "warning", "Last read #{age_text(age)} ago"), else: check("Tracker", "healthy", "Read #{age_text(age)} ago")
+  end
+
+  defp tracker_check(_upcoming, _settings, _now), do: nil
+
+  defp pulls_check(%{enabled: true, error: error}, _now) when is_binary(error), do: check("GitHub pull requests", "warning", error)
+
+  defp pulls_check(%{enabled: true, observed_at: %DateTime{} = at}, now) do
+    age = DateTime.diff(now, at)
+    if age > 1_800, do: check("GitHub pull requests", "warning", "Synced #{age_text(age)} ago"), else: check("GitHub pull requests", "healthy", "Synced #{age_text(age)} ago")
+  end
+
+  defp pulls_check(_pulls, _now), do: nil
+
+  defp model_check(limits, usage, now) do
+    used = primary_percent(limits)
+    cutoff = DateTime.add(now, -3_600, :second)
+    failures = usage |> Map.get(:activity, []) |> Enum.count(&(&1[:kind] == "attempt_failed" and after?(&1[:at], cutoff)))
+
+    cond do
+      is_number(used) and used >= 90 -> check("Model provider", "warning", "Primary rate window #{round(used)}% used")
+      failures >= 3 -> check("Model provider", "warning", "#{failures} failed runs in the last hour")
+      is_number(used) -> check("Model provider", "healthy", "Primary rate window #{round(used)}% used")
+      true -> check("Model provider", "healthy", "No recent failures")
+    end
+  end
+
+  defp after?(at, cutoff) when is_binary(at) do
+    case DateTime.from_iso8601(at) do
+      {:ok, time, _offset} -> DateTime.compare(time, cutoff) == :gt
+      _ -> false
+    end
+  end
+
+  defp after?(_at, _cutoff), do: false
+
+  defp primary_percent(%{} = limits) do
+    case Map.get(limits, "primary") || Map.get(limits, :primary) do
+      %{} = window -> Map.get(window, "used_percent") || Map.get(window, :used_percent)
+      _ -> nil
+    end
+  end
+
+  defp primary_percent(_limits), do: nil
+
+  defp store_check(%{status: "ok"}), do: check("Usage history", "healthy", "Recording runs and spend")
+  defp store_check(_usage), do: check("Usage history", "critical", "History unavailable")
+
+  defp disk_check(settings) do
+    case settings && free_bytes(settings.workspace.root) do
+      bytes when is_integer(bytes) ->
+        gb = div(bytes, 1024 * 1024 * 1024)
+
+        cond do
+          gb < 20 -> check("Workspace disk", "critical", "#{gb} GB free")
+          gb < 60 -> check("Workspace disk", "warning", "#{gb} GB free")
+          true -> check("Workspace disk", "healthy", "#{gb} GB free")
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  # `df` is cheap but not free; the answer is cached for a minute per root.
+  defp free_bytes(root) when is_binary(root) do
+    key = {__MODULE__, :free_bytes, root}
+    now = System.monotonic_time(:millisecond)
+
+    case :persistent_term.get(key, nil) do
+      {at, value} when now - at < 60_000 ->
+        value
+
+      _ ->
+        value = df_available(root)
+        :persistent_term.put(key, {now, value})
+        value
+    end
+  end
+
+  defp free_bytes(_root), do: nil
+
+  defp df_available(root) do
+    with true <- File.dir?(root),
+         {output, 0} <- System.cmd("df", ["-Pk", root], stderr_to_stdout: true),
+         [_header, line | _] <- String.split(output, "\n", trim: true),
+         [_fs, _size, _used, available | _] <- String.split(line),
+         {kb, ""} <- Integer.parse(available) do
+      kb * 1024
+    else
+      _ -> nil
+    end
+  end
+
+  defp age_text(seconds) when seconds < 90, do: "#{max(seconds, 0)}s"
+  defp age_text(seconds) when seconds < 5_400, do: "#{div(seconds, 60)}m"
+  defp age_text(seconds), do: "#{div(seconds, 3_600)}h"
+
+  defp workspace_payload(transcript) do
+    transcript = transcript || Transcript.new()
+
+    latest_image =
+      transcript.entries
+      |> Enum.flat_map(&Map.get(&1, :images, []))
+      |> List.last()
+
+    %{
+      progress: Transcript.progress(transcript),
+      plan: transcript.plan,
+      plan_explanation: transcript.plan_explanation,
+      files: transcript.files,
+      latest_image: latest_image,
+      entries: length(transcript.entries)
+    }
+  end
+
+  defp transcript_entries(nil), do: []
+
+  defp transcript_entries(transcript) do
+    Enum.map(transcript.entries, fn entry ->
+      entry
+      |> Map.update(:at, nil, &iso8601/1)
+      |> Map.update(:started_at, nil, &iso8601/1)
+    end)
+  end
+
+  defp excerpt(text) when is_binary(text) do
+    compact = text |> String.replace(~r/\s+/, " ") |> String.trim()
+    if String.length(compact) > 400, do: String.slice(compact, 0, 399) <> "…", else: compact
+  end
+
+  defp excerpt(_text), do: nil
 
   defp pulls_payload(nil), do: %{items: [], observed_at: nil, error: nil, enabled: false}
   defp pulls_payload(value), do: Map.update(value, :observed_at, nil, &iso8601/1)

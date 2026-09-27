@@ -1527,6 +1527,13 @@ Enablement (extension):
   retry delays, token consumption, runtime totals, recent events, and health/error indicators).
 - It is up to the implementation whether this is server-generated HTML or a client-side app that
   consumes the JSON API below.
+- The dashboard MAY show each running agent's transcript: its messages, reasoning summaries,
+  commands with output, file edits with diffs, plan steps, and images it viewed, rebuilt from the
+  coding agent's protocol events. Transcripts SHOULD be bounded in memory (entries per run and bytes
+  per field) and SHOULD reference images through the implementation's own artifact store (Section
+  13.7.3), never through workspace or host filesystem paths.
+- Transcripts expose raw agent output. When the dashboard is reachable beyond the operator's machine,
+  anyone with its URL can read everything agents print or look at.
 
 #### 13.7.2 JSON REST API (`/api/v1/*`)
 
@@ -1641,6 +1648,9 @@ Minimum endpoints:
   - If the issue is unknown to the current in-memory state, return `404` with an error response (for
     example `{\"error\":{\"code\":\"issue_not_found\",\"message\":\"...\"}}`).
 
+  - Implementations that keep transcripts MAY include the running item's transcript here (for
+    example as `transcript` and `workspace_summary` fields) while keeping `/api/v1/state` light.
+
 - `POST /api/v1/refresh`
   - Queues an immediate tracker poll + reconciliation cycle (best-effort trigger; implementations
     MAY coalesce repeated requests).
@@ -1665,6 +1675,17 @@ API design notes:
 - API errors SHOULD use a JSON envelope such as `{"error":{"code":"...","message":"..."}}`.
 - If the dashboard is a client-side app, it SHOULD consume this API rather than duplicating state
   logic.
+
+#### 13.7.3 Run Artifacts (`/artifacts/<run_id>/<name>`) (OPTIONAL)
+
+Implementations that show images in transcripts MAY serve them from a run artifact store.
+
+- Only files the implementation wrote into its artifact store are servable. Both path segments MUST
+  match the store's own naming (for example a fixed-length hex run id and `<n>.<ext>`), so no request
+  can name any other file.
+- The store SHOULD accept only known image formats identified by their content rather than a claimed
+  type, SHOULD cap the size and number of images per run, and SHOULD delete a run's images after a
+  retention window (reference: 24 hours after the run was last active).
 
 ## 14. Failure Model and Recovery Strategy
 

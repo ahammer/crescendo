@@ -7,7 +7,18 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Autopilot, Config, Operations, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{
+    AgentRunner,
+    Artifacts,
+    Autopilot,
+    Config,
+    Operations,
+    StatusDashboard,
+    Tracker,
+    Transcript,
+    Workspace
+  }
+
   alias SymphonyElixir.GitHub.Client, as: GitHubClient
   alias SymphonyElixir.Tracker.Issue
 
@@ -54,6 +65,8 @@ defmodule SymphonyElixir.Orchestrator do
       next_pulls_due_at_ms: 0,
       codex_totals: nil,
       codex_rate_limits: nil,
+      artifacts_root: nil,
+      artifacts_swept_ms: nil,
       autopilot: %{pr_handled: %{}, research_finished_at: nil, research_pending: [], item_attempts: %{}}
     ]
   end
@@ -89,6 +102,7 @@ defmodule SymphonyElixir.Orchestrator do
           next_pulls_due_at_ms: now_ms,
           codex_totals: @empty_codex_totals,
           codex_rate_limits: nil,
+          artifacts_root: artifacts_root(opts),
           autopilot: Operations.autopilot_state(operations)
         }
 
@@ -143,6 +157,8 @@ defmodule SymphonyElixir.Orchestrator do
     state = maybe_fetch_pull_requests(state)
     state = maybe_dispatch(state)
     state = maybe_sync_operations(state)
+    record_sample(state)
+    state = maybe_sweep_artifacts(state)
     state = schedule_tick(state, state.poll_interval_ms)
     state = %{state | poll_check_in_progress: false}
 
@@ -230,6 +246,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       running_entry ->
         {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
+        updated_running_entry = record_transcript(state, updated_running_entry, update)
 
         state =
           state
@@ -1833,6 +1850,10 @@ defmodule SymphonyElixir.Orchestrator do
           item_attempt: Map.get(metadata, :item_attempt, 1),
           final_attempt: Map.get(metadata, :final_attempt, false),
           recent_events: Map.get(metadata, :recent_events, []),
+          transcript: Map.get(metadata, :transcript),
+          run_id: Map.get(metadata, :run_id),
+          description: metadata.issue.description,
+          branch_name: metadata.issue.branch_name,
           codex_cached_input_tokens: Map.get(metadata, :codex_cached_input_tokens, 0),
           run_usage: Operations.run_usage(state.operations, Map.get(metadata, :run_id)),
           item_usage: Operations.item_usage(state.operations, metadata.identifier),
@@ -2031,6 +2052,74 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  # Only the named orchestrator (or one given an explicit root) keeps images,
+  # mirroring how operational history is opened.
+  defp artifacts_root(opts) do
+    cond do
+      is_binary(Keyword.get(opts, :artifacts_root)) -> Keyword.fetch!(opts, :artifacts_root)
+      Keyword.get(opts, :name, __MODULE__) == __MODULE__ -> Artifacts.root()
+      true -> nil
+    end
+  end
+
+  defp record_transcript(%State{} = state, running_entry, update) do
+    maybe_capture_notification(running_entry, update)
+
+    store_image =
+      case {state.artifacts_root, Map.get(running_entry, :run_id)} do
+        {root, run_id} when is_binary(root) and is_binary(run_id) -> &Artifacts.store(run_id, &1, root)
+        _ -> nil
+      end
+
+    transcript = Transcript.apply(Map.get(running_entry, :transcript) || Transcript.new(), update, store_image: store_image)
+    Map.put(running_entry, :transcript, transcript)
+  end
+
+  @captured_methods ["item/started", "item/completed", "turn/plan/updated", "turn/diff/updated", "turn/completed", "error"]
+
+  # Opt-in protocol capture for building transcript support against real payloads.
+  defp maybe_capture_notification(running_entry, update) do
+    with directory when is_binary(directory) and directory != "" <- System.get_env("SYMPHONY_NOTIFICATION_CAPTURE_DIR"),
+         method when method in @captured_methods <- get_in(update, [:payload, "method"]) do
+      file = "#{running_entry.identifier}-#{Map.get(running_entry, :run_id) || "run"}.jsonl"
+      Transcript.capture(update, Path.join(directory, file))
+    else
+      _ -> :ok
+    end
+  end
+
+  defp record_sample(%State{operations: nil}), do: :ok
+
+  defp record_sample(%State{} = state) do
+    upcoming = upcoming_issues(state)
+    today = Operations.snapshot(state.operations).today
+
+    Operations.record_sample(state.operations, %{
+      running: map_size(state.running),
+      ready: length(upcoming.ready),
+      waiting: length(upcoming.waiting),
+      attention: map_size(state.blocked) + map_size(state.retry_attempts),
+      open_prs: length(state.pull_requests),
+      spend_micro: Map.get(today, :usd_micro, 0)
+    })
+  end
+
+  @artifact_sweep_interval_ms 3_600_000
+
+  defp maybe_sweep_artifacts(%State{artifacts_root: root} = state) when is_binary(root) do
+    now_ms = System.monotonic_time(:millisecond)
+
+    if is_nil(state.artifacts_swept_ms) or now_ms - state.artifacts_swept_ms >= @artifact_sweep_interval_ms do
+      active = state.running |> Map.values() |> Enum.map(&Map.get(&1, :run_id)) |> Enum.filter(&is_binary/1)
+      Artifacts.sweep(active, root)
+      %{state | artifacts_swept_ms: now_ms}
+    else
+      state
+    end
+  end
+
+  defp maybe_sweep_artifacts(state), do: state
+
   defp summarize_codex_update(update) do
     %{
       event: update[:event],
@@ -2126,8 +2215,6 @@ defmodule SymphonyElixir.Orchestrator do
         state
     end
   end
-
-  defp apply_codex_rate_limits(state, _update), do: state
 
   defp apply_token_delta(codex_totals, token_delta) do
     input_tokens = Map.get(codex_totals, :input_tokens, 0) + token_delta.input_tokens

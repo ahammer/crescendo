@@ -124,6 +124,7 @@ defmodule SymphonyElixir.TestSupport do
           observability_enabled: true,
           observability_refresh_ms: 1_000,
           observability_render_interval_ms: 16,
+          observability_daily_budget_usd: nil,
           server_port: nil,
           server_host: nil,
           autopilot: nil,
@@ -165,6 +166,7 @@ defmodule SymphonyElixir.TestSupport do
     observability_enabled = Keyword.get(config, :observability_enabled)
     observability_refresh_ms = Keyword.get(config, :observability_refresh_ms)
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
+    observability_daily_budget_usd = Keyword.get(config, :observability_daily_budget_usd)
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
     prompt = Keyword.get(config, :prompt)
@@ -203,7 +205,12 @@ defmodule SymphonyElixir.TestSupport do
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
-        observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
+        observability_yaml(
+          observability_enabled,
+          observability_refresh_ms,
+          observability_render_interval_ms,
+          observability_daily_budget_usd
+        ),
         server_yaml(server_port, server_host),
         if(is_nil(autopilot), do: nil, else: "autopilot: #{yaml_value(autopilot)}"),
         "---",
@@ -266,13 +273,15 @@ defmodule SymphonyElixir.TestSupport do
     |> Enum.join("\n")
   end
 
-  defp observability_yaml(enabled, refresh_ms, render_interval_ms) do
+  defp observability_yaml(enabled, refresh_ms, render_interval_ms, daily_budget_usd) do
     [
       "observability:",
       "  dashboard_enabled: #{yaml_value(enabled)}",
       "  refresh_ms: #{yaml_value(refresh_ms)}",
-      "  render_interval_ms: #{yaml_value(render_interval_ms)}"
+      "  render_interval_ms: #{yaml_value(render_interval_ms)}",
+      if(is_nil(daily_budget_usd), do: nil, else: "  daily_budget_usd: #{yaml_value(daily_budget_usd)}")
     ]
+    |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
   end
 

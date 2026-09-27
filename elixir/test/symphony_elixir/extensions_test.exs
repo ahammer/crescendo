@@ -239,6 +239,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert [%{"name" => "linear_graphql"}] = Adapter.agent_tool_specs()
   end
 
+  @empty_workspace %{"progress" => %{"done" => 0, "total" => 0}, "plan" => [], "plan_explanation" => nil, "files" => [], "latest_image" => nil, "entries" => 0}
+
   test "phoenix observability api preserves state, issue, and refresh responses" do
     snapshot = static_snapshot()
     orchestrator_name = Module.concat(__MODULE__, :ObservabilityApiOrchestrator)
@@ -289,7 +291,11 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "last_message" => "rendered",
                  "started_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),
                  "last_event_at" => nil,
-                 "tokens" => %{"input_tokens" => 4, "cached_input_tokens" => 0, "output_tokens" => 8, "total_tokens" => 12}
+                 "tokens" => %{"input_tokens" => 4, "cached_input_tokens" => 0, "output_tokens" => 8, "total_tokens" => 12},
+                 "run_id" => nil,
+                 "description" => nil,
+                 "branch" => nil,
+                 "workspace" => @empty_workspace
                }
              ],
              "retrying" => [
@@ -334,15 +340,36 @@ defmodule SymphonyElixir.ExtensionsTest do
                "recorded" => %{"input_tokens" => 0, "cached_input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0, "usd_micro" => 0, "unpriced_tokens" => 0},
                "by_model" => [],
                "activity" => [],
-               "daily" => state_payload["usage"]["daily"]
+               "daily" => state_payload["usage"]["daily"],
+               "samples" => [],
+               "median_run_seconds" => %{}
              },
              "usage_error" => nil,
              "upcoming" => %{"ready" => [], "waiting" => [], "observed_at" => nil, "error" => nil, "available_slots" => nil},
              "autopilot" => %{"enabled" => false},
              "polling" => nil,
              "runtime" => %{"tracker" => "linear:project", "max_turns" => 20},
-             "pull_requests" => %{"items" => [], "observed_at" => nil, "error" => nil, "enabled" => false}
+             "pull_requests" => %{"items" => [], "observed_at" => nil, "error" => nil, "enabled" => false},
+             "header" => %{
+               "budget_usd_micro" => 50_000_000,
+               "runs_today" => 0,
+               "max_agents" => Config.settings!().agent.max_concurrent_agents,
+               "queued" => 0,
+               "longest" => %{"issue_identifier" => "MT-HTTP", "seconds" => 0, "model" => nil}
+             },
+             "history" => %{"running" => [], "ready" => [], "waiting" => [], "attention" => [], "open_prs" => [], "spend_micro" => []},
+             "health" => state_payload["health"],
+             "run_stats" => %{"total" => 0, "completed" => 0, "interrupted" => 0, "failed" => 0, "merged" => 0}
            }
+
+    # Health reports only observed signals: a blocked and a retrying item
+    # degrade the coordinator, and an unavailable usage store is critical.
+    assert %{"status" => "degraded", "checks" => coordinator_checks} = state_payload["health"]["coordinator"]
+    assert Enum.map(coordinator_checks, & &1["name"]) == ["Polling loop", "Dispatch", "Retries", "Research"]
+    assert %{"status" => "warning", "detail" => "1 blocked · 1 retrying"} = Enum.find(coordinator_checks, &(&1["name"] == "Retries"))
+    assert %{"status" => "down", "checks" => system_checks} = state_payload["health"]["system"]
+    assert %{"status" => "critical"} = Enum.find(system_checks, &(&1["name"] == "Usage history"))
+    refute Enum.any?(system_checks, &(&1["name"] in ["Tracker", "GitHub pull requests"]))
 
     assert length(state_payload["usage"]["daily"]) == 14
     assert List.last(state_payload["usage"]["daily"])["date"] == Date.utc_today() |> Date.to_iso8601()
@@ -377,7 +404,9 @@ defmodule SymphonyElixir.ExtensionsTest do
              "logs" => %{"codex_session_logs" => []},
              "recent_events" => [],
              "last_error" => nil,
-             "tracked" => %{}
+             "tracked" => %{},
+             "transcript" => [],
+             "workspace_summary" => @empty_workspace
            }
 
     conn = get(build_conn(), "/api/v1/MT-RETRY")
@@ -673,6 +702,140 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute html =~ ~s(<li class="label-chip">symphony:ready</li>)
   end
 
+  test "dashboard workspace shows each agent's transcript with inline images and switches tabs" do
+    orchestrator_name = Module.concat(__MODULE__, :WorkspaceOrchestrator)
+    at = DateTime.utc_now()
+    note = fn method, params -> %{payload: %{"method" => method, "params" => params}, timestamp: at} end
+    image = %{name: "1.png", src: "/artifacts/0123456789abcdef01234567/1.png"}
+
+    transcript =
+      [
+        note.("item/completed", %{"item" => %{"id" => "m1", "type" => "agentMessage", "text" => "Reading the solver <script>x</script>"}}),
+        note.("item/completed", %{
+          "item" => %{"id" => "c1", "type" => "commandExecution", "command" => "cargo test -p solver", "aggregatedOutput" => "1 failed", "exitCode" => 101, "durationMs" => 900}
+        }),
+        note.("item/completed", %{"item" => %{"id" => "v1", "type" => "imageView", "path" => "/tmp/reference.png"}}),
+        note.("turn/plan/updated", %{
+          "plan" => [%{"step" => "Run the example", "status" => "completed"}, %{"step" => "Compare results", "status" => "inProgress"}, %{"step" => "Draft summary", "status" => "pending"}]
+        }),
+        note.("turn/diff/updated", %{"diff" => "diff --git a/src/a.rs b/src/a.rs\n+++ b/src/a.rs\n+new\n-old\n"})
+      ]
+      |> Enum.reduce(SymphonyElixir.Transcript.new(), &SymphonyElixir.Transcript.apply(&2, &1, store_image: fn _source -> {:ok, image} end))
+
+    review =
+      SymphonyElixir.Transcript.apply(
+        SymphonyElixir.Transcript.new(),
+        note.("item/completed", %{"item" => %{"id" => "m2", "type" => "agentMessage", "text" => "Looks good to merge"}})
+      )
+
+    [base] = static_snapshot().running
+
+    first =
+      Map.merge(base, %{
+        identifier: "GH-1",
+        issue_id: "gh-1",
+        title: "Solve the flow case",
+        description: "Run the example end to end.",
+        branch_name: "symphony/issue-1",
+        transcript: transcript,
+        run_id: "0123456789abcdef01234567"
+      })
+
+    second =
+      Map.merge(base, %{
+        identifier: "PR-2",
+        issue_id: "pr-2",
+        title: "Review buoyancy",
+        kind: :pull_request,
+        transcript: review
+      })
+
+    snapshot = %{static_snapshot() | running: [first, second]}
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, view, html} = live(build_conn(), "/")
+
+    for text <- ["Active Agent Workspace", "Solve the flow case", "Run the example end to end.", "symphony/issue-1", "1/3 steps", "Compare results", "cargo test -p solver", "a.rs"] do
+      assert html =~ text
+    end
+
+    assert html =~ ~s(<img src="/artifacts/0123456789abcdef01234567/1.png")
+    assert html =~ "&lt;script&gt;x&lt;/script&gt;"
+    refute html =~ "Looks good to merge"
+
+    html = view |> element(~s(button[phx-value-id="PR-2"])) |> render_click()
+    assert html =~ "Looks good to merge"
+    assert html =~ "Review buoyancy"
+    refute html =~ "cargo test -p solver"
+  end
+
+  test "dashboard header, queue estimates and health follow the snapshot and settings" do
+    write_workflow_file!(Workflow.workflow_file_path(), observability_daily_budget_usd: 10, max_concurrent_agents: 2)
+    orchestrator_name = Module.concat(__MODULE__, :QueueOrchestrator)
+    usage = SymphonyElixir.Operations.snapshot(nil)
+    usage = %{usage | status: "ok", today: %{usage.today | usd_micro: 12_000_000}, median_run_seconds: %{"issue" => 600, "pull_request" => 300}}
+
+    ready =
+      for {identifier, title} <- [{"GH-10", "First ready"}, {"GH-11", "Second ready"}, {"PR-12", "Third ready"}] do
+        %{issue_identifier: identifier, title: title, issue_url: nil, priority: 2, reason: nil, blocked_by: []}
+      end
+
+    upcoming = %{
+      ready: ready,
+      waiting: [%{issue_identifier: "GH-13", title: "Blocked one", issue_url: nil, priority: 2, reason: "dependency blocked", blocked_by: ["GH-10"]}],
+      observed_at: DateTime.utc_now(),
+      error: nil,
+      available_slots: 1
+    }
+
+    snapshot = static_snapshot() |> Map.put(:operations, usage) |> Map.put(:upcoming, upcoming) |> Map.put(:blocked, [])
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/")
+
+    # Two slots: the first two issues finish in one median run, the review in the second wave.
+    assert html =~ ~r/First ready.*?~10m/s
+    assert html =~ ~r/Second ready.*?~10m/s
+    assert html =~ ~r/Third ready.*?~10m/s
+    assert html =~ "Blocked"
+    assert html =~ ~s(title="dependency blocked: GH-10")
+    assert html =~ "$10.00 daily budget"
+    assert html =~ "Worker usage alert"
+    assert html =~ "1 / 2"
+    assert html =~ "Agent coordinator"
+    assert html =~ "1 retrying automatically"
+    assert html =~ "System health"
+    assert html =~ "Run statistics"
+
+    payload = SymphonyElixirWeb.Presenter.state_payload(orchestrator_name, 50)
+    assert [%{eta_seconds: 600}, %{eta_seconds: 600}, %{eta_seconds: 600}] = payload.upcoming.ready
+    assert payload.header.budget_usd_micro == 10_000_000
+    assert payload.header.max_agents == 2
+  end
+
+  test "artifact route serves stored run images and nothing else" do
+    root = Path.join(System.tmp_dir!(), "symphony-artifact-route-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(root) end)
+    run_id = "0123456789abcdef01234567"
+    png = <<0x89, "PNG", 13, 10, 26, 10, 0, 0>>
+    {:ok, %{src: src}} = SymphonyElixir.Artifacts.store(run_id, {:base64, Base.encode64(png), "image/png"}, root)
+    File.write!(Path.join(root, "secret.txt"), "secret")
+
+    start_test_endpoint(orchestrator: Module.concat(__MODULE__, :ArtifactOrchestrator), snapshot_timeout_ms: 5, artifacts_root: root)
+
+    conn = get(build_conn(), src)
+    assert response(conn, 200) == png
+    assert Plug.Conn.get_resp_header(conn, "content-type") == ["image/png"]
+    assert [cache_control] = Plug.Conn.get_resp_header(conn, "cache-control")
+    assert cache_control =~ "immutable"
+
+    for path <- ["/artifacts/#{run_id}/2.png", "/artifacts/#{run_id}/..%2Fsecret.txt", "/artifacts/../secret.txt", "/artifacts/#{run_id}/1.svg", "/artifacts/nope/1.png"] do
+      assert get(build_conn(), path).status == 404
+    end
+  end
+
   test "dashboard warns at the daily worker estimate threshold" do
     orchestrator_name = Module.concat(__MODULE__, :SpendAlertOrchestrator)
     usage = SymphonyElixir.Operations.snapshot(nil)
@@ -765,7 +928,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     endpoint_config =
       :symphony_elixir
       |> Application.get_env(SymphonyElixirWeb.Endpoint, [])
-      |> Keyword.merge(server: false, secret_key_base: String.duplicate("s", 64))
+      |> Keyword.merge(server: false, secret_key_base: String.duplicate("s", 64), dashboard_reload_ms: 0)
       |> Keyword.merge(overrides)
 
     Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, endpoint_config)

@@ -60,4 +60,48 @@ defmodule SymphonyElixir.OperationsTest do
     assert Operations.run_usage(table, "run-1").usd_micro == 0
     assert Operations.item_usage(table, "GH-9").runs == 0
   end
+
+  test "intraday samples and recent median run times feed the dashboard" do
+    path = Path.join(System.tmp_dir!(), "symphony-operations-samples-#{System.unique_integer([:positive])}.dets")
+    on_exit(fn -> File.rm(path) end)
+    {:ok, table} = Operations.open(path, :symphony_operations_samples_test)
+
+    sample = %{running: 2, ready: 5, waiting: 1, attention: 0, open_prs: 3, spend_micro: 1_000}
+    :ok = Operations.record_sample(table, sample)
+    :ok = Operations.record_sample(table, %{sample | running: 3, ready: 4, attention: 1, spend_micro: 2_000})
+
+    # One row per five-minute bucket: the newest sample in a bucket wins.
+    samples = Operations.snapshot(table).samples
+    assert length(samples) in 1..2
+    assert %{running: 3, spend_micro: 2_000, at: at} = List.last(samples)
+    assert {:ok, _time, 0} = DateTime.from_iso8601(at)
+
+    # Event times are written directly so the runs have known durations.
+    now = DateTime.utc_now()
+
+    events = [
+      {"dispatch", "GH-1", -3_000},
+      {"completed", "GH-1", -2_400},
+      {"dispatch", "GH-2", -2_000},
+      {"failed", "GH-2", -1_000},
+      {"dispatch", "GH-3", -900},
+      {"completed", "GH-3", -700},
+      {"dispatch", "PR-4", -500},
+      {"completed", "PR-4", -200},
+      {"dispatch", "GH-5", -5 * 86_400},
+      {"completed", "GH-5", -4 * 86_400},
+      {"completed", "GH-6", -100}
+    ]
+
+    for {{kind, identifier, offset}, sequence} <- Enum.with_index(events, 1) do
+      at = now |> DateTime.add(offset, :second) |> DateTime.to_iso8601()
+      :ok = :dets.insert(table, [{:sequence, sequence}, {{:event, sequence}, %{kind: kind, issue_identifier: identifier, at: at}}])
+    end
+
+    # Issues ran 600s, 1000s and 200s; the five-day-old run is outside the window.
+    assert Operations.snapshot(table).median_run_seconds == %{"issue" => 600, "pull_request" => 300}
+    assert Operations.record_sample(nil, %{}) == :ok
+    assert %{samples: [], median_run_seconds: %{}} = Operations.snapshot(nil)
+    :ok = Operations.close(table)
+  end
 end

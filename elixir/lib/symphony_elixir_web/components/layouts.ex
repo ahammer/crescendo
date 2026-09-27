@@ -33,8 +33,31 @@ defmodule SymphonyElixirWeb.Layouts do
 
             if (!window.Phoenix || !window.LiveView) return;
 
+            // Keeps an agent transcript pinned to its newest entry, like a chat,
+            // unless the reader has scrolled up to look at something older.
+            var hooks = {
+              ChatScroll: {
+                mounted: function () {
+                  var el = this.el;
+                  var hook = this;
+                  hook.stick = true;
+                  el.addEventListener("scroll", function () {
+                    hook.stick = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+                  }, {passive: true});
+                  el.addEventListener("load", function () {
+                    if (hook.stick) el.scrollTop = el.scrollHeight;
+                  }, true);
+                  el.scrollTop = el.scrollHeight;
+                },
+                updated: function () {
+                  if (this.stick) this.el.scrollTop = this.el.scrollHeight;
+                }
+              }
+            };
+
             var liveSocket = new window.LiveView.LiveSocket("/live", window.Phoenix.Socket, {
-              params: {_csrf_token: csrfToken}
+              params: {_csrf_token: csrfToken},
+              hooks: hooks
             });
 
             liveSocket.connect();

@@ -30,10 +30,11 @@ defmodule SymphonyElixirWeb.Charts do
   attr(:columns, :list, required: true)
   attr(:format, :any, required: true)
   attr(:integer, :boolean, default: false, doc: "counts: ticks land on whole numbers")
+  attr(:width, :integer, default: @width, doc: "drawing width; narrower panels use a smaller one so labels stay legible")
 
   @spec columns(map()) :: Phoenix.LiveView.Rendered.t()
   def columns(assigns) do
-    assigns = assign(assigns, geometry(assigns.series, assigns.columns, assigns.integer))
+    assigns = assign(assigns, geometry(assigns.series, assigns.columns, assigns.integer, assigns.width))
 
     ~H"""
     <figure class="chart" aria-labelledby={"#{@id}-title"}>
@@ -85,7 +86,7 @@ defmodule SymphonyElixirWeb.Charts do
 
     ~H"""
     <ul class="hbar-list" aria-label={@title}>
-      <li :for={row <- @rows} class="hbar-row" title={"#{row.label}: #{row.display}"}>
+      <li :for={row <- @rows} class="hbar-row" title={"#{row.label}: #{Map.get(row, :title, row.display)}"}>
         <span class="hbar-label"><span class={"legend-key #{row.class}"}></span><%= row.label %></span>
         <span class="hbar-track"><span class={"hbar-fill #{row.class}"} style={"width: #{percent(row.value, @max)}%"}></span></span>
         <span class="hbar-value"><%= row.display %></span>
@@ -164,8 +165,8 @@ defmodule SymphonyElixirWeb.Charts do
 
   # Lays out stacked columns: a nice axis maximum, three hairline ticks, and
   # each column capped at 24px with a 2px surface gap between segments.
-  defp geometry(series, columns, integer) do
-    plot_w = @width - @pad_left - @pad_right
+  defp geometry(series, columns, integer, width) do
+    plot_w = width - @pad_left - @pad_right
     plot_h = @height - @pad_top - @pad_bottom
     count = max(length(columns), 1)
     band = plot_w / count
@@ -196,7 +197,7 @@ defmodule SymphonyElixirWeb.Charts do
       ticks: ticks,
       x_labels: x_labels,
       plot_h: plot_h,
-      width: @width,
+      width: width,
       height: @height,
       pad_left: @pad_left,
       pad_right: @pad_right,

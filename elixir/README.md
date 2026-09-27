@@ -222,7 +222,10 @@ codex:
 - If a later reload fails, Symphony keeps running with the last known good workflow and logs the
   reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
-  `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+  `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`, plus run images at
+  `/artifacts/<run_id>/<name>`.
+- `observability.daily_budget_usd` (default `50`) is the estimated daily worker spend at which the
+  dashboard raises its usage alert.
 
 ### Linear adapter profile
 
@@ -374,8 +377,31 @@ The observability UI now runs on a minimal Phoenix stack:
 - Dollar figures compare recorded tokens with standard short-context API prices dated
   September 24, 2026. They are estimates, not actual ChatGPT billing; unknown models remain
   unpriced. Recording starts with the first run after this version is deployed. The dashboard
-  warns at $50 estimated worker usage per UTC day; separate planner and independent reviewer
-  calls are not included, and the warning does not stop dispatch.
+  warns when estimated worker usage for the UTC day reaches `observability.daily_budget_usd`
+  (default $50); separate planner and independent reviewer calls are not included, and the
+  warning does not stop dispatch.
+- The page is a dark, three-column operations view: header stats; the work queue with estimated
+  start times, open pull requests and recent activity; KPI cards with 12-hour sparklines (from a
+  five-minute sample of queue counts and spend kept for 48 hours in `operations.dets`); the Active
+  Agent Workspace; coordinator and system health; run statistics; and 14-day charts. Queue
+  estimates use the median run time of the same kind of work over the last three days, in waves of
+  `agent.max_concurrent_agents`. Health checks report only signals Symphony observes: polling,
+  dispatch capacity, blocked items, research, tracker and pull request read age and errors, rate
+  limit use and failed attempts in the last hour, the usage store, and free workspace disk space.
+- The Active Agent Workspace has a tab per running agent. Each shows the agent's run as a chat,
+  rebuilt from Codex app-server notifications: messages and reasoning (streamed as they are
+  written), commands with exit code, duration and the last 60 lines or 8 KB of output, file edits
+  with diffs, plan steps with progress, and images inline where the agent saw them. Symphony keeps
+  the last 150 entries of each running agent in memory; `/api/v1/<issue_identifier>` serves the
+  transcript while the run lasts.
+- Images the agent viewed or generated, and images returned by tools such as screenshots, are
+  copied into `artifacts/<run_id>/` beside the log file (PNG, JPEG, GIF or WebP only, up to 10 MB
+  each and 40 per run) and served at `/artifacts/<run_id>/<n>.<ext>`. A run's images are deleted
+  24 hours after it was last active.
+- The dashboard is read-only, but it shows raw agent output and images. Anyone who can reach it
+  sees everything agents print or look at, so only expose it where that is acceptable.
+- Setting `SYMPHONY_NOTIFICATION_CAPTURE_DIR` records the raw app-server notifications that feed
+  transcripts (with long strings shortened) as one JSON-lines file per run, for protocol debugging.
 
 ## Project Layout
 

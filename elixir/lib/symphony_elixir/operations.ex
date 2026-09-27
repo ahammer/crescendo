@@ -191,6 +191,26 @@ defmodule SymphonyElixir.Operations do
     safe_write(fn -> do_event(table, kind, details) end)
   end
 
+  @sample_seconds 300
+  @sample_retention_buckets div(48 * 3600, 300)
+  @sample_window_buckets div(12 * 3600, 300)
+
+  @doc """
+  Records the dashboard's headline counts for the current five-minute bucket;
+  the latest poll in a bucket wins, and buckets older than two days are dropped.
+  """
+  @spec record_sample(handle(), map()) :: :ok
+  def record_sample(nil, _sample), do: :ok
+
+  def record_sample(table, sample) do
+    bucket = div(System.os_time(:second), @sample_seconds)
+
+    safe_write(fn ->
+      :ok = :dets.insert(table, {{:sample, bucket}, sample})
+      :dets.delete(table, {:sample, bucket - @sample_retention_buckets})
+    end)
+  end
+
   @spec pull_inventory(handle()) :: {[map()], DateTime.t() | nil}
   def pull_inventory(nil), do: {[], nil}
 
@@ -266,7 +286,9 @@ defmodule SymphonyElixir.Operations do
       recorded: empty_usage(),
       by_model: [],
       activity: [],
-      daily: daily_series(%{}, [])
+      daily: daily_series(%{}, []),
+      samples: [],
+      median_run_seconds: %{}
     }
   end
 
@@ -285,25 +307,30 @@ defmodule SymphonyElixir.Operations do
   defp do_snapshot(table) do
     today = Date.utc_today() |> Date.to_iso8601()
 
-    {recorded, daily, by_model, model_runs, events, spend} =
+    {recorded, daily, by_model, model_runs, events, spend, samples} =
       :dets.foldl(
         fn
-          {{:usage, run, date, model}, value}, {all, day, models, runs, events, spend} ->
+          {{:usage, run, date, model}, value}, {all, day, models, runs, events, spend, samples} ->
             models = Map.update(models, model, Map.take(value, Map.keys(empty_usage())), &add_usage(&1, value))
             runs = Map.update(runs, model, MapSet.new([run]), &MapSet.put(&1, run))
             spend = Map.update(spend, {date, model}, value.usd_micro, &(&1 + value.usd_micro))
             day = if date == today, do: add_usage(day, value), else: day
-            {add_usage(all, value), day, models, runs, events, spend}
+            {add_usage(all, value), day, models, runs, events, spend, samples}
 
-          {{:event, sequence}, entry}, {all, day, models, runs, events, spend} ->
-            {all, day, models, runs, [{sequence, entry} | events], spend}
+          {{:event, sequence}, entry}, {all, day, models, runs, events, spend, samples} ->
+            {all, day, models, runs, [{sequence, entry} | events], spend, samples}
+
+          {{:sample, bucket}, sample}, {all, day, models, runs, events, spend, samples} ->
+            {all, day, models, runs, events, spend, [{bucket, sample} | samples]}
 
           _, acc ->
             acc
         end,
-        {empty_usage(), empty_usage(), %{}, %{}, [], %{}},
+        {empty_usage(), empty_usage(), %{}, %{}, [], %{}, []},
         table
       )
+
+    ordered_events = events |> Enum.sort_by(fn {sequence, _} -> sequence end) |> Enum.map(&elem(&1, 1))
 
     %{
       status: "ok",
@@ -311,9 +338,62 @@ defmodule SymphonyElixir.Operations do
       today: daily,
       recorded: recorded,
       by_model: by_model |> Enum.map(fn {model, usage} -> usage |> Map.put(:model, model) |> Map.put(:runs, model_runs |> Map.fetch!(model) |> MapSet.size()) end) |> Enum.sort_by(& &1.model),
-      activity: events |> Enum.sort_by(fn {sequence, _} -> -sequence end) |> Enum.take(100) |> Enum.map(&elem(&1, 1)),
-      daily: daily_series(spend, Enum.map(events, &elem(&1, 1)))
+      activity: ordered_events |> Enum.reverse() |> Enum.take(100),
+      daily: daily_series(spend, ordered_events),
+      samples: recent_samples(samples),
+      median_run_seconds: median_run_seconds(ordered_events)
     }
+  end
+
+  # The last twelve hours of five-minute samples, oldest first.
+  defp recent_samples(samples) do
+    newest = div(System.os_time(:second), @sample_seconds)
+
+    samples
+    |> Enum.filter(fn {bucket, _sample} -> bucket > newest - @sample_window_buckets end)
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map(fn {bucket, sample} -> Map.put(sample, :at, DateTime.from_unix!(bucket * @sample_seconds) |> DateTime.to_iso8601()) end)
+  end
+
+  @finish_kinds ["completed", "failed", "stopped", "interrupted"]
+
+  # Median wall time of runs finished in the last three days, per kind of work
+  # item, paired from each item's dispatch event to its next finish event.
+  defp median_run_seconds(events) do
+    cutoff = DateTime.utc_now() |> DateTime.add(-3 * 86_400, :second)
+    {durations, _open} = Enum.reduce(events, {%{}, %{}}, &pair_run(&1, &2, cutoff))
+    Map.new(durations, fn {kind, seconds} -> {kind, median(seconds)} end)
+  end
+
+  defp pair_run(event, acc, cutoff) do
+    with identifier when is_binary(identifier) <- event[:issue_identifier],
+         {:ok, at, _offset} <- DateTime.from_iso8601(to_string(event[:at])) do
+      pair_event(event[:kind], identifier, at, acc, cutoff)
+    else
+      _ -> acc
+    end
+  end
+
+  defp pair_event("dispatch", identifier, at, {durations, open}, _cutoff), do: {durations, Map.put(open, identifier, at)}
+
+  defp pair_event(kind, identifier, at, {durations, open}, cutoff)
+       when kind in @finish_kinds and is_map_key(open, identifier) do
+    seconds = DateTime.diff(at, Map.fetch!(open, identifier))
+    recent? = DateTime.compare(at, cutoff) == :gt
+    {if(recent?, do: add_duration(durations, identifier, seconds), else: durations), Map.delete(open, identifier)}
+  end
+
+  defp pair_event(_kind, _identifier, _at, acc, _cutoff), do: acc
+
+  defp add_duration(durations, identifier, seconds), do: Map.update(durations, item_kind(identifier), [seconds], &[seconds | &1])
+
+  defp item_kind("PR-" <> _), do: "pull_request"
+  defp item_kind("research" <> _), do: "research"
+  defp item_kind(_identifier), do: "issue"
+
+  defp median(values) do
+    sorted = Enum.sort(values)
+    Enum.at(sorted, div(length(sorted), 2))
   end
 
   @series_days 14

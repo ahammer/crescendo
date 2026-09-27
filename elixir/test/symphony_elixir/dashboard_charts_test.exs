@@ -11,6 +11,21 @@ defmodule SymphonyElixir.DashboardChartsTest do
     %{key: :failed, label: "Failed", class: "status-critical"}
   ]
 
+  test "columns draw at a narrower width for small panels" do
+    html =
+      render_component(&Charts.columns/1,
+        id: "narrow",
+        title: "Runs per day",
+        series: @series,
+        columns: [%{label: "Sep 1", tip: "2026-09-01", values: %{completed: 1}}],
+        format: &Integer.to_string(round(&1)),
+        integer: true,
+        width: 340
+      )
+
+    assert html =~ ~s(viewBox="0 0 340 150")
+  end
+
   test "stacked columns draw a legend, rounded data ends, hover titles, and a table view" do
     columns = [
       %{label: "Sep 1", tip: "2026-09-01", values: %{completed: 3, failed: 1}},
