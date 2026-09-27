@@ -369,7 +369,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              },
              "history" => %{"running" => [], "ready" => [], "waiting" => [], "attention" => [], "open_prs" => [], "spend_micro" => []},
              "health" => state_payload["health"],
-             "run_stats" => %{"total" => 0, "completed" => 0, "interrupted" => 0, "failed" => 0, "merged" => 0}
+             "run_stats" => %{"total" => 0, "completed" => 0, "interrupted" => 0, "failed" => 0, "merged" => 0, "closed" => 0}
            }
 
     # Health reports only observed signals: a blocked and a retrying item
@@ -869,7 +869,16 @@ defmodule SymphonyElixir.ExtensionsTest do
     write_workflow_file!(Workflow.workflow_file_path(), observability_daily_budget_usd: 10, max_concurrent_agents: 2)
     orchestrator_name = Module.concat(__MODULE__, :QueueOrchestrator)
     usage = SymphonyElixir.Operations.snapshot(nil)
-    usage = %{usage | status: "ok", today: %{usage.today | usd_micro: 12_000_000}, median_run_seconds: %{"issue" => 600, "pull_request" => 300}}
+    today = usage.daily |> List.last() |> Map.merge(%{merged: 2, closed: 1, spend_by_model: %{"gpt-6-sol" => 1_500_000}})
+
+    usage = %{
+      usage
+      | status: "ok",
+        today: %{usage.today | usd_micro: 12_000_000},
+        median_run_seconds: %{"issue" => 600, "pull_request" => 300},
+        daily: List.replace_at(usage.daily, -1, today),
+        by_model: [%{model: "gpt-6-sol", total_tokens: 1_000, usd_micro: 1_500_000, unpriced_tokens: 0, runs: 1}]
+    }
 
     ready =
       for {identifier, title} <- [{"GH-10", "First ready"}, {"GH-11", "Second ready"}, {"PR-12", "Third ready"}] do
@@ -897,6 +906,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Blocked"
     assert html =~ ~s(title="dependency blocked: GH-10")
     assert html =~ "1/2 running"
+    assert html =~ ~r/PRs closed today.*?3.*?2 merged · 1 closed/s
+    assert html =~ ~r/class="spend-table".*?gpt-6-sol.*?\$1\.50.*?\$1\.50/s
     assert html =~ ~r/Free slot.*?Next up.*?GH-10.*?First ready/s
     assert html =~ "over $10.00 budget"
     assert html =~ "Worker usage alert"

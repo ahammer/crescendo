@@ -1,9 +1,10 @@
 defmodule SymphonyElixirWeb.DashboardLive do
   @moduledoc """
-  Live observability dashboard for Symphony. The work queue, pull requests,
-  activity and system charts fill the top; the running agents sit in a strip
-  of fixed worker slots at the bottom, each card opening the full-screen agent
-  inspector. Phones show one top section at a time and stack the cards.
+  Live observability dashboard for Symphony. Stats and charts sit at the top;
+  the work queue, pull requests and activity fill the space above a strip of
+  fixed worker slots at the bottom, where each running agent's card opens the
+  full-screen agent inspector. Phones show one section at a time and stack the
+  cards.
   """
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
@@ -12,7 +13,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   alias SymphonyElixirWeb.{Charts, Endpoint, LiveRefresh, Presenter, TranscriptComponents}
 
-  @sections [{"queue", "Queue"}, {"prs", "PRs"}, {"activity", "Activity"}, {"system", "System"}]
+  @sections [{"queue", "Queue"}, {"prs", "PRs"}, {"activity", "Activity"}, {"stats", "Stats"}]
 
   @impl true
   def mount(_params, _session, socket) do
@@ -53,6 +54,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <.stat label="Queue" value={@payload.counts.ready} detail={"#{@payload.counts.waiting} waiting"} values={@payload.history.ready} tone="blue" />
           <.stat label="Open PRs" value={@payload.counts.open_prs} detail="on GitHub" values={@payload.history.open_prs} tone="cyan" />
           <.stat
+            label="PRs closed today"
+            value={today(@payload.usage, :merged) + today(@payload.usage, :closed)}
+            detail={"#{today(@payload.usage, :merged)} merged · #{today(@payload.usage, :closed)} closed"}
+            values={closed_per_day(@payload.usage)}
+            tone="violet"
+            title="Pull requests merged or closed today (UTC); the sparkline covers 14 days"
+          />
+          <.stat
             label="Spend today"
             value={if @payload.usage.status == "ok", do: format_usd(@payload.usage.today[:usd_micro]), else: "n/a"}
             detail={budget_detail(@payload)}
@@ -70,31 +79,29 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <p class="error-copy"><strong><%= @payload.error.code %>:</strong> <%= @payload.error.message %></p>
         </section>
       <% else %>
-        <div class="top">
-          <nav class="section-tabs" role="tablist" aria-label="Sections">
-            <button
-              :for={{id, label} <- @sections}
-              type="button"
-              role="tab"
-              aria-selected={to_string(@section == id)}
-              class={["section-tab", @section == id && "is-active"]}
-              phx-click="section"
-              phx-value-id={id}
-            ><%= label %><span :if={section_count(@payload, id)} class="tab-count"><%= section_count(@payload, id) %></span></button>
-          </nav>
+        <nav class="section-tabs" role="tablist" aria-label="Sections">
+          <button
+            :for={{id, label} <- @sections}
+            type="button"
+            role="tab"
+            aria-selected={to_string(@section == id)}
+            class={["section-tab", @section == id && "is-active"]}
+            phx-click="section"
+            phx-value-id={id}
+          ><%= label %><span :if={section_count(@payload, id)} class="tab-count"><%= section_count(@payload, id) %></span></button>
+        </nav>
 
-          <div class="lists">
-            <.queue_section upcoming={@payload.upcoming} counts={@payload.counts} active={@section == "queue"} />
-            <.pulls_section :if={@payload.pull_requests.enabled} pulls={@payload.pull_requests} count={@payload.counts.open_prs} now={@now} active={@section == "prs"} />
-            <.activity_section usage={@payload.usage} now={@now} active={@section == "activity"} />
-          </div>
+        <div class={["charts", @section == "stats" && "is-active"]}>
+          <.health_panel payload={@payload} now={@now} />
+          <.runs_panel stats={@payload.run_stats} usage={@payload.usage} />
+          <.spend_panel usage={@payload.usage} usage_error={@payload.usage_error} />
+          <.models_panel usage={@payload.usage} rate_limits={@payload.rate_limits} />
+        </div>
 
-          <div class={["charts", @section == "system" && "is-active"]}>
-            <.health_panel payload={@payload} now={@now} />
-            <.runs_panel stats={@payload.run_stats} usage={@payload.usage} />
-            <.spend_panel usage={@payload.usage} usage_error={@payload.usage_error} />
-            <.models_panel usage={@payload.usage} rate_limits={@payload.rate_limits} />
-          </div>
+        <div class="lists">
+          <.queue_section upcoming={@payload.upcoming} counts={@payload.counts} active={@section == "queue"} />
+          <.pulls_section :if={@payload.pull_requests.enabled} pulls={@payload.pull_requests} count={@payload.counts.open_prs} now={@now} active={@section == "prs"} />
+          <.activity_section usage={@payload.usage} now={@now} active={@section == "activity"} />
         </div>
 
         <section class="dock" aria-labelledby="dock-title">
@@ -394,11 +401,23 @@ defmodule SymphonyElixirWeb.DashboardLive do
   attr(:usage_error, :any, default: nil)
 
   defp spend_panel(assigns) do
+    assigns = assign(assigns, :rows, spend_rows(assigns.usage))
+
     ~H"""
     <section class="panel" aria-labelledby="spend-title">
       <header class="section-head"><h2 id="spend-title" title="API-equivalent USD by model">Spend <span class="count">14 days</span></h2></header>
       <p :if={@usage.status != "ok"} class="error-copy">History unavailable<%= if @usage_error do %>: <%= @usage_error %><% end %>.</p>
       <Charts.columns id="spend-chart" title="Estimated worker spend per day by model, last 14 days" series={spend_series(@usage)} columns={spend_columns(@usage)} format={&format_usd_axis/1} width={340} />
+      <table :if={@rows != []} class="spend-table">
+        <thead><tr><th scope="col">Model</th><th scope="col">Today</th><th scope="col">14 days</th></tr></thead>
+        <tbody>
+          <tr :for={row <- @rows}>
+            <th scope="row"><span class={"legend-key #{row.class}"}></span><%= row.model %></th>
+            <td class="numeric"><%= format_usd(row.today) %></td>
+            <td class="numeric"><%= format_usd(row.total) %></td>
+          </tr>
+        </tbody>
+      </table>
     </section>
     """
   end
@@ -455,7 +474,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp section_count(payload, "queue"), do: payload.counts.ready
   defp section_count(payload, "prs"), do: payload.counts.open_prs
-  defp section_count(payload, "system"), do: if(healthy?(payload.health), do: nil, else: "!")
+  defp section_count(payload, "stats"), do: if(healthy?(payload.health), do: nil, else: "!")
   defp section_count(_payload, _section), do: nil
 
   # The strip always shows the worker slots (up to four empty ones) so its size
@@ -585,6 +604,25 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp spend_columns(usage) do
     Enum.map(Map.get(usage, :daily, []), fn day -> %{label: short_date(day.date), tip: day.date, values: day.spend_by_model} end)
   end
+
+  # Estimated spend per model, today and over the chart's 14 days, largest first.
+  defp spend_rows(usage) do
+    days = Map.get(usage, :daily, [])
+    today = List.last(days, %{spend_by_model: %{}}).spend_by_model
+
+    usage
+    |> spend_series()
+    |> Enum.map(fn series ->
+      total = days |> Enum.map(&Map.get(&1.spend_by_model, series.key, 0)) |> Enum.sum()
+      %{model: series.label, class: series.class, today: Map.get(today, series.key, 0), total: total}
+    end)
+    |> Enum.filter(&(&1.total > 0))
+    |> Enum.sort_by(& &1.total, :desc)
+  end
+
+  defp today(usage, key), do: usage |> Map.get(:daily, []) |> List.last(%{}) |> Map.get(key, 0)
+
+  defp closed_per_day(usage), do: usage |> Map.get(:daily, []) |> Enum.map(&(Map.get(&1, :merged, 0) + Map.get(&1, :closed, 0)))
 
   defp run_series do
     [

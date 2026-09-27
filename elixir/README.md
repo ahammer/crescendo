@@ -380,19 +380,23 @@ The observability UI now runs on a minimal Phoenix stack:
   warns when estimated worker usage for the UTC day reaches `observability.daily_budget_usd`
   (default $50); separate planner and independent reviewer calls are not included, and the
   warning does not stop dispatch.
-- The dashboard at `/` is built for phones first. Four header stats carry 12-hour sparklines (from
-  a five-minute sample of queue counts and spend kept for 48 hours in `operations.dets`). Below them
-  sit the work queue with estimated start times, pull requests and recent activity, then panels for
-  system health and autopilot, 14-day runs and spend, and model usage; on phones these are tabs
-  showing one at a time. Running agents sit in a strip at the very bottom, pinned to the viewport on
-  wide screens and stacked on phones. The strip keeps one slot per worker (up to four empty ones),
-  so its size holds steady; each agent card shows the plan's progress, a plain-language line for
-  the latest step, the last thing the agent said, its latest image, and its model, tokens, cost and
-  changed lines, and free slots show the next ready item. Queue estimates use the median run time
-  of the same kind of work over the last three days, in waves of `agent.max_concurrent_agents`.
-  Health checks report only signals Symphony observes: polling, dispatch capacity, blocked items,
-  research, tracker and pull request read age and errors, rate limit use and failed attempts in the
-  last hour, the usage store, and free workspace disk space.
+- The dashboard at `/` is built for phones first. Five header stats carry sparklines: agents,
+  queue, open pull requests, pull requests closed today (merged or closed without merging, over
+  14 days) and spend today (from a five-minute sample of queue counts and spend kept for 48 hours
+  in `operations.dets`). Below them are panels for system health and autopilot, 14-day runs, spend
+  (with each model's spend today and over 14 days) and model usage. Then come the work queue with
+  estimated start times, pull requests and recent activity. On a desktop window at least 1200px
+  wide and 900px tall the page fits the window, and these lists stretch to fill the height above
+  the agents; on phones the sections are tabs showing one at a time. Running agents sit in a strip
+  at the very bottom, horizontal on wide screens and stacked on phones. The strip keeps one slot per
+  worker (up to four empty ones), so its size holds steady; each agent card shows the plan's
+  progress, a plain-language line for the latest step, the last thing the agent said, its latest
+  image, and its model, tokens, cost and changed lines, and free slots show the next ready item.
+  Queue estimates use the median run time of the same kind of work over the last three days, in
+  waves of `agent.max_concurrent_agents`. Health checks report only signals Symphony observes:
+  polling, dispatch capacity, blocked items, research, tracker and pull request read age and
+  errors, rate limit use and failed attempts in the last hour, the usage store, and free workspace
+  disk space.
 - An agent card opens the full-screen agent inspector at `/agents/<issue_identifier>`. It shows the
   agent's run as a chat, rebuilt from Codex app-server notifications: messages and reasoning
   (streamed as they are written), commands with exit code, duration and the last 60 lines or 8 KB of

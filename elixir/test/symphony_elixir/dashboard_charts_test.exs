@@ -105,6 +105,7 @@ defmodule SymphonyElixir.DashboardChartsTest do
       :ok = Operations.event(table, "completed", %{issue_identifier: "GH-1"})
       :ok = Operations.event(table, "failed", %{issue_identifier: "GH-2"})
       :ok = Operations.event(table, "pr_merged", %{pr_number: 3})
+      :ok = Operations.event(table, "pr_closed", %{pr_number: 5})
       :ok = Operations.event(table, "dispatch", %{issue_identifier: "GH-4"})
 
       daily = Operations.snapshot(table).daily
@@ -113,7 +114,7 @@ defmodule SymphonyElixir.DashboardChartsTest do
       assert length(daily) == 14
       assert today.date == Date.utc_today() |> Date.to_iso8601()
       assert today.spend_by_model == %{"gpt-5.5" => 5_300_000}
-      assert %{completed: 1, failed: 1, interrupted: 0, merged: 1} = today
+      assert %{completed: 1, failed: 1, interrupted: 0, merged: 1, closed: 1} = today
       assert hd(daily).spend_by_model == %{}
       assert length(Operations.snapshot(nil).daily) == 14
     after

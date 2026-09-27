@@ -397,10 +397,16 @@ defmodule SymphonyElixir.Operations do
   end
 
   @series_days 14
-  @outcome_kinds %{"completed" => :completed, "failed" => :failed, "interrupted" => :interrupted, "pr_merged" => :merged}
+  @outcome_kinds %{
+    "completed" => :completed,
+    "failed" => :failed,
+    "interrupted" => :interrupted,
+    "pr_merged" => :merged,
+    "pr_closed" => :closed
+  }
 
   # The last two weeks (UTC), oldest first: estimated spend per model plus run
-  # outcomes and merged pull requests counted from the retained event ring.
+  # outcomes and merged or closed pull requests counted from the retained event ring.
   defp daily_series(spend, events) do
     today = Date.utc_today()
     dates = for offset <- (@series_days - 1)..0//-1, do: today |> Date.add(-offset) |> Date.to_iso8601()
@@ -422,7 +428,8 @@ defmodule SymphonyElixir.Operations do
         completed: Map.get(outcomes, {date, :completed}, 0),
         failed: Map.get(outcomes, {date, :failed}, 0),
         interrupted: Map.get(outcomes, {date, :interrupted}, 0),
-        merged: Map.get(outcomes, {date, :merged}, 0)
+        merged: Map.get(outcomes, {date, :merged}, 0),
+        closed: Map.get(outcomes, {date, :closed}, 0)
       }
     end)
   end

@@ -384,14 +384,15 @@ defmodule SymphonyElixirWeb.Presenter do
   defp run_stats(usage) do
     days = Map.get(usage, :daily, [])
     sum = fn key -> days |> Enum.map(&Map.get(&1, key, 0)) |> Enum.sum() end
-    [completed, interrupted, failed, merged] = Enum.map([:completed, :interrupted, :failed, :merged], sum)
+    [completed, interrupted, failed, merged, closed] = Enum.map([:completed, :interrupted, :failed, :merged, :closed], sum)
 
     %{
       total: completed + interrupted + failed,
       completed: completed,
       interrupted: interrupted,
       failed: failed,
-      merged: merged
+      merged: merged,
+      closed: closed
     }
   end
 
