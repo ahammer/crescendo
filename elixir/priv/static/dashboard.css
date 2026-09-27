@@ -326,42 +326,46 @@ p {
   vector-effect: non-scaling-stroke;
 }
 
-/* Page grid: one column on phones; the HUD beside a side column from 900px;
-   work | HUD | system from 1400px. */
+/* Page: the lists and charts fill the top; the agent strip sits at the very
+   bottom (pinned to the viewport on wide screens). */
 
-.dash-grid {
-  display: grid;
+.dash {
+  display: flex;
+  flex-direction: column;
   gap: 14px;
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-areas:
-    "hud"
-    "tabs"
-    "work"
-    "system";
+  min-height: calc(100vh - 44px);
 }
 
-.hud {
-  grid-area: hud;
-  min-width: 0;
-}
-
-.section-tabs {
-  grid-area: tabs;
-}
-
-.col {
+.top {
   display: grid;
+  flex: 1;
   gap: 14px;
   align-content: start;
   min-width: 0;
 }
 
-.col-work {
-  grid-area: work;
+.lists,
+.charts {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
 }
 
-.col-system {
-  grid-area: system;
+.charts {
+  display: none;
+}
+
+.charts.is-active {
+  display: grid;
+}
+
+.panel {
+  min-width: 0;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
 }
 
 .section-head {
@@ -377,15 +381,75 @@ p {
   font-weight: 650;
 }
 
-/* Agent HUD: one card per running agent; the card opens the inspector. */
+/* Agent strip: fixed worker slots, one card per running agent (each opens the
+   inspector) and a placeholder per free slot. */
 
-.hud-cards {
+.dock {
   display: grid;
   gap: 10px;
+  padding: 12px;
+  background: rgba(10, 18, 34, 0.96);
+  border: 1px solid rgba(47, 168, 255, 0.35);
+  border-radius: 16px;
+  box-shadow: var(--glow);
+  backdrop-filter: blur(8px);
+}
+
+.dock-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.dock-head h2 {
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.dock-slots {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.free-slot {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  min-height: 96px;
+  padding: 12px 14px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 14px;
+  color: var(--muted);
+}
+
+.free-title {
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.free-next {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.free-next-title {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--ink-2);
+  font-size: 13px;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .agent-card {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
   min-width: 0;
   padding: 12px 14px;
@@ -475,6 +539,7 @@ p {
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 12px;
+  margin-top: auto;
   color: var(--muted);
   font-size: 12px;
 }
@@ -483,12 +548,6 @@ p {
   margin-left: auto;
   color: var(--accent);
   font-weight: 600;
-}
-
-.hud-empty {
-  padding: 18px 14px;
-  border: 1px dashed var(--line-strong);
-  border-radius: 14px;
 }
 
 .now {
@@ -560,30 +619,35 @@ p {
 }
 
 .attention {
-  display: grid;
-  gap: 6px;
-  margin-top: 10px;
-}
-
-.attention-item {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
   gap: 6px;
-  padding: 8px 10px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  font-size: 12px;
+  margin: 0 0 0 auto;
+  padding: 0;
+  list-style: none;
 }
 
-.attention-text {
-  flex: 1 1 160px;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--ink-2);
+.attention-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  font-size: 12px;
   white-space: nowrap;
-  text-overflow: ellipsis;
+}
+
+.chip-warning {
+  background: var(--warning-soft);
+  border-color: rgba(245, 184, 61, 0.35);
+  color: var(--warning-ink);
+}
+
+.chip-critical {
+  background: var(--critical-soft);
+  border-color: rgba(240, 82, 82, 0.35);
+  color: var(--critical-ink);
 }
 
 /* Section tabs: on phones one secondary section shows at a time. */
@@ -644,6 +708,11 @@ p {
 
 .sec.is-active {
   display: block;
+}
+
+.sec .rows {
+  max-height: 360px;
+  overflow-y: auto;
 }
 
 /* Rows: compact two-to-four column lists that work at phone width. */
@@ -2297,7 +2366,7 @@ p {
   }
 }
 
-/* From 900px: the HUD beside one side column; sections always show. */
+/* From 900px: every top section shows, and the agent strip pins to the bottom. */
 
 @media (min-width: 900px) {
   .app-shell {
@@ -2314,14 +2383,6 @@ p {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
-  .dash-grid {
-    grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
-    grid-template-areas:
-      "hud work"
-      "hud system";
-    align-items: start;
-  }
-
   .section-tabs {
     display: none;
   }
@@ -2330,9 +2391,41 @@ p {
     display: block;
   }
 
-  .col-work .rows {
-    max-height: 380px;
-    overflow-y: auto;
+  .sec .rows {
+    max-height: 300px;
+  }
+
+  .lists,
+  .charts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .charts {
+    display: grid;
+  }
+
+  /* An odd last list (activity, when pull requests are on) takes the full row. */
+  .lists > .sec:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+  }
+
+  .dock {
+    position: sticky;
+    bottom: 12px;
+    z-index: 10;
+  }
+
+  .dock-slots {
+    grid-template-columns: none;
+    grid-auto-columns: minmax(300px, 1fr);
+    grid-auto-flow: column;
+    overflow-x: auto;
+  }
+
+  .dock .agent-card,
+  .dock .free-slot {
+    height: 216px;
+    overflow: hidden;
   }
 
   .insp-others {
@@ -2344,10 +2437,6 @@ p {
 /* From 1100px the inspector shows every pane: chat beside a sidebar. */
 
 @media (min-width: 1100px) {
-  .hud-cards {
-    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
-  }
-
   .pane-tabs {
     display: none;
   }
@@ -2379,12 +2468,21 @@ p {
   }
 }
 
-/* From 1400px: work | HUD | system. */
+/* From 1200px the three lists share a row; from 1400px so do the four charts. */
+
+@media (min-width: 1200px) {
+  .lists {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .lists > .sec:last-child:nth-child(odd) {
+    grid-column: auto;
+  }
+}
 
 @media (min-width: 1400px) {
-  .dash-grid {
-    grid-template-columns: minmax(300px, 360px) minmax(0, 1fr) minmax(300px, 380px);
-    grid-template-areas: "work hud system";
+  .charts {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
 

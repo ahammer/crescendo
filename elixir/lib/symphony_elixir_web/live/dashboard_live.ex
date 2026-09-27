@@ -1,9 +1,9 @@
 defmodule SymphonyElixirWeb.DashboardLive do
   @moduledoc """
-  Live observability dashboard for Symphony: a HUD of running agents, each
-  opening the full-screen agent inspector, beside the work queue, pull
-  requests, activity and system health. Phones get one column, with the
-  secondary sections behind tabs.
+  Live observability dashboard for Symphony. The work queue, pull requests,
+  activity and system charts fill the top; the running agents sit in a strip
+  of fixed worker slots at the bottom, each card opening the full-screen agent
+  inspector. Phones show one top section at a time and stack the cards.
   """
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
@@ -70,22 +70,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <p class="error-copy"><strong><%= @payload.error.code %>:</strong> <%= @payload.error.message %></p>
         </section>
       <% else %>
-        <div class="dash-grid">
-          <section class="hud" aria-labelledby="hud-title">
-            <header class="section-head">
-              <h2 id="hud-title">Agents</h2>
-              <span class="count"><%= agents_running(@payload.counts.running) %></span>
-            </header>
-            <%= if @payload.running == [] do %>
-              <p class="empty-state hud-empty">No agents running. <%= idle_reason(@payload, @now) %></p>
-            <% else %>
-              <div class="hud-cards">
-                <.agent_card :for={entry <- @payload.running} entry={entry} now={@now} />
-              </div>
-            <% end %>
-            <.attention blocked={@payload.blocked} retrying={@payload.retrying} now={@now} />
-          </section>
-
+        <div class="top">
           <nav class="section-tabs" role="tablist" aria-label="Sections">
             <button
               :for={{id, label} <- @sections}
@@ -98,16 +83,31 @@ defmodule SymphonyElixirWeb.DashboardLive do
             ><%= label %><span :if={section_count(@payload, id)} class="tab-count"><%= section_count(@payload, id) %></span></button>
           </nav>
 
-          <div class="col col-work">
+          <div class="lists">
             <.queue_section upcoming={@payload.upcoming} counts={@payload.counts} active={@section == "queue"} />
             <.pulls_section :if={@payload.pull_requests.enabled} pulls={@payload.pull_requests} count={@payload.counts.open_prs} now={@now} active={@section == "prs"} />
             <.activity_section usage={@payload.usage} now={@now} active={@section == "activity"} />
           </div>
 
-          <div class="col col-system">
-            <.system_section payload={@payload} now={@now} active={@section == "system"} />
+          <div class={["charts", @section == "system" && "is-active"]}>
+            <.health_panel payload={@payload} now={@now} />
+            <.runs_panel stats={@payload.run_stats} usage={@payload.usage} />
+            <.spend_panel usage={@payload.usage} usage_error={@payload.usage_error} />
+            <.models_panel usage={@payload.usage} rate_limits={@payload.rate_limits} />
           </div>
         </div>
+
+        <section class="dock" aria-labelledby="dock-title">
+          <header class="dock-head">
+            <h2 id="dock-title">Agents</h2>
+            <span class="count"><%= @payload.counts.running %>/<%= @payload.header.max_agents || "—" %> running</span>
+            <.attention blocked={@payload.blocked} retrying={@payload.retrying} now={@now} />
+          </header>
+          <div class="dock-slots">
+            <.agent_card :for={entry <- @payload.running} entry={entry} now={@now} />
+            <.free_slot :for={next <- free_slots(@payload)} next={next} idle={idle_reason(@payload, @now)} />
+          </div>
+        </section>
       <% end %>
     </section>
     """
@@ -188,21 +188,34 @@ defmodule SymphonyElixirWeb.DashboardLive do
   attr(:retrying, :list, required: true)
   attr(:now, :any, required: true)
 
+  # Waiting runs as chips beside the slots; the reason is the tooltip.
   defp attention(assigns) do
     ~H"""
-    <div :if={@blocked != [] or @retrying != []} class="attention" aria-label="Needs attention">
-      <p :for={entry <- @blocked} class="attention-item">
-        <span class="status-tag status-critical">Blocked</span>
-        <.issue_identifier identifier={entry.issue_identifier} url={entry.issue_url} />
-        <span class="attention-text" title={"#{entry.error} · #{entry.last_message}"}><%= entry.error || "n/a" %><span :if={entry.last_message} class="muted"> · <%= entry.last_message %></span></span>
-        <.copy_button :if={entry.session_id} value={entry.session_id} />
-      </p>
-      <p :for={entry <- @retrying} class="attention-item">
-        <span class="status-tag status-warning">Retry <%= entry.attempt %></span>
-        <.issue_identifier identifier={entry.issue_identifier} url={entry.issue_url} />
-        <span class="attention-text" title={entry.error}><%= entry.error || "n/a" %></span>
-        <span class="muted numeric"><%= until(entry.due_at, @now) %></span>
-      </p>
+    <ul :if={@blocked != [] or @retrying != []} class="attention" aria-label="Needs attention">
+      <li :for={entry <- @blocked} class="attention-chip chip-critical" title={Enum.join(Enum.reject([entry.error, entry.last_message], &is_nil/1), " · ")}>
+        Blocked <.issue_identifier identifier={entry.issue_identifier} url={entry.issue_url} />
+      </li>
+      <li :for={entry <- @retrying} class="attention-chip chip-warning" title={entry.error}>
+        Retry <%= entry.attempt %> <.issue_identifier identifier={entry.issue_identifier} url={entry.issue_url} /> <span class="muted numeric"><%= until(entry.due_at, @now) %></span>
+      </li>
+    </ul>
+    """
+  end
+
+  attr(:next, :map, default: nil)
+  attr(:idle, :string, required: true)
+
+  # An empty worker slot keeps the strip's size and says what comes next.
+  defp free_slot(assigns) do
+    ~H"""
+    <div class="free-slot">
+      <p class="free-title">Free slot</p>
+      <%= if @next do %>
+        <p class="free-next">Next up <.issue_identifier identifier={@next.issue_identifier} url={@next.issue_url} /></p>
+        <p class="free-next-title"><%= @next.title %></p>
+      <% else %>
+        <p class="free-next"><%= @idle %></p>
+      <% end %>
     </div>
     """
   end
@@ -304,27 +317,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   attr(:payload, :map, required: true)
   attr(:now, :any, required: true)
-  attr(:active, :boolean, default: false)
 
-  defp system_section(assigns) do
+  defp health_panel(assigns) do
     health = assigns.payload.health
     checks = health.coordinator.checks ++ health.system.checks
-
-    assigns =
-      assign(assigns,
-        health: health,
-        checks: checks,
-        problems: Enum.reject(checks, &(&1.status in ["healthy", "idle"])),
-        stats: assigns.payload.run_stats,
-        usage: assigns.payload.usage
-      )
+    assigns = assign(assigns, health: health, checks: checks, problems: Enum.reject(checks, &(&1.status in ["healthy", "idle"])))
 
     ~H"""
-    <section class={["sec sec-system", @active && "is-active"]} aria-labelledby="system-title">
-      <header class="section-head">
-        <h2 id="system-title">System</h2>
-      </header>
-
+    <section class="panel" aria-labelledby="system-title">
+      <header class="section-head"><h2 id="system-title">System</h2></header>
       <div class="health-lines">
         <p class="health-line">
           <span class={"dot dot-#{status_tone(@health.coordinator.status)}"} aria-hidden="true"></span>Coordinator
@@ -348,7 +349,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </li>
         </ul>
       </details>
-
       <div :if={@payload.autopilot.enabled} class="sys-block">
         <h3>Autopilot</h3>
         <ol class="stepper" aria-label="Research round">
@@ -366,35 +366,56 @@ defmodule SymphonyElixirWeb.DashboardLive do
           detail="Research pauses at the cap."
         />
       </div>
+    </section>
+    """
+  end
 
-      <div class="sys-block">
-        <h3>Runs <span class="count">14 days</span></h3>
-        <dl class="run-stats">
-          <div><dt>Runs</dt><dd class="numeric"><%= format_int(@stats.total) %></dd></div>
-          <div><dt>Completed</dt><dd class="numeric"><%= share(@stats.completed, @stats.total) %></dd></div>
-          <div><dt>Interrupted</dt><dd class="numeric"><%= share(@stats.interrupted, @stats.total) %></dd></div>
-          <div><dt>Failed</dt><dd class="numeric"><%= share(@stats.failed, @stats.total) %></dd></div>
-          <div><dt>Merged</dt><dd class="numeric"><%= format_int(@stats.merged) %></dd></div>
-          <div><dt>Tokens today</dt><dd class="numeric"><%= compact(@usage.today[:total_tokens]) %></dd></div>
-        </dl>
-        <Charts.columns id="runs-chart" title="Worker runs per day by outcome, last 14 days" series={run_series()} columns={run_columns(@usage)} format={&format_count/1} integer={true} width={340} />
-      </div>
+  attr(:stats, :map, required: true)
+  attr(:usage, :map, required: true)
 
-      <div class="sys-block">
-        <h3 title="API-equivalent USD by model">Spend <span class="count">14 days</span></h3>
-        <p :if={@usage.status != "ok"} class="error-copy">History unavailable<%= if @payload.usage_error do %>: <%= @payload.usage_error %><% end %>.</p>
-        <Charts.columns id="spend-chart" title="Estimated worker spend per day by model, last 14 days" series={spend_series(@usage)} columns={spend_columns(@usage)} format={&format_usd_axis/1} width={340} />
-      </div>
+  defp runs_panel(assigns) do
+    ~H"""
+    <section class="panel" aria-labelledby="runs-title">
+      <header class="section-head"><h2 id="runs-title">Runs <span class="count">14 days</span></h2></header>
+      <dl class="run-stats">
+        <div><dt>Runs</dt><dd class="numeric"><%= format_int(@stats.total) %></dd></div>
+        <div><dt>Completed</dt><dd class="numeric"><%= share(@stats.completed, @stats.total) %></dd></div>
+        <div><dt>Interrupted</dt><dd class="numeric"><%= share(@stats.interrupted, @stats.total) %></dd></div>
+        <div><dt>Failed</dt><dd class="numeric"><%= share(@stats.failed, @stats.total) %></dd></div>
+        <div><dt>Merged</dt><dd class="numeric"><%= format_int(@stats.merged) %></dd></div>
+        <div><dt>Tokens today</dt><dd class="numeric"><%= compact(@usage.today[:total_tokens]) %></dd></div>
+      </dl>
+      <Charts.columns id="runs-chart" title="Worker runs per day by outcome, last 14 days" series={run_series()} columns={run_columns(@usage)} format={&format_count/1} integer={true} width={340} />
+    </section>
+    """
+  end
 
-      <div class="sys-block">
-        <h3 title={"Tokens by model; prices as of #{@usage.pricing_as_of}"}>Models</h3>
-        <%= if @usage.by_model == [] do %>
-          <p class="empty-state">No recorded model usage yet.</p>
-        <% else %>
-          <Charts.bars title="Tokens by model" rows={model_rows(@usage)} />
-        <% end %>
-        <Charts.meter :for={meter <- rate_limit_meters(@payload.rate_limits)} label={meter.label} percent={meter.percent} detail={meter.detail} />
-      </div>
+  attr(:usage, :map, required: true)
+  attr(:usage_error, :any, default: nil)
+
+  defp spend_panel(assigns) do
+    ~H"""
+    <section class="panel" aria-labelledby="spend-title">
+      <header class="section-head"><h2 id="spend-title" title="API-equivalent USD by model">Spend <span class="count">14 days</span></h2></header>
+      <p :if={@usage.status != "ok"} class="error-copy">History unavailable<%= if @usage_error do %>: <%= @usage_error %><% end %>.</p>
+      <Charts.columns id="spend-chart" title="Estimated worker spend per day by model, last 14 days" series={spend_series(@usage)} columns={spend_columns(@usage)} format={&format_usd_axis/1} width={340} />
+    </section>
+    """
+  end
+
+  attr(:usage, :map, required: true)
+  attr(:rate_limits, :any, default: nil)
+
+  defp models_panel(assigns) do
+    ~H"""
+    <section class="panel" aria-labelledby="models-title">
+      <header class="section-head"><h2 id="models-title" title={"Tokens by model; prices as of #{@usage.pricing_as_of}"}>Models</h2></header>
+      <%= if @usage.by_model == [] do %>
+        <p class="empty-state">No recorded model usage yet.</p>
+      <% else %>
+        <Charts.bars title="Tokens by model" rows={model_rows(@usage)} />
+      <% end %>
+      <Charts.meter :for={meter <- rate_limit_meters(@rate_limits)} label={meter.label} percent={meter.percent} detail={meter.detail} />
     </section>
     """
   end
@@ -410,8 +431,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
     autopilot = if payload.autopilot.enabled, do: "Autopilot on", else: "Autopilot off"
     [repo, autopilot] |> Enum.reject(&is_nil/1) |> Enum.join(" · ")
   end
-
-  defp agents_running(count), do: "#{count} running"
 
   defp longest_detail([], _now), do: "idle"
 
@@ -438,6 +457,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp section_count(payload, "prs"), do: payload.counts.open_prs
   defp section_count(payload, "system"), do: if(healthy?(payload.health), do: nil, else: "!")
   defp section_count(_payload, _section), do: nil
+
+  # The strip always shows the worker slots (up to four empty ones) so its size
+  # holds steady as agents start and finish; free slots preview the queue.
+  defp free_slots(payload) do
+    slots = max(min(payload.header.max_agents || 1, 4), length(payload.running))
+    free = slots - length(payload.running)
+    ready = payload.upcoming.ready
+    if free > 0, do: Enum.map(0..(free - 1)//1, &Enum.at(ready, &1)), else: []
+  end
 
   defp healthy?(health), do: health.coordinator.status == "operational" and health.system.status == "operational"
 

@@ -581,7 +581,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "turn blocked: waiting for user input"
     assert html =~ "Live"
     assert html =~ "Offline"
-    assert html =~ "Copy ID"
+    assert html =~ "Blocked"
+    assert html =~ "Retry 2"
     refute html =~ "data-runtime-clock="
     refute html =~ "setInterval(refreshRuntimeClocks"
     refute html =~ "Refresh now"
@@ -895,6 +896,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ ~r/Third ready.*?~10m/s
     assert html =~ "Blocked"
     assert html =~ ~s(title="dependency blocked: GH-10")
+    assert html =~ "1/2 running"
+    assert html =~ ~r/Free slot.*?Next up.*?GH-10.*?First ready/s
     assert html =~ "over $10.00 budget"
     assert html =~ "Worker usage alert"
     assert html =~ "1/2"
