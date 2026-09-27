@@ -70,6 +70,72 @@ defmodule SymphonyElixirWeb.TranscriptComponents do
     """
   end
 
+  attr(:entry, :map, default: nil)
+  attr(:fallback, :string, default: nil)
+
+  @doc """
+  One glanceable line for an agent's latest step, for the dashboard HUD.
+  `fallback` covers runs that have no transcript yet.
+  """
+  @spec status_line(map()) :: Phoenix.LiveView.Rendered.t()
+  def status_line(assigns) do
+    {state, icon, text} = headline(assigns.entry, assigns.fallback)
+    assigns = assign(assigns, state: state, icon: icon, text: text)
+
+    ~H"""
+    <span class={"now now-#{@state}"}><span class="now-icon" aria-hidden="true"><%= @icon %></span><span class="now-text"><%= @text %></span></span>
+    """
+  end
+
+  defp headline(nil, nil), do: {"idle", "…", "Starting…"}
+  defp headline(nil, fallback), do: {"idle", "•", fallback}
+  defp headline(%{kind: "reasoning", status: "running"}, _fallback), do: {"running", "◌", "Thinking…"}
+  defp headline(%{kind: "reasoning"} = entry, _fallback), do: {"done", "◌", preview(entry.text)}
+  defp headline(%{kind: "command"} = entry, _fallback), do: command_headline(command_state(entry), entry[:summary] || entry.command, entry)
+  defp headline(%{kind: "message"} = entry, _fallback), do: {"done", "✦", preview(entry.text)}
+  defp headline(%{kind: "file_change"} = entry, _fallback), do: {step_state(entry), "✎", "#{if entry[:status] == "running", do: "Editing", else: "Edited"} #{files_text(entry.files)}"}
+  defp headline(%{kind: "tool"} = entry, _fallback), do: {step_state(entry), "⚙", [entry.name, entry[:call]] |> Enum.reject(&is_nil/1) |> Enum.join(" · ")}
+  defp headline(%{kind: "image"} = entry, _fallback), do: {"done", "▣", "Viewed #{entry[:label] || "an image"}"}
+  defp headline(%{kind: "search"} = entry, _fallback), do: {"done", "⌕", "Searched the web for #{entry.query}"}
+  defp headline(%{kind: "plan"} = entry, _fallback), do: {"done", "☰", "Updated the plan · #{Enum.count(entry.steps, &(&1.status == "completed"))}/#{length(entry.steps)} steps"}
+  defp headline(%{kind: "notice"} = entry, _fallback), do: {if(entry[:tone] == "error", do: "failed", else: "done"), "!", entry.text}
+  defp headline(%{kind: "prompt"}, _fallback), do: {"done", "↳", "Read the task"}
+  defp headline(entry, _fallback), do: {"done", "•", to_string(entry[:kind])}
+
+  defp command_headline("running", what, _entry), do: {"running", "◔", "Running #{what}"}
+  defp command_headline("failed", what, entry), do: {"failed", "✕", "#{what} failed#{if is_integer(entry[:exit_code]), do: " (exit #{entry.exit_code})"}"}
+  defp command_headline(_state, what, _entry), do: {"done", "✓", what}
+
+  defp step_state(%{status: "running"}), do: "running"
+  defp step_state(%{status: "failed"}), do: "failed"
+  defp step_state(_entry), do: "done"
+
+  defp files_text([_file]), do: "1 file"
+  defp files_text(files), do: "#{length(files)} files"
+
+  attr(:entries, :list, required: true)
+
+  @doc "Every image in a run, newest first; each opens full size."
+  @spec gallery(map()) :: Phoenix.LiveView.Rendered.t()
+  def gallery(assigns) do
+    images =
+      for entry <- Enum.reverse(assigns.entries), image <- Map.get(entry, :images, []) do
+        %{src: image.src, label: entry[:label] || entry[:name] || "Image"}
+      end
+
+    assigns = assign(assigns, :images, images)
+
+    ~H"""
+    <p :if={@images == []} class="empty-state">No images in this run yet.</p>
+    <div :if={@images != []} class="gallery">
+      <a :for={image <- @images} class="shot gallery-shot" href={image.src} target="_blank" rel="noopener" title={image.label}>
+        <img src={image.src} alt={image.label} loading="lazy" />
+        <span class="gallery-label"><%= image.label %></span>
+      </a>
+    </div>
+    """
+  end
+
   attr(:entry, :map, required: true)
   attr(:now, :any, required: true)
 

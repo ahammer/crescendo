@@ -6,15 +6,16 @@ defmodule SymphonyElixirWeb.Presenter do
   alias SymphonyElixir.{Config, Operations, Orchestrator, StatusDashboard, Transcript, Workspace}
 
   @doc """
-  The dashboard and `/api/v1/state` projection. With `transcripts: true` each
-  running entry also carries its full transcript (the dashboard needs it; the
-  state API stays light and serves transcripts per item instead).
+  The dashboard and `/api/v1/state` projection. Running entries carry a light
+  workspace summary; `transcripts: true` adds every running agent's full
+  transcript, and `transcripts: identifier` adds only that agent's (the agent
+  inspector needs one; the state API serves transcripts per item instead).
   """
   @spec state_payload(GenServer.name(), timeout(), keyword()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms, opts \\ []) do
     now = DateTime.utc_now()
     generated_at = now |> DateTime.truncate(:second) |> DateTime.to_iso8601()
-    transcripts? = Keyword.get(opts, :transcripts, false)
+    transcripts = Keyword.get(opts, :transcripts, false)
 
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
       %{} = snapshot ->
@@ -33,7 +34,7 @@ defmodule SymphonyElixirWeb.Presenter do
         %{
           generated_at: generated_at,
           counts: counts,
-          running: Enum.map(snapshot.running, &running_entry_payload(&1, transcripts?)),
+          running: Enum.map(snapshot.running, &running_entry_payload(&1, transcripts)),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
           codex_totals: snapshot.codex_totals,
@@ -150,7 +151,7 @@ defmodule SymphonyElixirWeb.Presenter do
   defp issue_status(nil, retry, _blocked) when not is_nil(retry), do: "retrying"
   defp issue_status(nil, nil, _blocked), do: "blocked"
 
-  defp running_entry_payload(entry, transcripts?) do
+  defp running_entry_payload(entry, transcripts) do
     payload =
       entry
       |> running_entry_payload()
@@ -161,7 +162,9 @@ defmodule SymphonyElixirWeb.Presenter do
         workspace: workspace_payload(Map.get(entry, :transcript))
       })
 
-    if transcripts?, do: Map.put(payload, :transcript, transcript_entries(Map.get(entry, :transcript))), else: payload
+    if transcripts in [true, entry.identifier],
+      do: Map.put(payload, :transcript, transcript_entries(Map.get(entry, :transcript))),
+      else: payload
   end
 
   defp running_entry_payload(entry) do
@@ -566,22 +569,35 @@ defmodule SymphonyElixirWeb.Presenter do
   defp age_text(seconds) when seconds < 5_400, do: "#{div(seconds, 60)}m"
   defp age_text(seconds), do: "#{div(seconds, 3_600)}h"
 
+  # What a glance at one agent needs: plan progress, changed files, its images,
+  # its latest step (`now`) and the last thing it said (`said`).
   defp workspace_payload(transcript) do
     transcript = transcript || Transcript.new()
-
-    latest_image =
-      transcript.entries
-      |> Enum.flat_map(&Map.get(&1, :images, []))
-      |> List.last()
+    images = Enum.flat_map(transcript.entries, &Map.get(&1, :images, []))
+    said = transcript.entries |> Enum.filter(&(&1.kind == "message")) |> List.last()
 
     %{
       progress: Transcript.progress(transcript),
       plan: transcript.plan,
       plan_explanation: transcript.plan_explanation,
       files: transcript.files,
-      latest_image: latest_image,
-      entries: length(transcript.entries)
+      latest_image: List.last(images),
+      images: length(images),
+      entries: length(transcript.entries),
+      now: transcript.entries |> List.last() |> glance(),
+      said: said && excerpt(said.text, 240)
     }
+  end
+
+  defp glance(nil), do: nil
+
+  defp glance(entry) do
+    entry
+    |> Map.drop([:output, :images])
+    |> Map.replace_lazy(:files, fn files -> Enum.map(files, &Map.delete(&1, :diff)) end)
+    |> Map.replace_lazy(:text, &excerpt(&1, 240))
+    |> Map.update(:at, nil, &iso8601/1)
+    |> Map.delete(:started_at)
   end
 
   defp transcript_entries(nil), do: []
@@ -595,7 +611,9 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   # Issue bodies are Markdown; the excerpt keeps the words and drops the markup.
-  defp excerpt(text) when is_binary(text) do
+  defp excerpt(text, limit \\ 400)
+
+  defp excerpt(text, limit) when is_binary(text) do
     compact =
       text
       |> String.replace(~r/<!--.*?-->/s, " ")
@@ -605,10 +623,10 @@ defmodule SymphonyElixirWeb.Presenter do
       |> String.replace(~r/\s+/, " ")
       |> String.trim()
 
-    if String.length(compact) > 400, do: String.slice(compact, 0, 399) <> "…", else: compact
+    if String.length(compact) > limit, do: String.slice(compact, 0, limit - 1) <> "…", else: compact
   end
 
-  defp excerpt(_text), do: nil
+  defp excerpt(_text, _limit), do: nil
 
   defp pulls_payload(nil), do: %{items: [], observed_at: nil, error: nil, enabled: false}
   defp pulls_payload(value), do: Map.update(value, :observed_at, nil, &iso8601/1)

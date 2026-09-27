@@ -474,4 +474,54 @@ defmodule SymphonyElixir.TranscriptTest do
 
     assert render_component(&TranscriptComponents.files_changed/1, files: [%{path: "one.rs"}]) =~ "1 file changed"
   end
+
+  test "the HUD status line says what an agent is doing in plain words" do
+    line = fn entry, fallback ->
+      render_component(&TranscriptComponents.status_line/1, entry: entry, fallback: fallback)
+    end
+
+    cases = [
+      {nil, nil, "Starting…"},
+      {nil, "item started: command execution", "item started: command execution"},
+      {%{kind: "reasoning", status: "running", text: ""}, nil, "Thinking…"},
+      {%{kind: "reasoning", status: "completed", text: "**Check** the inlet"}, nil, "Check the inlet"},
+      {%{kind: "command", status: "running", command: "cargo test"}, nil, "Running cargo test"},
+      {%{kind: "command", status: "completed", command: "cat a.md", summary: "Read a.md", exit_code: 0}, nil, "Read a.md"},
+      {%{kind: "command", status: "failed", command: "cargo test", exit_code: 101}, nil, "cargo test failed (exit 101)"},
+      {%{kind: "command", status: "failed", command: "rm build", exit_code: nil}, nil, "rm build failed"},
+      {%{kind: "message", text: "Done"}, nil, "Done"},
+      {%{kind: "file_change", status: "running", files: [%{path: "a"}]}, nil, "Editing 1 file"},
+      {%{kind: "file_change", status: "completed", files: [%{path: "a"}, %{path: "b"}]}, nil, "Edited 2 files"},
+      {%{kind: "tool", status: "failed", name: "github_api", call: "GET /x"}, nil, "github_api · GET /x"},
+      {%{kind: "tool", status: "completed", name: "probe"}, nil, "probe"},
+      {%{kind: "image", label: "shot.png"}, nil, "Viewed shot.png"},
+      {%{kind: "image"}, nil, "Viewed an image"},
+      {%{kind: "search", query: "lattice boltzmann"}, nil, "Searched the web for lattice boltzmann"},
+      {%{kind: "plan", steps: [%{status: "completed"}, %{status: "pending"}]}, nil, "Updated the plan · 1/2 steps"},
+      {%{kind: "notice", tone: "error", text: "Turn failed"}, nil, "Turn failed"},
+      {%{kind: "notice", tone: "info", text: "Context compacted"}, nil, "Context compacted"},
+      {%{kind: "prompt"}, nil, "Read the task"},
+      {%{kind: "mystery"}, nil, "mystery"}
+    ]
+
+    for {entry, fallback, text} <- cases, do: assert(line.(entry, fallback) =~ text)
+
+    assert line.(%{kind: "command", status: "failed", command: "x", exit_code: 1}, nil) =~ "now-failed"
+    assert line.(%{kind: "tool", status: "running", name: "t"}, nil) =~ "now-running"
+    assert line.(%{kind: "notice", tone: "error", text: "x"}, nil) =~ "now-failed"
+  end
+
+  test "the gallery shows every image in a run, newest first" do
+    entries = [
+      %{kind: "image", label: "first.png", images: [%{src: "/artifacts/x/1.png"}]},
+      %{kind: "tool", name: "computer_use · screenshot", images: [%{src: "/artifacts/x/2.png"}]},
+      %{kind: "message", text: "no images"},
+      %{kind: "image", images: [%{src: "/artifacts/x/3.png"}]}
+    ]
+
+    html = render_component(&TranscriptComponents.gallery/1, entries: entries)
+    assert Regex.scan(~r{href="/artifacts/x/(\d)\.png"}, html, capture: :all_but_first) == [["3"], ["2"], ["1"]]
+    assert html =~ "computer_use · screenshot" and html =~ "first.png" and html =~ ~s(alt="Image")
+    assert render_component(&TranscriptComponents.gallery/1, entries: []) =~ "No images in this run yet."
+  end
 end

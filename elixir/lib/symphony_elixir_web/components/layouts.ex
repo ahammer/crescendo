@@ -73,6 +73,16 @@ defmodule SymphonyElixirWeb.Layouts do
     """
   end
 
+  @doc "A full-screen page without the dashboard's gutters (the agent inspector)."
+  @spec bare(map()) :: Phoenix.LiveView.Rendered.t()
+  def bare(assigns) do
+    ~H"""
+    <main class="app-bare">
+      {@inner_content}
+    </main>
+    """
+  end
+
   @spec app(map()) :: Phoenix.LiveView.Rendered.t()
   def app(assigns) do
     ~H"""

@@ -1532,6 +1532,9 @@ Enablement (extension):
   coding agent's protocol events. Transcripts SHOULD be bounded in memory (entries per run and bytes
   per field) and SHOULD reference images through the implementation's own artifact store (Section
   13.7.3), never through workspace or host filesystem paths.
+- An implementation MAY give each running agent its own page (for example
+  `/agents/<issue_identifier>`) for the transcript, keeping the dashboard itself to a summary per
+  agent.
 - Transcripts expose raw agent output. When the dashboard is reachable beyond the operator's machine,
   anyone with its URL can read everything agents print or look at.
 

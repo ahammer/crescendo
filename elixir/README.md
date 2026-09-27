@@ -380,20 +380,25 @@ The observability UI now runs on a minimal Phoenix stack:
   warns when estimated worker usage for the UTC day reaches `observability.daily_budget_usd`
   (default $50); separate planner and independent reviewer calls are not included, and the
   warning does not stop dispatch.
-- The page is a dark, three-column operations view: header stats; the work queue with estimated
-  start times, open pull requests and recent activity; KPI cards with 12-hour sparklines (from a
-  five-minute sample of queue counts and spend kept for 48 hours in `operations.dets`); the Active
-  Agent Workspace; coordinator and system health; run statistics; and 14-day charts. Queue
-  estimates use the median run time of the same kind of work over the last three days, in waves of
-  `agent.max_concurrent_agents`. Health checks report only signals Symphony observes: polling,
-  dispatch capacity, blocked items, research, tracker and pull request read age and errors, rate
-  limit use and failed attempts in the last hour, the usage store, and free workspace disk space.
-- The Active Agent Workspace has a tab per running agent. Each shows the agent's run as a chat,
-  rebuilt from Codex app-server notifications: messages and reasoning (streamed as they are
-  written), commands with exit code, duration and the last 60 lines or 8 KB of output, file edits
-  with diffs, plan steps with progress, and images inline where the agent saw them. Symphony keeps
-  the last 150 entries of each running agent in memory; `/api/v1/<issue_identifier>` serves the
-  transcript while the run lasts.
+- The dashboard at `/` is built for phones first. Its centre is a HUD of running agents: one card
+  each with the plan's progress, a plain-language line for the agent's latest step, the last thing
+  it said, its latest image, and its model, tokens, cost and changed lines. Four header stats carry
+  12-hour sparklines (from a five-minute sample of queue counts and spend kept for 48 hours in
+  `operations.dets`). The work queue with estimated start times, pull requests, recent activity and
+  a System section (health, autopilot, run statistics, 14-day charts and model usage) sit in side
+  columns on wide screens and behind tabs on phones. Queue estimates use the median run time of the
+  same kind of work over the last three days, in waves of `agent.max_concurrent_agents`. Health
+  checks report only signals Symphony observes: polling, dispatch capacity, blocked items, research,
+  tracker and pull request read age and errors, rate limit use and failed attempts in the last hour,
+  the usage store, and free workspace disk space.
+- A HUD card opens the full-screen agent inspector at `/agents/<issue_identifier>`. It shows the
+  agent's run as a chat, rebuilt from Codex app-server notifications: messages and reasoning
+  (streamed as they are written), commands with exit code, duration and the last 60 lines or 8 KB of
+  output, file edits with diffs, plan steps, and images inline where the agent saw them. Beside the
+  chat (or behind tabs on phones) are the plan, changed files, an image gallery and run details.
+  Symphony keeps the last 150 entries of each running agent in memory; when a run ends while its
+  inspector is open, the last live view stays on screen, and `/api/v1/<issue_identifier>` serves
+  the transcript while the run lasts.
 - Images the agent viewed or generated, and images returned by tools such as screenshots, are
   copied into `artifacts/<run_id>/` beside the log file (PNG, JPEG, GIF or WebP only, up to 10 MB
   each and 40 per run) and served at `/artifacts/<run_id>/<n>.<ext>`. A run's images are deleted

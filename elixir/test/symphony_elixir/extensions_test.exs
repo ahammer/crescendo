@@ -239,7 +239,17 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert [%{"name" => "linear_graphql"}] = Adapter.agent_tool_specs()
   end
 
-  @empty_workspace %{"progress" => %{"done" => 0, "total" => 0}, "plan" => [], "plan_explanation" => nil, "files" => [], "latest_image" => nil, "entries" => 0}
+  @empty_workspace %{
+    "progress" => %{"done" => 0, "total" => 0},
+    "plan" => [],
+    "plan_explanation" => nil,
+    "files" => [],
+    "latest_image" => nil,
+    "images" => 0,
+    "entries" => 0,
+    "now" => nil,
+    "said" => nil
+  }
 
   test "phoenix observability api preserves state, issue, and refresh responses" do
     snapshot = static_snapshot()
@@ -559,21 +569,19 @@ defmodule SymphonyElixir.ExtensionsTest do
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
     {:ok, view, html} = live(build_conn(), "/")
-    assert html =~ "Operations Dashboard"
+    assert html =~ "Symphony"
     assert html =~ "MT-HTTP"
+    assert html =~ ~s(href="/agents/MT-HTTP")
     assert html =~ "MT-RETRY"
     assert html =~ "MT-BLOCKED"
-    assert html =~ ~s(href="https://example.org/issues/MT-HTTP")
     assert html =~ ~s(href="https://example.org/issues/MT-RETRY")
     assert html =~ ~s(href="https://example.org/issues/MT-BLOCKED")
-    assert html =~ ~s(aria-label="Open MT-HTTP in the issue tracker")
+    assert html =~ ~s(aria-label="Open MT-RETRY in the issue tracker")
     assert html =~ "rendered"
     assert html =~ "turn blocked: waiting for user input"
-    assert html =~ "Runtime"
     assert html =~ "Live"
     assert html =~ "Offline"
     assert html =~ "Copy ID"
-    assert html =~ "Codex update"
     refute html =~ "data-runtime-clock="
     refute html =~ "setInterval(refreshRuntimeClocks"
     refute html =~ "Refresh now"
@@ -636,7 +644,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "snapshot_unavailable"
   end
 
-  test "dashboard agent cards show the work item, route, costs, and recent activity" do
+  test "agent inspector shows the work item, route, costs, and recent activity" do
     orchestrator_name = Module.concat(__MODULE__, :AgentCardOrchestrator)
     now = DateTime.utc_now()
 
@@ -679,6 +687,11 @@ defmodule SymphonyElixir.ExtensionsTest do
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
     {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ ~s(href="/agents/PR-7")
+    assert html =~ "Parallelize boundary exchange reduction"
+    assert html =~ "Attempt 2"
+
+    {:ok, _view, html} = live(build_conn(), "/agents/PR-7")
 
     for text <- [
           "Parallelize boundary exchange reduction",
@@ -693,8 +706,10 @@ defmodule SymphonyElixir.ExtensionsTest do
           "medium effort",
           "via default",
           "cached 30.0K",
+          "Codex update",
           "ran cargo xtask ci worker",
-          "workspaces/PR-7"
+          "workspaces/PR-7",
+          "Copy ID"
         ] do
       assert html =~ text
     end
@@ -702,7 +717,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute html =~ ~s(<li class="label-chip">symphony:ready</li>)
   end
 
-  test "dashboard workspace shows each agent's transcript with inline images and switches tabs" do
+  test "dashboard HUD cards summarise each agent and open its inspector" do
     orchestrator_name = Module.concat(__MODULE__, :WorkspaceOrchestrator)
     at = DateTime.utc_now()
     note = fn method, params -> %{payload: %{"method" => method, "params" => params}, timestamp: at} end
@@ -711,14 +726,12 @@ defmodule SymphonyElixir.ExtensionsTest do
     transcript =
       [
         note.("item/completed", %{"item" => %{"id" => "m1", "type" => "agentMessage", "text" => "Reading the solver <script>x</script>"}}),
-        note.("item/completed", %{
-          "item" => %{"id" => "c1", "type" => "commandExecution", "command" => "cargo test -p solver", "aggregatedOutput" => "1 failed", "exitCode" => 101, "durationMs" => 900}
-        }),
         note.("item/completed", %{"item" => %{"id" => "v1", "type" => "imageView", "path" => "/tmp/reference.png"}}),
         note.("turn/plan/updated", %{
           "plan" => [%{"step" => "Run the example", "status" => "completed"}, %{"step" => "Compare results", "status" => "inProgress"}, %{"step" => "Draft summary", "status" => "pending"}]
         }),
-        note.("turn/diff/updated", %{"diff" => "diff --git a/src/a.rs b/src/a.rs\n+++ b/src/a.rs\n+new\n-old\n"})
+        note.("turn/diff/updated", %{"diff" => "diff --git a/src/a.rs b/src/a.rs\n+++ b/src/a.rs\n+new\n-old\n"}),
+        note.("item/started", %{"item" => %{"id" => "c1", "type" => "commandExecution", "command" => "cargo test -p solver", "status" => "inProgress"}})
       ]
       |> Enum.reduce(SymphonyElixir.Transcript.new(), &SymphonyElixir.Transcript.apply(&2, &1, store_image: fn _source -> {:ok, image} end))
 
@@ -757,27 +770,98 @@ defmodule SymphonyElixir.ExtensionsTest do
     {:ok, view, html} = live(build_conn(), "/")
 
     for text <- [
-          "Active Agent Workspace",
+          ~s(href="/agents/GH-1"),
+          ~s(href="/agents/PR-2"),
           "Solve the flow case",
-          "Problem Run the example end to end. See the docs.",
-          "symphony/issue-1",
           "1/3 steps",
-          "Compare results",
-          "cargo test -p solver",
-          "a.rs",
-          "Linear · Autopilot off"
+          "Running cargo test -p solver",
+          "“Reading the solver &lt;script&gt;x&lt;/script&gt;”",
+          "Looks good to merge",
+          ~s(class="card-thumb" src="/artifacts/0123456789abcdef01234567/1.png"),
+          "+1",
+          "−1",
+          "project · Autopilot off"
         ] do
+      assert html =~ text
+    end
+
+    # The HUD carries no transcript; the inspector loads one agent's.
+    refute html =~ "Compare results"
+
+    # Phones switch sections with tabs; the choice is only a class.
+    view |> element(~s(button[phx-value-id="activity"])) |> render_click()
+    assert has_element?(view, ~s(button.section-tab.is-active[phx-value-id="activity"]))
+    assert has_element?(view, ~s(section.sec.is-active[aria-labelledby="activity-title"]))
+    refute has_element?(view, ~s(section.sec.is-active[aria-labelledby="queue-title"]))
+
+    {:ok, view, html} = live(build_conn(), "/agents/GH-1")
+
+    for text <- ["Solve the flow case", "Problem Run the example end to end. See the docs.", "symphony/issue-1", "Compare results", "cargo test -p solver", "a.rs"] do
       assert html =~ text
     end
 
     assert html =~ ~s(<img src="/artifacts/0123456789abcdef01234567/1.png")
     assert html =~ "&lt;script&gt;x&lt;/script&gt;"
+    assert html =~ ~s(href="/agents/PR-2")
     refute html =~ "Looks good to merge"
 
-    html = view |> element(~s(button[phx-value-id="PR-2"])) |> render_click()
+    view |> element(~s(button[phx-value-id="plan"])) |> render_click()
+    assert has_element?(view, ~s(section.pane.is-active[aria-labelledby="plan-title"]))
+    refute has_element?(view, "section.pane-chat.is-active")
+
+    {:ok, _view, html} = live(build_conn(), "/agents/PR-2")
     assert html =~ "Looks good to merge"
-    assert html =~ "Review buoyancy"
     refute html =~ "cargo test -p solver"
+  end
+
+  test "agent inspector keeps an ended run on screen and explains missing ones" do
+    orchestrator_name = Module.concat(__MODULE__, :EndedOrchestrator)
+    snapshot = static_snapshot()
+    {:ok, orchestrator_pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, view, html} = live(build_conn(), "/agents/MT-HTTP")
+    assert html =~ "rendered"
+    refute html =~ "This run has ended"
+
+    :sys.replace_state(orchestrator_pid, fn state -> Keyword.put(state, :snapshot, %{snapshot | running: []}) end)
+    StatusDashboard.notify_update()
+
+    assert_eventually(fn -> render(view) =~ "This run has ended" end)
+    assert render(view) =~ "rendered"
+
+    {:ok, _view, html} = live(build_conn(), "/agents/GH-404")
+    assert html =~ "GH-404 is not running"
+    assert html =~ ~s(href="/")
+  end
+
+  test "agent inspector reports an unavailable snapshot" do
+    start_test_endpoint(orchestrator: Module.concat(__MODULE__, :MissingInspectorOrchestrator), snapshot_timeout_ms: 5)
+
+    {:ok, _view, html} = live(build_conn(), "/agents/MT-HTTP")
+    assert html =~ "Snapshot unavailable"
+    assert html =~ "snapshot_unavailable"
+  end
+
+  test "live pages coalesce bursts of updates into one reload" do
+    orchestrator_name = Module.concat(__MODULE__, :BurstOrchestrator)
+    snapshot = static_snapshot()
+    {:ok, orchestrator_pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50, dashboard_reload_ms: 150)
+
+    {:ok, view, _html} = live(build_conn(), "/")
+    [entry] = snapshot.running
+    :sys.replace_state(orchestrator_pid, fn state -> Keyword.put(state, :snapshot, %{snapshot | running: [%{entry | last_codex_message: "second update"}]}) end)
+
+    # Inside the reload window the first update waits and the second joins it.
+    send(view.pid, :observability_updated)
+    send(view.pid, :observability_updated)
+    refute render(view) =~ "second update"
+    assert_eventually(fn -> render(view) =~ "second update" end)
+
+    send(view.pid, :runtime_tick)
+    send(view.pid, :unrelated_message)
+    assert render(view) =~ "second update"
   end
 
   test "dashboard header, queue estimates and health follow the snapshot and settings" do
@@ -811,13 +895,13 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ ~r/Third ready.*?~10m/s
     assert html =~ "Blocked"
     assert html =~ ~s(title="dependency blocked: GH-10")
-    assert html =~ "$10.00 daily budget"
+    assert html =~ "over $10.00 budget"
     assert html =~ "Worker usage alert"
-    assert html =~ "1 / 2"
-    assert html =~ "Agent coordinator"
+    assert html =~ "1/2"
+    assert html =~ "Coordinator"
     assert html =~ "1 retrying automatically"
-    assert html =~ "System health"
-    assert html =~ "Run statistics"
+    assert html =~ "Systems"
+    assert html =~ "Tokens today"
 
     payload = SymphonyElixirWeb.Presenter.state_payload(orchestrator_name, 50)
     assert [%{eta_seconds: 600}, %{eta_seconds: 600}, %{eta_seconds: 600}] = payload.upcoming.ready
