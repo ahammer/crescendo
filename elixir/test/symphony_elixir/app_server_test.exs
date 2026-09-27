@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.AppServerTest do
   use SymphonyElixir.TestSupport
 
-  test "app server sends the selected model and effort and exports the route label" do
+  test "app server sends the selected model and effort and exports the route label and work item" do
     root = Path.join(System.tmp_dir!(), "symphony-route-#{System.unique_integer([:positive])}")
     workspace = Path.join(root, "workspaces/ROUTE-1")
     binary = Path.join(root, "fake-codex")
@@ -10,7 +10,7 @@ defmodule SymphonyElixir.AppServerTest do
 
     File.write!(binary, """
     #!/bin/sh
-    printf '%s\\n' "$SYMPHONY_SELECTED_MODEL_LABEL" > '#{observed}'
+    printf '%s %s\\n' "$SYMPHONY_SELECTED_MODEL_LABEL" "$SYMPHONY_WORK_ITEM" > '#{observed}'
     count=0
     while IFS= read -r line; do
       count=$((count + 1))
@@ -31,8 +31,8 @@ defmodule SymphonyElixir.AppServerTest do
       issue = %Issue{id: "route", identifier: "ROUTE-1", title: "Route", labels: []}
       route = %{"label" => "symphony:model:luna", "model" => "gpt-6-luna", "effort" => "medium"}
       assert {:ok, _} = AppServer.run(workspace, "route", issue, model_route: route)
-      [label | messages] = File.read!(observed) |> String.split("\n", trim: true)
-      assert label == "symphony:model:luna"
+      [exported | messages] = File.read!(observed) |> String.split("\n", trim: true)
+      assert exported == "symphony:model:luna ROUTE-1"
 
       assert Enum.any?(messages, fn line ->
                message = Jason.decode!(line)

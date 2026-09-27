@@ -91,12 +91,13 @@ defmodule SymphonyElixir.AgentRunner do
 
     settings = Config.settings!()
     fixed_routes = %{research: settings.autopilot.research_route, pull_request: settings.autopilot.review_route}
+    item_attempt = Keyword.get(opts, :item_attempt, 1)
+    session_opts = [worker_host: worker_host, work_item: issue.identifier]
 
-    with {:ok, route} <-
-           ModelRouting.select_for_run(settings.codex.routing, fixed_routes, issue, Keyword.get(opts, :item_attempt, 1)),
+    with {:ok, route} <- ModelRouting.select_for_run(settings.codex.routing, fixed_routes, issue, item_attempt),
          :ok <- log_route(issue, route),
          :ok <- send_model_route(codex_update_recipient, issue, route),
-         {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host, model_route: route) do
+         {:ok, session} <- AppServer.start_session(workspace, [model_route: route] ++ session_opts) do
       try do
         do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
       after

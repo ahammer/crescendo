@@ -645,6 +645,10 @@ not require recognizing or validating extension fields unless that extension is 
   item attempt; the last repeats) are configured together: the default and every label route
   must be a ladder step, and a run climbs `escalation[item_attempt - 1]` steps from its starting
   route, capped at the last step. The run keeps its starting route's label.
+- The Codex process of every run is started with `SYMPHONY_WORK_ITEM` (the work item identifier,
+  for example `GH-12`) and, when routing applies, `SYMPHONY_SELECTED_MODEL_LABEL` (the route
+  label) in its environment, so commands the agent runs can attribute their work and check the
+  selected route.
 - `codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
 - `codex.thread_sandbox`: Codex `SandboxMode` value, default implementation-defined
 - `codex.turn_sandbox_policy`: Codex `SandboxPolicy` value, default implementation-defined

@@ -170,6 +170,9 @@ Notes:
   `ladder: [{model: gpt-6-sol, effort: medium}, {model: gpt-6-sol, effort: xhigh}, {model: gpt-6-astra, effort: medium}, {model: gpt-6-astra, effort: max}]`
   and `escalation: [0, 1, 3]`, attempts 1, 2 and 3 run on sol medium, sol xhigh and astra max.
   The default and every label route must be ladder steps; a label sets the starting step.
+- Every Codex run's environment carries `SYMPHONY_WORK_ITEM` (the work item identifier, such as
+  `GH-12`) and, with routing, `SYMPHONY_SELECTED_MODEL_LABEL`. Commands the agent runs inherit
+  both, so workstation tooling can attribute work to the run that owns it.
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`
