@@ -6,7 +6,7 @@ defmodule SymphonyElixir.Transcript do
   Entries stay in chronological order. `item/started` adds a running entry that
   the matching `item/completed` fills in, so long commands appear while they
   run, and message, reasoning and command-output deltas stream into their entry
-  until it completes. Images the agent saw are handed to the `:store_image`
+  until it completes. Reasoning without a summary shows only while it runs. Images the agent saw are handed to the `:store_image`
   callback, and the entry keeps only the reference it returns.
   """
 
@@ -81,16 +81,20 @@ defmodule SymphonyElixir.Transcript do
 
   # Only kinds that take a while get a running entry; each of them always yields one.
   defp started(transcript, %{} = item, at, opts) do
-    if get(item, "type") in @started_kinds,
-      do: upsert(transcript, %{entry(item, at, Keyword.delete(opts, :store_image)) | status: "running"}),
-      else: transcript
+    case get(item, "type") do
+      "reasoning" -> upsert(transcript, %{id: item_id(item), kind: "reasoning", text: "", at: at, status: "running"})
+      type when type in @started_kinds -> upsert(transcript, %{entry(item, at, Keyword.delete(opts, :store_image)) | status: "running"})
+      _type -> transcript
+    end
   end
 
   defp started(transcript, _item, _at, _opts), do: transcript
 
+  # An item that completes with nothing to show (such as reasoning without a
+  # summary) takes its running placeholder with it.
   defp completed(transcript, %{} = item, at, opts) do
     case entry(item, at, opts) do
-      nil -> transcript
+      nil -> %{transcript | entries: Enum.reject(transcript.entries, &(&1.id == item_id(item)))}
       entry -> upsert(transcript, entry)
     end
   end
@@ -130,7 +134,7 @@ defmodule SymphonyElixir.Transcript do
   defp find(transcript, id), do: Enum.find(transcript.entries, &(&1.id == id))
 
   defp entry(item, at, opts) do
-    base = %{id: to_string(get(item, "id") || "item"), at: at, status: item_status(item)}
+    base = %{id: item_id(item), at: at, status: item_status(item)}
     item_entry(get(item, "type"), base, item, opts)
   end
 
@@ -158,6 +162,8 @@ defmodule SymphonyElixir.Transcript do
   defp item_entry(type, _base, _item, _opts) when type in @silent_items, do: nil
   defp item_entry(type, base, _item, _opts), do: tool_line(base, to_string(type))
 
+  defp item_id(item), do: to_string(get(item, "id") || "item")
+
   defp tool_line(base, name), do: Map.merge(base, %{kind: "tool", name: name, detail: nil, images: []})
 
   defp text_entry(base, kind, text, extra) do
@@ -183,18 +189,52 @@ defmodule SymphonyElixir.Transcript do
   end
 
   defp command_entry(base, item) do
-    command = to_string(get(item, "command") || "")
+    command = item |> get("command") |> to_string() |> unwrap_shell()
     {output, truncated} = tail(get(item, "aggregatedOutput"))
 
     Map.merge(base, %{
       kind: "command",
       command: clip(command, @max_detail_bytes * 4),
+      summary: item |> get("commandActions") |> list() |> action_summary(),
       exit_code: get(item, "exitCode"),
       duration_ms: get(item, "durationMs"),
       output: output,
       output_truncated: truncated
     })
   end
+
+  @shell ~r/\A\S*sh\s+-l?c\s+(?:'(?<single>.*)'|"(?<double>.*)")\z/s
+
+  # Codex runs each command through a login shell; show the script the agent wrote.
+  defp unwrap_shell(command) do
+    case Regex.named_captures(@shell, command) do
+      %{"single" => single} when single != "" -> String.replace(single, ~S('"'"'), "'")
+      %{"double" => double} when double != "" -> Regex.replace(~r/\\([\\"$`])/, double, "\\1")
+      _ -> command
+    end
+  end
+
+  # Codex parses simple commands into reads, listings and searches, which read
+  # better as a sentence; anything else stays shell.
+  defp action_summary([_ | _] = actions) do
+    parts = Enum.map(actions, &action_text/1)
+    if Enum.all?(parts), do: Enum.join(parts, ", ")
+  end
+
+  defp action_summary(_actions), do: nil
+
+  defp action_text(action) do
+    case get(action, "type") do
+      "read" -> "Read #{get(action, "name") || action |> get("path") |> to_string() |> Path.basename()}"
+      "listFiles" -> "Listed #{get(action, "path") || "files"}"
+      "search" -> search_text(get(action, "query"), get(action, "path"))
+      _ -> nil
+    end
+  end
+
+  defp search_text(nil, path), do: "Searched #{path || "files"}"
+  defp search_text(query, nil), do: "Searched for #{query}"
+  defp search_text(query, path), do: "Searched for #{query} in #{path}"
 
   defp file_change(change) do
     diff = to_string(get(change, "diff") || "")
@@ -217,7 +257,8 @@ defmodule SymphonyElixir.Transcript do
     Map.merge(base, %{
       kind: "tool",
       name: "#{get(item, "server")} · #{get(item, "tool")}",
-      detail: error || text_of(result) || arguments_text(get(item, "arguments")),
+      call: call_text(get(item, "arguments")),
+      detail: error || text_of(result),
       images: store_images(image_sources(result), opts)
     })
   end
@@ -229,7 +270,8 @@ defmodule SymphonyElixir.Transcript do
     Map.merge(base, %{
       kind: "tool",
       name: name,
-      detail: text_of(contents) || arguments_text(get(item, "arguments")),
+      call: call_text(get(item, "arguments")),
+      detail: text_of(contents),
       images: store_images(image_sources(contents), opts)
     })
   end
@@ -324,6 +366,16 @@ defmodule SymphonyElixir.Transcript do
   end
 
   defp collect_text(_value, _depth), do: []
+
+  # REST-shaped tools (github_api and friends) read best as "GET /path".
+  defp call_text(%{} = arguments) do
+    case {get(arguments, "method"), get(arguments, "path")} do
+      {method, path} when is_binary(method) and is_binary(path) -> "#{method} #{path}"
+      _ -> arguments_text(arguments)
+    end
+  end
+
+  defp call_text(arguments), do: arguments_text(arguments)
 
   defp arguments_text(nil), do: nil
   defp arguments_text(arguments) when is_binary(arguments), do: clip(arguments, @max_detail_bytes)

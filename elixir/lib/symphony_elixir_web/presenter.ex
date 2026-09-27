@@ -594,8 +594,17 @@ defmodule SymphonyElixirWeb.Presenter do
     end)
   end
 
+  # Issue bodies are Markdown; the excerpt keeps the words and drops the markup.
   defp excerpt(text) when is_binary(text) do
-    compact = text |> String.replace(~r/\s+/, " ") |> String.trim()
+    compact =
+      text
+      |> String.replace(~r/<!--.*?-->/s, " ")
+      |> String.replace(~r/!?\[([^\]]*)\]\([^)]*\)/, "\\1")
+      |> String.replace(~r/^\s*(?:\#{1,6}|[-*+]|\d+\.|>)\s+/m, "")
+      |> String.replace(~r/\*\*|__|`/, "")
+      |> String.replace(~r/\s+/, " ")
+      |> String.trim()
+
     if String.length(compact) > 400, do: String.slice(compact, 0, 399) <> "…", else: compact
   end
 

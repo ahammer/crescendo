@@ -104,6 +104,18 @@ defmodule SymphonyElixirWeb.TranscriptComponents do
     """
   end
 
+  defp entry(%{entry: %{kind: "reasoning", text: ""}} = assigns) do
+    ~H"""
+    <div class="act act-thinking act-live">
+      <div class="act-line">
+        <span class="act-icon status-running" aria-hidden="true">◌</span>
+        <span class="act-title">Thinking…</span>
+        <.stamp at={@entry.at} now={@now} />
+      </div>
+    </div>
+    """
+  end
+
   defp entry(%{entry: %{kind: "reasoning"}} = assigns) do
     ~H"""
     <details class="act act-thinking" phx-mounted={keep_open()}>
@@ -126,10 +138,15 @@ defmodule SymphonyElixirWeb.TranscriptComponents do
       <details class="fold" open={@state == "failed"} phx-mounted={keep_open()}>
         <summary class="term-head">
           <span class={"term-status status-#{@state}"} aria-label={command_label(@state, @entry)}><%= command_icon(@state) %></span>
-          <code class="term-command" title={@entry.command}><span class="term-prompt">$</span> <%= @entry.command %></code>
+          <%= if @entry[:summary] do %>
+            <span class="term-summary" title={@entry.command}><%= @entry.summary %></span>
+          <% else %>
+            <code class="term-command" title={@entry.command}><span class="term-prompt">$</span> <%= @entry.command %></code>
+          <% end %>
           <span class="term-meta"><%= command_meta(@state, @entry) %></span>
           <.stamp at={@entry.at} now={@now} />
         </summary>
+        <p :if={@entry[:summary]} class="term-script"><span class="term-prompt">$</span> <%= @entry.command %></p>
         <%= if @entry[:output] in [nil, ""] do %>
           <p class="term-empty"><%= if @state == "running", do: "Running…", else: "No output" %></p>
         <% else %>
@@ -183,7 +200,7 @@ defmodule SymphonyElixirWeb.TranscriptComponents do
         <summary class="act-line">
           <span class="act-icon" aria-hidden="true"><%= if @entry[:status] == "running", do: "◔", else: "⚙" %></span>
           <span class="act-title"><%= @entry.name %></span>
-          <span class="act-preview"><%= preview(@entry[:detail]) %></span>
+          <span class="act-preview"><%= preview(@entry[:call] || @entry[:detail]) %></span>
           <.stamp at={@entry.at} now={@now} />
         </summary>
         <pre class="act-detail"><%= @entry[:detail] || "No result text" %></pre>

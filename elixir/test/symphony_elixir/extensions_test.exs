@@ -735,7 +735,7 @@ defmodule SymphonyElixir.ExtensionsTest do
         identifier: "GH-1",
         issue_id: "gh-1",
         title: "Solve the flow case",
-        description: "Run the example end to end.",
+        description: "## Problem\n\nRun the **example** end to end.<!-- symphony:marker --> See [the docs](https://example.org).",
         branch_name: "symphony/issue-1",
         transcript: transcript,
         run_id: "0123456789abcdef01234567"
@@ -756,7 +756,17 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     {:ok, view, html} = live(build_conn(), "/")
 
-    for text <- ["Active Agent Workspace", "Solve the flow case", "Run the example end to end.", "symphony/issue-1", "1/3 steps", "Compare results", "cargo test -p solver", "a.rs"] do
+    for text <- [
+          "Active Agent Workspace",
+          "Solve the flow case",
+          "Problem Run the example end to end. See the docs.",
+          "symphony/issue-1",
+          "1/3 steps",
+          "Compare results",
+          "cargo test -p solver",
+          "a.rs",
+          "Linear · Autopilot off"
+        ] do
       assert html =~ text
     end
 

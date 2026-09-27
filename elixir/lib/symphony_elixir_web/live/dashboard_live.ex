@@ -69,7 +69,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         </div>
         <div class="stat-strip">
           <%= unless @payload[:error] do %>
-            <.head_stat label="Repo" value={@payload.runtime.tracker || "—"} detail={if @payload.autopilot.enabled, do: "Autopilot on", else: "Autopilot off"} mono={true} />
+            <.head_stat label="Repo" value={tracker_scope(@payload.runtime.tracker)} detail={tracker_detail(@payload)} mono={true} />
             <.head_stat label="Updated" value={short_date_time(@payload.generated_at)} detail={"#{short_time(@payload.generated_at)} UTC"} />
           <% end %>
           <div class="head-stat head-live">
@@ -608,6 +608,20 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp over_budget?(%{usage: %{status: "ok", today: today}, header: %{budget_usd_micro: budget}}), do: (today[:usd_micro] || 0) >= budget
   defp over_budget?(_payload), do: false
+
+  # "github:owner/repo" reads as the repo, with the tracker kind below it.
+  defp tracker_scope(tracker) when is_binary(tracker), do: tracker |> String.split(":", parts: 2) |> List.last()
+  defp tracker_scope(_tracker), do: "—"
+
+  defp tracker_detail(%{runtime: %{tracker: tracker}, autopilot: autopilot}) do
+    kind = if is_binary(tracker) and String.contains?(tracker, ":"), do: tracker |> String.split(":") |> hd() |> tracker_name()
+    autopilot = if autopilot.enabled, do: "Autopilot on", else: "Autopilot off"
+    Enum.join(Enum.reject([kind, autopilot], &is_nil/1), " · ")
+  end
+
+  defp tracker_name("github"), do: "GitHub"
+  defp tracker_name("gitlab"), do: "GitLab"
+  defp tracker_name(kind), do: String.capitalize(kind)
 
   defp agents_running(1), do: "1 agent running"
   defp agents_running(count), do: "#{count} agents running"

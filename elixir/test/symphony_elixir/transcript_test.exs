@@ -63,6 +63,22 @@ defmodule SymphonyElixir.TranscriptTest do
     assert Transcript.apply(transcript, note("item/commandExecution/outputDelta", %{"itemId" => "zz", "delta" => "x"})) == transcript
   end
 
+  test "reasoning shows while it runs and leaves no trace when it completes without a summary" do
+    transcript = fold([started(%{"id" => "r1", "type" => "reasoning"}), started(%{"id" => "r2", "type" => "reasoning"})])
+    assert [%{kind: "reasoning", text: "", status: "running"}, %{id: "r2"}] = transcript.entries
+
+    transcript =
+      transcript
+      |> Transcript.apply(completed(%{"id" => "r1", "type" => "reasoning", "summary" => [], "content" => []}))
+      |> Transcript.apply(completed(%{"id" => "r2", "type" => "reasoning", "summary" => ["Check the inlet"]}))
+
+    assert [%{id: "r2", kind: "reasoning", text: "Check the inlet", status: "completed"}] = transcript.entries
+
+    thinking = %{id: "r3", kind: "reasoning", text: "", status: "running", at: @at}
+    html = render_component(&TranscriptComponents.transcript/1, id: "chat", entries: [thinking], now: @at)
+    assert html =~ "Thinking…"
+  end
+
   test "message and reasoning deltas stream into one entry that the completed item replaces" do
     transcript =
       fold([
@@ -191,7 +207,7 @@ defmodule SymphonyElixir.TranscriptTest do
              %{kind: "image", label: "shot.png", images: [%{src: "/artifacts/" <> _}]},
              %{kind: "image", label: "a chart", images: [_]},
              %{kind: "tool", name: "computer_use · screenshot", detail: "Captured", images: [_]},
-             %{kind: "tool", name: "desktop · capture", detail: ~s({"window":"main"}), images: [_]},
+             %{kind: "tool", name: "desktop · capture", call: ~s({"window":"main"}), detail: nil, images: [_]},
              %{kind: "tool", name: "exec", images: [_]}
            ] = transcript.entries
 
@@ -334,7 +350,7 @@ defmodule SymphonyElixir.TranscriptTest do
     assert transcript.files == []
   end
 
-  test "tool details fall back from result text to arguments, and unreadable images are skipped" do
+  test "tool lines show what was called and what came back, and unreadable images are skipped" do
     deep_text = Enum.reduce(1..10, %{"text" => "hidden"}, fn _level, inner -> %{"content" => [inner]} end)
     deep_image = Enum.reduce(1..10, %{"type" => "image", "data" => "eA=="}, fn _level, inner -> %{"inner" => inner} end)
 
@@ -349,21 +365,46 @@ defmodule SymphonyElixir.TranscriptTest do
           completed(%{"id" => "f", "type" => "dynamicToolCall", "tool" => "t", "contentItems" => [deep_text, deep_image, 42]}),
           completed(%{"id" => "v", "type" => "imageView"}),
           completed(%{"id" => "g", "type" => "imageGeneration", "result" => Base.encode64("not really an image")}),
-          completed(%{"id" => "h", "type" => "imageGeneration", "result" => ""})
+          completed(%{"id" => "h", "type" => "imageGeneration", "result" => ""}),
+          completed(%{"id" => "i", "type" => "dynamicToolCall", "tool" => "github_api", "arguments" => %{"method" => "GET", "path" => "/repos/o/r/issues/1"}})
         ],
         store_image: fn _source -> :error end
       )
 
     assert [
-             %{detail: ~s({"q":1})},
-             %{detail: nil},
-             %{detail: nil},
+             %{call: ~s({"q":1}), detail: nil},
+             %{call: nil, detail: nil},
+             %{call: nil, detail: nil},
              %{detail: "denied"},
              %{name: "tool", detail: "done"},
              %{name: "t", detail: nil, images: []},
              %{kind: "image", label: "Image", images: []},
              %{kind: "image", label: "Generated image", images: []},
-             %{kind: "image", images: []}
+             %{kind: "image", images: []},
+             %{name: "github_api", call: "GET /repos/o/r/issues/1"}
+           ] = transcript.entries
+  end
+
+  test "commands drop the login-shell wrapper and read as sentences when Codex parsed them" do
+    command = fn id, text, actions -> completed(%{"id" => id, "type" => "commandExecution", "command" => text, "commandActions" => actions, "exitCode" => 0}) end
+
+    transcript =
+      fold([
+        command.("a", ~S(/bin/bash -lc 'echo '"'"'hi'"'"''), [%{"type" => "unknown", "command" => "echo 'hi'"}]),
+        command.("b", ~S(/bin/bash -lc "rg -n \"x\" src | wc -l"), []),
+        command.("c", "cargo test", [
+          %{"type" => "read", "name" => "a.md", "path" => "docs/a.md"},
+          %{"type" => "listFiles", "path" => "src"},
+          %{"type" => "search", "query" => "fn main", "path" => "src"}
+        ]),
+        command.("d", "rg --files", [%{"type" => "search"}, %{"type" => "search", "query" => "todo"}, %{"type" => "read", "path" => "/x/y/z.rs"}, %{"type" => "listFiles"}])
+      ])
+
+    assert [
+             %{command: "echo 'hi'", summary: nil},
+             %{command: ~S(rg -n "x" src | wc -l), summary: nil},
+             %{command: "cargo test", summary: "Read a.md, Listed src, Searched for fn main in src"},
+             %{summary: "Searched files, Searched for todo, Read z.rs, Listed files"}
            ] = transcript.entries
   end
 
@@ -398,6 +439,8 @@ defmodule SymphonyElixir.TranscriptTest do
       %{id: "6", kind: "message", phase: "final_answer", text: "Done: see [site](http://example.org)\nsecond line\n- item\n  continued", at: now},
       %{id: "7", kind: "message", phase: "plan", text: "Plan text", at: now},
       %{id: "8", kind: "tool", name: "probe", detail: nil, images: [], status: "running", at: now},
+      %{id: "10", kind: "tool", name: "github_api", call: "GET /repos/o/r", detail: "{}", images: [], status: "completed", at: now},
+      Map.merge(command, %{id: "11", command: "cat docs/a.md", summary: "Read a.md", output: "text", exit_code: 0, duration_ms: 5}),
       %{id: "9", kind: "mystery", at: now}
     ]
 
@@ -413,6 +456,8 @@ defmodule SymphonyElixir.TranscriptTest do
     assert html =~ "second line" and html =~ "item continued"
     assert html =~ ~s(<span class="who-note">plan</span>)
     assert html =~ "probe" and html =~ "mystery"
+    assert html =~ "GET /repos/o/r"
+    assert html =~ ~s(<span class="term-summary" title="cat docs/a.md">Read a.md</span>) and html =~ ~s(class="term-script")
 
     html = render_component(&TranscriptComponents.transcript/1, id: "chat", entries: [hd(entries)], now: nil)
     refute html =~ "ago"
