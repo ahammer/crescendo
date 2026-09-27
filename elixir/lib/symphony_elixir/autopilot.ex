@@ -20,30 +20,42 @@ defmodule SymphonyElixir.Autopilot do
 
   @doc """
   A pull request is ready for a review pass when its head commit has not been
-  handled yet and it is under the per-PR run cap. CI is checked separately at
-  dispatch time because it needs an extra API call.
+  handled yet, or was handled longer than `pr_recheck_ms` ago, and it is under
+  the per-PR run cap. CI is checked separately at dispatch time because it
+  needs an extra API call.
   """
-  @spec pull_request_ready?(Issue.t(), state(), map()) :: boolean()
-  def pull_request_ready?(%Issue{kind: :pull_request} = issue, state, autopilot_settings) do
-    is_nil(pull_request_waiting_reason(issue, state, autopilot_settings))
-  end
+  @spec pull_request_ready?(Issue.t(), state(), map(), integer()) :: boolean()
+  def pull_request_ready?(issue, state, autopilot_settings, now_ms \\ System.system_time(:millisecond)),
+    do: is_nil(pull_request_waiting_reason(issue, state, autopilot_settings, now_ms))
 
-  def pull_request_ready?(%Issue{}, _state, _autopilot_settings), do: true
+  @doc """
+  Why a pull request is not ready for another pass, or nil when it is. A pass
+  that ended without merging or pushing is rechecked after `pr_recheck_ms`, so
+  a reviewed pull request never waits indefinitely for a push; the run cap
+  bounds the rechecks.
+  """
+  @spec pull_request_waiting_reason(Issue.t(), state(), map(), integer()) :: String.t() | nil
+  def pull_request_waiting_reason(issue, state, autopilot_settings, now_ms \\ System.system_time(:millisecond)),
+    do: waiting_reason(issue, state, autopilot_settings, now_ms)
 
-  @doc "Why a pull request is not ready for another pass, or nil when it is."
-  @spec pull_request_waiting_reason(Issue.t(), state(), map()) :: String.t() | nil
-  def pull_request_waiting_reason(%Issue{kind: :pull_request, id: id, pull_request: pull}, state, autopilot_settings) do
+  defp waiting_reason(%Issue{kind: :pull_request, id: id, pull_request: pull}, state, autopilot_settings, now_ms) do
     handled = Map.get(state.pr_handled, id, %{})
 
     cond do
       not is_map(pull) or not is_binary(pull[:head_sha]) -> "pull request details unavailable"
       Map.get(handled, :runs, 0) >= autopilot_settings.max_pr_runs -> "review run cap reached"
-      Map.get(handled, :head_sha) == pull.head_sha -> "reviewed at current head"
+      Map.get(handled, :head_sha) == pull.head_sha and recheck_pending?(handled, autopilot_settings, now_ms) -> "reviewed at current head"
       true -> nil
     end
   end
 
-  def pull_request_waiting_reason(%Issue{}, _state, _autopilot_settings), do: nil
+  defp waiting_reason(%Issue{}, _state, _autopilot_settings, _now_ms), do: nil
+
+  # Records persisted before rechecks carried no timestamp; they are due now.
+  defp recheck_pending?(%{handled_at_ms: handled_at_ms}, autopilot_settings, now_ms) when is_integer(handled_at_ms),
+    do: now_ms - handled_at_ms < autopilot_settings.pr_recheck_ms
+
+  defp recheck_pending?(_handled, _autopilot_settings, _now_ms), do: false
 
   @doc "Counts a review run against the pull request's cap."
   @spec record_pull_dispatch(state(), Issue.t()) :: state()
@@ -55,14 +67,19 @@ defmodule SymphonyElixir.Autopilot do
 
   @doc """
   Marks the head commit a review pass was dispatched at, so the pull request
-  waits for a new push (by its author or by the reviewer's own fixes).
+  waits for a new push (by its author or by the reviewer's own fixes) or for
+  the recheck cooldown.
   """
-  @spec record_pull_handled(state(), Issue.t(), String.t() | nil) :: state()
-  def record_pull_handled(state, %Issue{kind: :pull_request, id: id}, head_sha) when is_binary(head_sha) do
-    update_in(state, [:pr_handled, Access.key(id, %{})], &Map.put(&1, :head_sha, head_sha))
-  end
+  @spec record_pull_handled(state(), Issue.t(), String.t() | nil, integer()) :: state()
+  def record_pull_handled(state, issue, head_sha, now_ms \\ System.system_time(:millisecond)) do
+    case issue do
+      %Issue{kind: :pull_request, id: id} when is_binary(head_sha) ->
+        update_in(state, [:pr_handled, Access.key(id, %{})], &Map.merge(&1, %{head_sha: head_sha, handled_at_ms: now_ms}))
 
-  def record_pull_handled(state, %Issue{}, _head_sha), do: state
+      %Issue{} ->
+        state
+    end
+  end
 
   @doc "The head commit a pull request run was dispatched at, if any."
   @spec dispatched_head(Issue.t()) :: String.t() | nil
@@ -102,6 +119,20 @@ defmodule SymphonyElixir.Autopilot do
   @spec final_attempt?(state(), String.t(), map()) :: boolean()
   def final_attempt?(state, id, autopilot_settings),
     do: failed_attempts(state, id) + 1 >= autopilot_settings.max_item_attempts
+
+  @doc """
+  Whether the next run is the work item's last: an issue's final attempt, or
+  a pull request's last review run before the cap retires it.
+  """
+  @spec final_run?(state(), Issue.t(), map()) :: boolean()
+  def final_run?(state, %Issue{kind: :issue, id: id}, autopilot_settings), do: final_attempt?(state, id, autopilot_settings)
+
+  def final_run?(state, %Issue{kind: :pull_request, id: id}, autopilot_settings) do
+    runs = state.pr_handled |> Map.get(id, %{}) |> Map.get(:runs, 0)
+    runs + 1 >= autopilot_settings.max_pr_runs
+  end
+
+  def final_run?(_state, %Issue{}, _autopilot_settings), do: false
 
   defp item_attempts(state), do: Map.get(state, :item_attempts, %{})
 

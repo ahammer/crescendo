@@ -2358,6 +2358,8 @@ Extension config (`autopilot` object):
   the last research run and the next research round.
 - `max_pr_runs` (positive integer, default `5`): review runs per pull request; a pull request that
   reaches it without merging is retired (commented and closed).
+- `pr_recheck_ms` (non-negative integer, default `3600000`): after a review run ends without a new
+  push, the pull request is reviewed again at the same head once this much time has passed.
 - `max_item_attempts` (positive integer, default `3`) and `blocked_label` (default
   `symphony:blocked`): see B.3. The blocked label is added to `tracker.excluded_labels`.
 - `trusted_associations` (list, default `[OWNER, MEMBER, COLLABORATOR]`) and `trusted_authors`
@@ -2386,13 +2388,15 @@ Work items carry a `kind`:
 ### B.2 Scheduling
 
 - Pull requests sort before issues; priority and creation time order each group.
-- A pull request dispatches only when its head commit differs from the last head a review run
-  finished at and it is under `max_pr_runs`. Before spawning, the orchestrator reads CI for the
-  head commit (commit statuses and check runs) and skips the pull request while CI is pending or
-  unknown, so reviewers never wait on CI.
+- A pull request dispatches only when it is under `max_pr_runs` and either its head commit differs
+  from the last head a review run finished at or `pr_recheck_ms` has passed since that run. Before
+  spawning, the orchestrator reads CI for the head commit (commit statuses and check runs) and skips
+  the pull request while CI is pending or unknown, so reviewers never wait on CI.
 - A pull request run is a single turn sequence without continuation retries. A normal exit records
-  the head commit it started at; the pull request waits for a new push. Abnormal exits retry with
-  backoff under `agent.max_attempts`.
+  the head commit it started at and when; the pull request waits for a new push or the recheck
+  cooldown. Abnormal exits retry with backoff under `agent.max_attempts`. The run that reaches
+  `max_pr_runs` renders with `final_attempt` so the reviewer merges or closes the pull request
+  itself.
 - Research runs in rounds covering every channel, one channel at a time. A research run starts only
   when no agent is running and no tracker item is ready, and while it runs nothing else dispatches
   (including retries), so planners' tests, headed journeys, and measurements have the machine to
@@ -2400,8 +2404,9 @@ Work items carry a `kind`:
   next channel once the machine is idle again. Both need the backlog below `max_open_issues`.
 - Research runs never retry; any exit ends that channel, cleans its workspace, and the cooldown
   starts when the round's last channel ends.
-- Handled heads, per-PR run counts, the channels left in the current round, and the last round's
-  finish time persist across restarts.
+- Handled heads and when they were handled, per-PR run counts, the channels left in the current
+  round, and the last round's finish time persist across restarts. A handled head persisted without
+  a time is due for recheck.
 
 ### B.3 Attempts and Retirement
 

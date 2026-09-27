@@ -310,7 +310,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   # A review pass ends at its head commit; the pull request is picked up again
-  # only after a new push and settled CI, not through continuation retries.
+  # after a new push or the recheck cooldown, once CI settles, not through
+  # continuation retries.
   defp handle_agent_down(:normal, state, issue_id, %{issue: %Issue{kind: :pull_request} = issue} = running_entry, session_id) do
     if input_required_blocker?(running_entry) do
       block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
@@ -1258,7 +1259,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
     settings = Config.settings!().autopilot
     item_attempt = Autopilot.failed_attempts(state.autopilot, issue.id) + 1
-    final_attempt = settings.enabled and issue.kind == :issue and Autopilot.final_attempt?(state.autopilot, issue.id, settings)
+    final_attempt = settings.enabled and Autopilot.final_run?(state.autopilot, issue, settings)
 
     case Task.Supervisor.start_child(state.task_supervisor, fn ->
            AgentRunner.run(issue, recipient,

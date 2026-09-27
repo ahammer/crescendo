@@ -287,7 +287,9 @@ codex:
    a maintainer adds every `tracker.required_labels` label. A reviewer run
    (`prompts/pull_request.md`) reviews, pushes fixes when it can push to the head branch, and
    squash-merges pinned to the reviewed head commit once CI is green. Symphony skips pull requests
-   whose CI is pending and re-reviews only after a new push, up to `autopilot.max_pr_runs`.
+   whose CI is pending and re-reviews after a new push or, at an unchanged head, after
+   `autopilot.pr_recheck_ms`, up to `autopilot.max_pr_runs`. The last run is flagged
+   `final_attempt` so the reviewer merges or closes the pull request itself.
 2. **Issues next.** Issues labeled `symphony` are implemented. The worker opens a pull request that
    closes the issue, then labels the issue `symphony:in-review`, which hands it to step 1.
 3. **Research when idle.** When nothing is ready and no agent is running, a research round runs each

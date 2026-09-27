@@ -23,11 +23,15 @@ You can push to the head branch: {{ issue.pull_request.can_push }}
 2. Read the description, linked issue, and every review comment and thread.
 3. Review the diff for correctness, tests, readability, API design, and scope. Run the repository's validation.
 4. If changes are needed:
-   - When you can push: make focused fix-up commits, run validation, push to the head branch, reply to the threads you addressed, and **stop**. CI will run on your push; Symphony re-runs this review once CI settles.
-   - When you cannot push: submit a review requesting the specific changes, and stop. You will run again when the author pushes.
-5. If CI is pending, stop; you will be re-dispatched when it settles. If CI failed, investigate and fix (when you can push) or request changes.
+   - When you can push: make focused fix-up commits, run validation, push to the head branch, reply to the threads you addressed, and **stop**. Symphony reviews the new head once any CI on it settles.
+   - When you cannot push: submit a review requesting the specific changes, and stop. Symphony reviews the pull request again after the author pushes or after a cooldown.
+5. `CI at dispatch` above is authoritative; Symphony never dispatches a review while CI is pending. `none` means no CI is configured for this commit, so there is nothing to wait for. Do not derive CI state from GitHub's combined status endpoint: it reports `pending` for a commit with no checks at all. If CI failed, investigate and fix (when you can push) or request changes.
 6. If the pull request is conflicted with the base branch, merge the base branch into it, resolve, validate, and push (when you can push).
-7. When the code is correct, validation passes, CI is green, and no actionable feedback remains: approve, squash-merge pinned to the reviewed head SHA, and stop. A `Closes #N` link closes the issue on merge.
+7. When the code is correct, validation passes, CI is green or `none`, and no actionable feedback remains: approve, squash-merge pinned to the reviewed head SHA, and stop. A `Closes #N` link closes the issue on merge.
+{% if final_attempt %}
+
+**This is the final review run for this pull request.** End it merged or closed: merge it when it is correct and validated (after your own fixes, when you can push); otherwise abandon it as described below. Do not end this run waiting on CI, the author, or requested changes.
+{% endif %}
 
 ## Abandoning
 
@@ -36,4 +40,4 @@ Abandon when the pull request is unsalvageable, out of scope, duplicated, or blo
 - Comment with the concrete reason, then close the pull request.
 - If it closes an issue labeled `symphony:in-review`, close that issue as `not planned` too, with the reason, so it is never stranded.
 
-Your final message must state the outcome (merged, fixes pushed, changes requested, waiting on CI, or abandoned) and any blocker.
+Your final message must state the outcome (merged, fixes pushed, changes requested, or abandoned) and any blocker.

@@ -66,6 +66,8 @@ autopilot:
   max_open_issues: 15
   research_cooldown_ms: 1800000
   max_pr_runs: 5
+  # A PR reviewed without a new push is reviewed again at the same head after this long.
+  pr_recheck_ms: 3600000
   # PR authors whose code may run and merge without a maintainer label.
   # Anyone else's PR needs every `required_labels` label added by a maintainer.
   trusted_associations: [OWNER, MEMBER, COLLABORATOR]

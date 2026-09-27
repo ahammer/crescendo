@@ -11,6 +11,7 @@ defmodule SymphonyElixir.AutopilotTest do
     max_open_issues: 3,
     research_cooldown_ms: 60_000,
     max_pr_runs: 2,
+    pr_recheck_ms: 60_000,
     max_item_attempts: 3
   }
 
@@ -55,9 +56,16 @@ defmodule SymphonyElixir.AutopilotTest do
 
       assert Autopilot.dispatched_head(pr) == "sha-1"
       assert Autopilot.dispatched_head(%Issue{kind: :issue}) == nil
-      state = Autopilot.record_pull_handled(state, pr, "sha-1")
-      assert Autopilot.pull_request_waiting_reason(pr, state, @settings) == "reviewed at current head"
-      assert Autopilot.pull_request_ready?(pull_request("7", "sha-2"), state, @settings)
+      state = Autopilot.record_pull_handled(state, pr, "sha-1", 1_000)
+      assert state.pr_handled["7"] == %{runs: 1, head_sha: "sha-1", handled_at_ms: 1_000}
+      assert Autopilot.pull_request_waiting_reason(pr, state, @settings, 60_999) == "reviewed at current head"
+      assert Autopilot.pull_request_ready?(pull_request("7", "sha-2"), state, @settings, 1_000)
+      # An unmerged pass at an unchanged head is rechecked once the cooldown passes.
+      assert Autopilot.pull_request_ready?(pr, state, @settings, 61_000)
+
+      # The next dispatch is the last review run before the cap retires the pull request.
+      assert Autopilot.final_run?(state, pr, @settings)
+      refute Autopilot.final_run?(@empty, pr, @settings)
 
       state = Autopilot.record_pull_dispatch(state, pr)
       assert Autopilot.pull_request_waiting_reason(pull_request("7", "sha-2"), state, @settings) == "review run cap reached"
@@ -70,6 +78,13 @@ defmodule SymphonyElixir.AutopilotTest do
 
       assert Autopilot.prune_pull_requests(state, [%Issue{kind: :issue, id: "7"}]).pr_handled == %{}
       assert Autopilot.prune_pull_requests(state, [pr]).pr_handled == state.pr_handled
+    end
+
+    test "records persisted before recheck timestamps are due immediately" do
+      pr = pull_request("7", "sha-1")
+      legacy = %{@empty | pr_handled: %{"7" => %{runs: 1, head_sha: "sha-1"}}}
+
+      assert Autopilot.pull_request_ready?(pr, legacy, @settings)
     end
   end
 
@@ -84,6 +99,8 @@ defmodule SymphonyElixir.AutopilotTest do
       {state, 3} = Autopilot.record_failed_attempt(state, "5")
       assert Autopilot.exhausted?(state, "5", @settings)
       assert Autopilot.failed_attempts(state, "6") == 0
+      assert Autopilot.final_run?(state, %Issue{kind: :issue, id: "5"}, @settings)
+      refute Autopilot.final_run?(state, %Issue{kind: :research, id: "5"}, @settings)
 
       assert Autopilot.prune_pull_requests(state, [%Issue{id: "5"}]).item_attempts == %{"5" => 3}
       assert Autopilot.prune_pull_requests(state, []).item_attempts == %{}
@@ -322,7 +339,25 @@ defmodule SymphonyElixir.AutopilotTest do
       assert Map.keys(state.running) == ["2"]
       assert state.running["2"].issue.pull_request.ci_state == "success"
       assert state.autopilot.pr_handled["2"] == %{runs: 1}
+      refute state.running["2"].final_attempt
       assert Orchestrator.snapshot(name, 5_000).running |> Enum.map(& &1.identifier) == ["PR-2"]
+    end
+
+    test "a pull request reviewed at its current head is rechecked after the cooldown, as its final run" do
+      write_autopilot_workflow!(autopilot: %{max_pr_runs: 2, pr_recheck_ms: 0})
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [pull_request("2", "sha-2")])
+      {pid, _name} = start_orchestrator!()
+
+      :sys.replace_state(pid, fn state ->
+        handled = %{"2" => %{runs: 1, head_sha: "sha-2", handled_at_ms: System.system_time(:millisecond)}}
+        %{state | autopilot: %{state.autopilot | pr_handled: handled, research_finished_at: DateTime.utc_now()}}
+      end)
+
+      send(pid, :run_poll_cycle)
+      state = :sys.get_state(pid)
+
+      assert state.running["2"].final_attempt
+      assert state.autopilot.pr_handled["2"].runs == 2
     end
 
     test "a pull request with pending or unknown CI is skipped" do
@@ -376,7 +411,8 @@ defmodule SymphonyElixir.AutopilotTest do
       send(pid, {:DOWN, ref, :process, self(), :normal})
       state = :sys.get_state(pid)
 
-      assert state.autopilot.pr_handled["2"] == %{head_sha: "sha-2"}
+      assert %{head_sha: "sha-2", handled_at_ms: handled_at_ms} = state.autopilot.pr_handled["2"]
+      assert is_integer(handled_at_ms)
       refute Map.has_key?(state.retry_attempts, "2")
       refute MapSet.member?(state.claimed, "2")
 

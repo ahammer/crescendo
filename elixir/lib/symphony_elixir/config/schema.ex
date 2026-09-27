@@ -327,6 +327,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:max_open_issues, :integer, default: 10)
       field(:research_cooldown_ms, :integer, default: 1_800_000)
       field(:max_pr_runs, :integer, default: 5)
+      field(:pr_recheck_ms, :integer, default: 3_600_000)
       field(:max_item_attempts, :integer, default: 3)
       field(:blocked_label, :string, default: "symphony:blocked")
       field(:trusted_associations, {:array, :string}, default: ["OWNER", "MEMBER", "COLLABORATOR"])
@@ -351,6 +352,7 @@ defmodule SymphonyElixir.Config.Schema do
           :max_open_issues,
           :research_cooldown_ms,
           :max_pr_runs,
+          :pr_recheck_ms,
           :max_item_attempts,
           :blocked_label,
           :trusted_associations,
@@ -371,6 +373,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:max_open_issues, greater_than: 0)
       |> validate_number(:research_cooldown_ms, greater_than_or_equal_to: 0)
       |> validate_number(:max_pr_runs, greater_than: 0)
+      |> validate_number(:pr_recheck_ms, greater_than_or_equal_to: 0)
       |> validate_number(:max_item_attempts, greater_than: 0)
       |> update_change(:blocked_label, &(&1 |> String.trim() |> String.downcase()))
       |> update_change(:trusted_associations, fn values -> Enum.map(values, &(String.trim(&1) |> String.upcase())) end)
