@@ -72,7 +72,8 @@ crescendo drain on|off ~/.config/crescendo/crescendo.yml
   if a requested project is unknown or GitHub cannot list or create the labels.
 - `labels migrate` moves every open issue and pull request from each `<old>:` label to its twin under
   the project's `labels.prefix` (run `labels sync` first). Old labels stay for history. Runs get
-  the prefix as `CRESCENDO_LABEL_PREFIX`, so repository tooling can follow the switch.
+  the prefix as `CRESCENDO_LABEL_PREFIX`, so repository tooling can follow the switch. It exits with
+  an error if GitHub cannot list items or add/remove a label.
 - `drain on` stops new runs; running work finishes. `drain off` releases it.
 
 ## `crescendo.yml`

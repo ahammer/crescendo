@@ -148,12 +148,18 @@ defmodule SymphonyElixir.Commands do
          {:ok, settings, repo} <- project_settings(project) do
       prefix = settings.labels.prefix
 
-      for {name, _color, _description} <- labels(settings), String.starts_with?(name, prefix <> ":") do
-        old = old_prefix <> String.replace_prefix(name, prefix, "")
-        Enum.each(open_items(repo, old, gh), &move_label(id, repo, &1, old, name, gh))
-      end
+      labels(settings)
+      |> Enum.filter(fn {name, _color, _description} -> String.starts_with?(name, prefix <> ":") end)
+      |> Enum.reduce_while(:ok, &migrate_label_entry(&1, &2, id, repo, prefix, old_prefix, gh))
+    end
+  end
 
-      :ok
+  defp migrate_label_entry({name, _color, _description}, :ok, id, repo, prefix, old_prefix, gh) do
+    old = old_prefix <> String.replace_prefix(name, prefix, "")
+
+    case migrate_label(id, repo, old, name, gh) do
+      :ok -> {:cont, :ok}
+      error -> {:halt, error}
     end
   end
 
@@ -171,21 +177,42 @@ defmodule SymphonyElixir.Commands do
   # The issues API lists pull requests too, and labels them the same way.
   defp open_items(repo, label, gh) do
     case gh.(["api", "--paginate", "repos/#{repo}/issues?state=open&per_page=100&labels=#{URI.encode_www_form(label)}", "--jq", ".[].number"]) do
-      {output, 0} ->
-        String.split(output, "\n", trim: true)
+      {output, 0} -> {:ok, String.split(output, "\n", trim: true)}
+      {output, _status} -> {:error, String.trim(output)}
+    end
+  end
 
-      {output, _status} ->
-        IO.puts("#{label}: could not list items: #{String.trim(output)}")
-        []
+  defp migrate_label(id, repo, old, new, gh) do
+    case open_items(repo, old, gh) do
+      {:ok, items} ->
+        Enum.reduce_while(items, :ok, &migrate_item(&1, &2, id, repo, old, new, gh))
+
+      {:error, reason} ->
+        {:error, "#{id}: #{old}: could not list items: #{reason}"}
+    end
+  end
+
+  defp migrate_item(number, :ok, id, repo, old, new, gh) do
+    case move_label(id, repo, number, old, new, gh) do
+      :ok -> {:cont, :ok}
+      error -> {:halt, error}
     end
   end
 
   defp move_label(id, repo, number, old, new, gh) do
-    with {_output, 0} <- gh.(["api", "-X", "POST", "repos/#{repo}/issues/#{number}/labels", "-f", "labels[]=#{new}"]),
-         {_output, 0} <- gh.(["api", "-X", "DELETE", "repos/#{repo}/issues/#{number}/labels/#{URI.encode(old)}"]) do
-      IO.puts("#{id}: ##{number} #{old} -> #{new}")
-    else
-      {output, _status} -> IO.puts("#{id}: ##{number} could not move #{old}: #{String.trim(output)}")
+    case gh.(["api", "-X", "POST", "repos/#{repo}/issues/#{number}/labels", "-f", "labels[]=#{new}"]) do
+      {_output, 0} ->
+        case gh.(["api", "-X", "DELETE", "repos/#{repo}/issues/#{number}/labels/#{URI.encode(old)}"]) do
+          {_output, 0} ->
+            IO.puts("#{id}: ##{number} #{old} -> #{new}")
+            :ok
+
+          {output, _status} ->
+            {:error, "#{id}: ##{number} could not remove #{old} after adding #{new}: #{String.trim(output)}"}
+        end
+
+      {output, _status} ->
+        {:error, "#{id}: ##{number} could not add #{new} while moving #{old}: #{String.trim(output)}"}
     end
   end
 

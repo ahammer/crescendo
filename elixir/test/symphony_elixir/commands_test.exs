@@ -122,10 +122,8 @@ defmodule SymphonyElixir.CommandsTest do
     listing = "repos/ahammer/metalrain/issues?state=open&per_page=100&labels="
 
     gh = fn
-      ["api", "--paginate", ^listing <> "symphony%3Aready" | _] -> {"12\n34\n", 0}
-      ["api", "--paginate", ^listing <> "symphony%3Ahold" | _] -> {"HTTP 502", 1}
+      ["api", "--paginate", ^listing <> "symphony%3Aready" | _] -> {"12\n", 0}
       ["api", "--paginate" | _] -> {"", 0}
-      ["api", "-X", "POST", "repos/ahammer/metalrain/issues/34/labels" | _] -> {"HTTP 403", 1}
       ["api", "-X", method, path | _] -> send(parent, {:gh, method, path}) && {"", 0}
     end
 
@@ -134,11 +132,39 @@ defmodule SymphonyElixir.CommandsTest do
     assert_received {:gh, "POST", "repos/ahammer/metalrain/issues/12/labels"}
     assert_received {:gh, "DELETE", "repos/ahammer/metalrain/issues/12/labels/symphony:ready"}
     assert output =~ "metalrain: #12 symphony:ready -> crescendo:ready"
-    assert output =~ "metalrain: #34 could not move symphony:ready: HTTP 403"
-    assert output =~ "symphony:hold: could not list items: HTTP 502"
 
-    assert {:error, "no project nubu"} = Commands.run(["labels", "migrate", service, "nubu", "--from", "symphony"], gh)
-    assert {:error, "cannot read " <> _} = Commands.run(["labels", "migrate", service <> ".missing", "x", "--from", "s"], gh)
+    listing_failure = fn
+      ["api", "--paginate", ^listing <> "symphony%3Aready" | _] -> {"HTTP 502", 1}
+      ["api", "--paginate" | _] -> {"", 0}
+      args -> flunk("unexpected gh call: #{inspect(args)}")
+    end
+
+    assert {:error, "metalrain: symphony:ready: could not list items: HTTP 502"} =
+             Commands.run(["labels", "migrate", service, "metalrain", "--from", "symphony"], listing_failure)
+
+    add_failure = fn
+      ["api", "--paginate", ^listing <> "symphony%3Aready" | _] -> {"12\n", 0}
+      ["api", "--paginate" | _] -> {"", 0}
+      ["api", "-X", "POST", "repos/ahammer/metalrain/issues/12/labels" | _] -> {"HTTP 403", 1}
+      args -> flunk("unexpected gh call: #{inspect(args)}")
+    end
+
+    assert {:error, "metalrain: #12 could not add crescendo:ready while moving symphony:ready: HTTP 403"} =
+             Commands.run(["labels", "migrate", service, "metalrain", "--from", "symphony"], add_failure)
+
+    remove_failure = fn
+      ["api", "--paginate", ^listing <> "symphony%3Aready" | _] -> {"12\n", 0}
+      ["api", "--paginate" | _] -> {"", 0}
+      ["api", "-X", "POST", "repos/ahammer/metalrain/issues/12/labels" | _] -> {"", 0}
+      ["api", "-X", "DELETE", "repos/ahammer/metalrain/issues/12/labels/symphony:ready"] -> {"HTTP 403", 1}
+      args -> flunk("unexpected gh call: #{inspect(args)}")
+    end
+
+    assert {:error, "metalrain: #12 could not remove symphony:ready after adding crescendo:ready: HTTP 403"} =
+             Commands.run(["labels", "migrate", service, "metalrain", "--from", "symphony"], remove_failure)
+
+    assert {:error, "no project nubu"} = Commands.run(["labels", "migrate", service, "nubu", "--from", "symphony"], &no_gh/1)
+    assert {:error, "cannot read " <> _} = Commands.run(["labels", "migrate", service <> ".missing", "x", "--from", "s"], &no_gh/1)
   end
 
   test "drain on holds new dispatch until drain off", %{root: root, service: service} do
