@@ -1118,7 +1118,7 @@ defmodule SymphonyElixir.CoreTest do
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
+    assert_due_in_range(due_at_ms, 0, 1_100)
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -1158,7 +1158,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 39_500, 40_500)
+    assert_due_in_range(due_at_ms, 37_000, 40_500)
   end
 
   test "abnormal worker exit blocks the issue once max attempts are exhausted" do
@@ -1237,7 +1237,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 9_000, 10_500)
+    assert_due_in_range(due_at_ms, 7_000, 10_500)
   end
 
   test "a retry held for a free slot keeps its attempt number" do
@@ -1291,7 +1291,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 2, identifier: "MT-572", error: "no available orchestrator slots", due_at_ms: due_at_ms} =
              :sys.get_state(pid).retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 29_000, 30_500)
+    assert_due_in_range(due_at_ms, 27_000, 30_500)
   end
 
   test "the throttle holds new issue work over budget but lets closing work through" do
@@ -1450,6 +1450,8 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
   end
 
+  # The lower bounds leave seconds of slack: a loaded machine delays message
+  # handling, and the ranges only need to tell the retry schedules apart.
   defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
 

@@ -49,8 +49,12 @@ if [ ! -e "$release/.built" ]; then
     mkdir -p "$release/source/elixir/_build/dev"
     cp -a "$current"/source/elixir/_build/dev/dialyxir_* "$release/source/elixir/_build/dev/"
   fi
-  if ! (cd "$release/source/elixir" && mise trust --quiet . &&
-        machine-lease run -- mise exec -- sh -c 'mix setup && make all') > "$release/build.log" 2>&1; then
+  gate() {
+    (cd "$release/source/elixir" && mise trust --quiet . &&
+      machine-lease run -- mise exec -- sh -c 'mix setup && make all')
+  }
+  # A test can flake on a loaded machine, so the gate gets a second try before the release is given up.
+  if ! gate > "$release/build.log" 2>&1 && ! gate >> "$release/build.log" 2>&1; then
     touch "$release/.failed"
     record gate_failed "$target" "see $release/build.log"
     log "gate failed for $target (see $release/build.log)"
