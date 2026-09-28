@@ -58,7 +58,6 @@ defmodule SymphonyElixir.CommandsTest do
 
   test "labels sync creates the labels a project's workflow uses that its repository lacks", %{service: service} do
     capture_io(fn -> Commands.run(["project", "add", service, "shimmer", "ahammer/Shimmer"], &no_gh/1) end)
-    capture_io(fn -> Commands.run(["project", "add", service, "norepo", "ahammer/NoRepo"], &no_gh/1) end)
     File.write!(service, "projects: {shimmer: {}, other: {enabled: false}}")
     parent = self()
 
@@ -68,7 +67,7 @@ defmodule SymphonyElixir.CommandsTest do
 
       ["label", "create", name | rest] ->
         send(parent, {:created, name, rest})
-        if name == "crescendo:model:astra", do: {"HTTP 422: already taken\n", 1}, else: {"", 0}
+        {"", 0}
     end
 
     output = capture_io(fn -> assert :ok = Commands.run(["labels", "sync", service], gh) end)
@@ -82,17 +81,25 @@ defmodule SymphonyElixir.CommandsTest do
 
     assert output =~ "shimmer: created crescendo:blocked"
     assert Enum.count(created, &(&1 == "crescendo:blocked")) == 1
-    assert output =~ "shimmer: could not create crescendo:model:astra: HTTP 422: already taken"
 
-    # A listing failure still creates everything; only the named projects sync.
-    failing = fn
-      ["label", "list" | _] -> {"boom", 1}
-      ["label", "create", name | _] -> send(parent, {:created, name, []}) && {"", 0}
+    assert {:error, "no project nothing-matches"} = Commands.run(["labels", "sync", service, "nothing-matches"], &no_gh/1)
+
+    listing_failure = fn
+      ["label", "list" | _] -> {"HTTP 403: denied", 1}
+      args -> flunk("unexpected gh call: #{inspect(args)}")
     end
 
-    capture_io(fn -> assert :ok = Commands.run(["labels", "sync", service, "shimmer"], failing) end)
-    assert "crescendo:ready" in collect_created()
-    capture_io(fn -> assert :ok = Commands.run(["labels", "sync", service, "nothing-matches"], &no_gh/1) end)
+    assert {:error, "shimmer: could not list labels: HTTP 403: denied"} =
+             Commands.run(["labels", "sync", service, "shimmer"], listing_failure)
+
+    create_failure = fn
+      ["label", "list" | _] -> {"", 0}
+      ["label", "create", "crescendo:blocked" | _] -> {"HTTP 403: denied", 1}
+      args -> flunk("unexpected gh call: #{inspect(args)}")
+    end
+
+    assert {:error, "shimmer: could not create crescendo:blocked: HTTP 403: denied"} =
+             Commands.run(["labels", "sync", service, "shimmer"], create_failure)
   end
 
   test "labels sync reports projects it cannot read", %{root: root, service: service} do

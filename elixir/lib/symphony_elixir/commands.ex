@@ -96,10 +96,24 @@ defmodule SymphonyElixir.Commands do
 
   defp labels_sync(path, only, gh) do
     with {:ok, service} <- Service.load(path) do
-      service
-      |> Service.projects()
-      |> Enum.filter(&(only == [] or &1.id in only))
-      |> Enum.find_value(:ok, &sync_error(&1, gh))
+      projects = Service.projects(service)
+
+      case validate_requested_projects(only, projects) do
+        :ok ->
+          projects
+          |> Enum.filter(&(only == [] or &1.id in only))
+          |> Enum.find_value(:ok, &sync_error(&1, gh))
+
+        error ->
+          error
+      end
+    end
+  end
+
+  defp validate_requested_projects(only, projects) do
+    case Enum.find(only, fn id -> not Enum.any?(projects, &(&1.id == id)) end) do
+      nil -> :ok
+      id -> {:error, "no project #{id}"}
     end
   end
 
@@ -111,12 +125,20 @@ defmodule SymphonyElixir.Commands do
   end
 
   defp sync_project(project, gh) do
-    with {:ok, settings, repo} <- project_settings(project) do
-      existing = existing_labels(repo, gh)
+    with {:ok, settings, repo} <- project_settings(project),
+         {:ok, existing} <- existing_labels(project.id, repo, gh) do
+      Enum.reduce_while(labels(settings), :ok, &sync_label(&1, &2, project.id, repo, existing, gh))
+    end
+  end
 
-      for {name, _color, _description} = label <- labels(settings), String.downcase(name) not in existing, do: create_label(project.id, repo, label, gh)
-
-      :ok
+  defp sync_label({name, _color, _description} = label, :ok, id, repo, existing, gh) do
+    if String.downcase(name) in existing do
+      {:cont, :ok}
+    else
+      case create_label(id, repo, label, gh) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
     end
   end
 
@@ -169,15 +191,19 @@ defmodule SymphonyElixir.Commands do
 
   defp create_label(id, repo, {name, color, description}, gh) do
     case gh.(["label", "create", name, "--repo", repo, "--color", color, "--description", description]) do
-      {_output, 0} -> IO.puts("#{id}: created #{name}")
-      {output, _status} -> IO.puts("#{id}: could not create #{name}: #{String.trim(output)}")
+      {_output, 0} ->
+        IO.puts("#{id}: created #{name}")
+        :ok
+
+      {output, _status} ->
+        {:error, "#{id}: could not create #{name}: #{String.trim(output)}"}
     end
   end
 
-  defp existing_labels(repo, gh) do
+  defp existing_labels(id, repo, gh) do
     case gh.(["label", "list", "--repo", repo, "--limit", "500", "--json", "name", "--jq", ".[].name"]) do
-      {output, 0} -> output |> String.split("\n", trim: true) |> Enum.map(&String.downcase/1)
-      _ -> []
+      {output, 0} -> {:ok, output |> String.split("\n", trim: true) |> Enum.map(&String.downcase/1)}
+      {output, _status} -> {:error, "#{id}: could not list labels: #{String.trim(output)}"}
     end
   end
 
