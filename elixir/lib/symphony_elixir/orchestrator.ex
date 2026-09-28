@@ -739,6 +739,8 @@ defmodule SymphonyElixir.Orchestrator do
         state = record_session_completion_totals(state, running_entry)
 
         stop_running_task(pid, ref, state.task_supervisor)
+        # The stopped task's DOWN is flushed, so its service slot is released here.
+        :ok = release_slot(issue_id)
         record_stopped_run(state, running_entry, "Worker stopped by reconciliation")
 
         if cleanup_workspace do
@@ -934,6 +936,7 @@ defmodule SymphonyElixir.Orchestrator do
       state.task_supervisor
     )
 
+    :ok = release_slot(issue_id)
     record_stopped_run(state, running_entry, "Worker stopped for operator input")
 
     fail_attempt_or_block(state, issue_id, running_entry, error, "Operator input or approval required")

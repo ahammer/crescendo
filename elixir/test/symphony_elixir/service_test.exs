@@ -152,6 +152,29 @@ defmodule SymphonyElixir.ServiceTest do
     assert Project.registry() == SymphonyElixir.ProjectRegistry
   end
 
+  test "a run stopped because its issue closed gives its service slot back", %{root: root} do
+    write_project!(root, "eta", [])
+    File.write!(Path.join(root, "crescendo.yml"), "paths: {state: state}\npool: {slots: 2}\nprojects: {eta: {}}")
+    {:ok, service} = Service.load(Path.join(root, "crescendo.yml"))
+    start_supervised!({SymphonyElixir.Governor, service})
+    start_supervised!({Projects, service})
+    assert_eventually(fn -> GenServer.whereis(Project.via("eta", :orchestrator)) != nil end)
+    orchestrator = GenServer.whereis(Project.via("eta", :orchestrator))
+
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+    issue = %Issue{id: "issue-closing", identifier: "MT-9", title: "Closing", state: "In Progress", dispatchable: true}
+    assert :ok = SymphonyElixir.Governor.acquire("eta", issue.id, :issue)
+    assert %{busy: 1} = SymphonyElixir.Governor.snapshot()
+
+    entry = %{pid: worker, ref: make_ref(), identifier: issue.identifier, issue: issue, started_at: DateTime.utc_now(), session_id: nil}
+    :sys.replace_state(orchestrator, fn state -> %{state | running: %{issue.id => entry}, claimed: MapSet.new([issue.id])} end)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | state: "Closed"}])
+
+    send(orchestrator, :run_poll_cycle)
+    assert_eventually(fn -> not Process.alive?(worker) end)
+    assert_eventually(fn -> SymphonyElixir.Governor.snapshot().busy == 0 end)
+  end
+
   test "a restarted service learns each project's last known quota", %{root: root} do
     write_project!(root, "zeta", [])
     File.write!(Path.join(root, "crescendo.yml"), "paths: {state: state}\nprojects: {zeta: {}}")
