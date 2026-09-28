@@ -306,6 +306,51 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Throttle do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:daily_budget_usd, :float)
+      field(:over_budget_allow, {:array, :string}, default: ["pull_request", "final_attempt", "continuation"])
+      field(:backoff, {:array, :map}, default: [])
+      field(:quota_stale_ms, :integer, default: 7_200_000)
+      field(:on_unknown_quota, :string, default: "restrict")
+    end
+
+    @classes ["research", "issue", "pull_request", "final_attempt", "continuation"]
+    @rule_keys ["window", "remaining_below_percent", "avoid", "pause"]
+    @fields [:daily_budget_usd, :over_budget_allow, :backoff, :quota_stale_ms, :on_unknown_quota]
+    @rule_error "rules need a window, remaining_below_percent (0-100), and avoid (models) and/or pause: true"
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, @fields, empty_values: [])
+      |> validate_number(:daily_budget_usd, greater_than: 0)
+      |> validate_subset(:over_budget_allow, @classes)
+      |> validate_number(:quota_stale_ms, greater_than: 0)
+      |> validate_inclusion(:on_unknown_quota, ["restrict", "allow"])
+      |> validate_change(:backoff, fn :backoff, rules ->
+        if Enum.all?(rules, &valid_rule?/1), do: [], else: [backoff: @rule_error]
+      end)
+    end
+
+    defp valid_rule?(%{"window" => window, "remaining_below_percent" => percent} = rule)
+         when is_binary(window) and is_number(percent) and percent > 0 and percent <= 100 do
+      Map.keys(rule) -- @rule_keys == [] and valid_action?(Map.get(rule, "avoid", []), Map.get(rule, "pause", false))
+    end
+
+    defp valid_rule?(_rule), do: false
+
+    defp valid_action?(avoid, pause) when is_list(avoid) and is_boolean(pause),
+      do: Enum.all?(avoid, &(is_binary(&1) and String.trim(&1) != "")) and (pause or avoid != [])
+
+    defp valid_action?(_avoid, _pause), do: false
+  end
+
   defmodule Autopilot do
     @moduledoc false
     use Ecto.Schema
@@ -426,6 +471,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
     embeds_one(:autopilot, Autopilot, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:throttle, Throttle, on_replace: :update, defaults_to_struct: true)
   end
 
   @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
@@ -521,6 +567,26 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
     |> cast_embed(:autopilot, with: &Autopilot.changeset/2)
+    |> cast_embed(:throttle, with: &Throttle.changeset/2)
+    |> validate_fixed_route_floors()
+  end
+
+  # Research and review routes run outside the ladder but still honor its
+  # `effort_floor`, so a cheap model can never be configured below its floor.
+  defp validate_fixed_route_floors(changeset) do
+    with %{} = codex <- get_field(changeset, :codex),
+         %{} = autopilot <- get_field(changeset, :autopilot),
+         {:error, message} <- first_floor_error(codex.routing, [autopilot.research_route, autopilot.review_route]) do
+      add_error(changeset, :autopilot, message)
+    else
+      _ -> changeset
+    end
+  end
+
+  defp first_floor_error(routing, routes) do
+    Enum.find_value(routes, :ok, fn route ->
+      with :ok <- SymphonyElixir.ModelRouting.check_floor(routing, route), do: nil
+    end)
   end
 
   # Under autopilot a worker ends a failed attempt by adding the blocked label;

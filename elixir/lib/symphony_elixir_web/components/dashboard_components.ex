@@ -127,12 +127,21 @@ defmodule SymphonyElixirWeb.DashboardComponents do
 
   @spec route_detail(map()) :: String.t()
   def route_detail(%{route: %{} = route}) do
-    [route[:effort] && "#{route.effort} effort", route[:tier] && "tier #{route.tier}", route[:label] && "via #{route.label}"]
+    [
+      route[:effort] && "#{route.effort} effort",
+      route[:tier] && "tier #{route.tier}",
+      route[:size] && "size #{route.size}",
+      route[:label] && "via #{route.label}",
+      backoff_text(route[:backoff])
+    ]
     |> Enum.filter(& &1)
     |> Enum.join(" · ")
   end
 
   def route_detail(_entry), do: "route pending"
+
+  defp backoff_text(%{"from" => from, "reason" => reason}), do: "backed off from #{from} (#{reason})"
+  defp backoff_text(_backoff), do: nil
 
   @doc "Micro-USD: cents from a dollar up, tenths of a cent below."
   @spec format_money(term()) :: String.t()

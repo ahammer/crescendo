@@ -263,6 +263,23 @@ defmodule SymphonyElixir.Operations do
     safe_write(fn -> :dets.insert(table, {:autopilot, state}) end)
   end
 
+  @doc "Estimated spend recorded today (UTC), in micro-USD."
+  @spec spend_today(handle()) :: non_neg_integer()
+  def spend_today(nil), do: 0
+
+  def spend_today(table) do
+    today = Date.utc_today() |> Date.to_iso8601()
+
+    case :dets.select(table, [{{{:usage, :_, today, :_}, :"$1"}, [], [:"$1"]}]) do
+      values when is_list(values) -> Enum.reduce(values, 0, &(&1.usd_micro + &2))
+      {:error, _reason} -> 0
+    end
+  rescue
+    ArgumentError -> 0
+  catch
+    :exit, _ -> 0
+  end
+
   @doc "The last Codex quota snapshot, kept so throttling knows the quota after a restart."
   @spec quota(handle()) :: map() | nil
   def quota(nil), do: nil

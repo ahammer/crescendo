@@ -23,6 +23,12 @@ defmodule SymphonyElixir.DashboardComponentsTest do
     assert C.kind_detail(%{kind: :issue}) == nil
     assert C.visible_labels(%{labels: ["symphony", "symphony:ready", "solver"]}) == ["solver"]
     assert C.route_detail(%{}) == "route pending"
+
+    backed_off = %{effort: "xhigh", tier: 2, size: "small", label: "default", backoff: %{"from" => "gpt-6-astra medium", "reason" => "weekly quota 25% left"}}
+
+    assert C.route_detail(%{route: backed_off}) ==
+             "xhigh effort · tier 2 · size small · via default · backed off from gpt-6-astra medium (weekly quota 25% left)"
+
     assert C.route_model(%{model: nil}) == "pending"
   end
 

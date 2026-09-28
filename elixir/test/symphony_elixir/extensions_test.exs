@@ -344,6 +344,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              },
              "rate_limits" => %{"primary" => %{"remaining" => 11}},
              "quota" => nil,
+             "throttle" => nil,
              "usage" => %{
                "status" => "unavailable",
                "pricing_as_of" => "2026-09-24",

@@ -43,6 +43,7 @@ defmodule SymphonyElixirWeb.Presenter do
           codex_totals: snapshot.codex_totals,
           rate_limits: snapshot.rate_limits,
           quota: quota_payload(Map.get(snapshot, :quota), now),
+          throttle: throttle_payload(Map.get(snapshot, :throttle)),
           usage: usage,
           usage_error: Map.get(snapshot, :operations_error),
           upcoming: upcoming_payload(Map.get(snapshot, :upcoming), usage, settings),
@@ -370,10 +371,27 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
-  @doc "The daily worker spend budget in micro-USD (`observability.daily_budget_usd`)."
+  @doc """
+  The daily worker spend budget in micro-USD: the enforced
+  `throttle.daily_budget_usd`, else the display-only `observability.daily_budget_usd`.
+  """
   @spec budget_usd_micro(map() | nil) :: non_neg_integer()
+  def budget_usd_micro(%{throttle: %{daily_budget_usd: budget}}) when is_number(budget), do: round(budget * 1_000_000)
   def budget_usd_micro(%{observability: %{daily_budget_usd: budget}}) when is_number(budget), do: round(budget * 1_000_000)
   def budget_usd_micro(_settings), do: 50_000_000
+
+  defp throttle_payload(%{} = throttle) do
+    %{
+      budget_usd_micro: throttle.budget_usd_micro,
+      spent_usd_micro: throttle.spent_usd_micro,
+      over_budget: throttle.over_budget,
+      paused: throttle.paused,
+      allow: throttle.allow,
+      avoid: throttle.avoid |> Enum.sort() |> Enum.map(fn {model, reason} -> %{model: model, reason: reason} end)
+    }
+  end
+
+  defp throttle_payload(_throttle), do: nil
 
   # Five-minute samples are folded into 15-minute peaks so a 12-hour sparkline
   # stays readable (48 points).
@@ -403,12 +421,17 @@ defmodule SymphonyElixirWeb.Presenter do
   # Health comes only from signals Symphony actually observes; a check that
   # cannot be judged is left out rather than shown as healthy.
   defp health_payload(snapshot, usage, settings, now) do
-    coordinator = [
-      polling_check(Map.get(snapshot, :polling)),
-      dispatch_check(snapshot, settings),
-      attention_check(snapshot),
-      research_check(Map.get(snapshot, :autopilot))
-    ]
+    coordinator =
+      Enum.reject(
+        [
+          polling_check(Map.get(snapshot, :polling)),
+          dispatch_check(snapshot, settings),
+          throttle_check(throttle_payload(Map.get(snapshot, :throttle))),
+          attention_check(snapshot),
+          research_check(Map.get(snapshot, :autopilot))
+        ],
+        &is_nil/1
+      )
 
     system =
       Enum.reject(
@@ -447,6 +470,20 @@ defmodule SymphonyElixirWeb.Presenter do
     queued = length(get_in(snapshot, [:upcoming, :ready]) || [])
     check("Dispatch", "healthy", "#{length(snapshot.running)} of #{max} slots busy · #{queued} queued")
   end
+
+  # Holding work back is the throttle doing its job, so only a pause or the
+  # budget's closing-only mode is worth a warning.
+  defp throttle_check(%{paused: reason}) when is_binary(reason), do: check("Throttle", "warning", "New runs paused: #{reason}")
+  defp throttle_check(%{over_budget: reason}) when is_binary(reason), do: check("Throttle", "warning", "Closing open work only: #{reason}")
+  defp throttle_check(%{avoid: [_ | _] = avoid}), do: check("Throttle", "healthy", Enum.map_join(avoid, " · ", &"#{&1.model} backed off: #{&1.reason}"))
+
+  defp throttle_check(%{budget_usd_micro: budget, spent_usd_micro: spent}) when is_integer(budget),
+    do: check("Throttle", "healthy", "#{usd(spent)} of #{usd(budget)} budget spent today")
+
+  defp throttle_check(%{}), do: check("Throttle", "healthy", "No limits in effect")
+  defp throttle_check(nil), do: nil
+
+  defp usd(micro), do: :io_lib.format("$~.2f", [micro / 1_000_000]) |> to_string()
 
   # Retrying is the normal path for a failed attempt; only a blocked item,
   # which waits on someone, is a problem.

@@ -95,7 +95,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <.health_panel payload={@payload} now={@now} />
           <.runs_panel stats={@payload.run_stats} usage={@payload.usage} />
           <.spend_panel usage={@payload.usage} usage_error={@payload.usage_error} />
-          <.models_panel usage={@payload.usage} quota={@payload.quota} now={@now} />
+          <.models_panel usage={@payload.usage} quota={@payload.quota} throttle={@payload[:throttle]} now={@now} />
         </div>
 
         <div class="lists">
@@ -424,6 +424,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   attr(:usage, :map, required: true)
   attr(:quota, :any, default: nil)
+  attr(:throttle, :any, default: nil)
   attr(:now, :any, required: true)
 
   defp models_panel(assigns) do
@@ -436,6 +437,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <Charts.bars title="Tokens by model" rows={model_rows(@usage)} />
       <% end %>
       <Charts.meter :for={meter <- quota_meters(@quota, @now)} label={meter.label} percent={meter.percent} detail={meter.detail} />
+      <p :for={item <- (@throttle && @throttle.avoid) || []} class="panel-copy">
+        <strong><%= item.model %></strong> backed off: <%= item.reason %>
+      </p>
+      <p :if={@throttle && @throttle.paused} class="panel-copy"><strong>New runs paused:</strong> <%= @throttle.paused %></p>
     </section>
     """
   end
@@ -464,10 +469,29 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp budget_detail(payload) do
     budget = format_usd(payload.header.budget_usd_micro)
-    if over_budget?(payload), do: "over #{budget} budget", else: "of #{budget} budget"
+
+    cond do
+      get_in(payload, [:throttle, :over_budget]) -> "over #{budget} · closing only"
+      over_budget?(payload) -> "over #{budget} budget"
+      true -> "of #{budget} budget"
+    end
   end
 
   defp budget_title(payload) do
+    if get_in(payload, [:throttle, :over_budget]) do
+      "Over the enforced daily budget: until midnight UTC only #{Enum.map_join(payload.throttle.allow, ", ", &allow_phrase/1)} start."
+    else
+      budget_alert_title(payload)
+    end
+  end
+
+  defp allow_phrase("pull_request"), do: "pull request reviews"
+  defp allow_phrase("final_attempt"), do: "final attempts"
+  defp allow_phrase("continuation"), do: "continuations of work in flight"
+  defp allow_phrase("issue"), do: "new issues"
+  defp allow_phrase(class), do: class
+
+  defp budget_alert_title(payload) do
     if over_budget?(payload),
       do: "Worker usage alert: estimated worker usage today (UTC) passed the daily budget. Planning and independent review usage are not included.",
       else: "Estimated worker usage today (UTC). Planning and independent review usage are not included."

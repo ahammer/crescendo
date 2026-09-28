@@ -24,10 +24,14 @@ defmodule SymphonyElixir.OperationsTest do
     {:ok, table} = Operations.open(path, :symphony_operations_test)
     snapshot = Operations.snapshot(table)
     assert snapshot.recorded.usd_micro == 1_050_000
+    # The throttle's budget check reads the same total without folding the whole ledger.
+    assert Operations.spend_today(table) == snapshot.today.usd_micro
+    assert Operations.spend_today(nil) == 0
     assert snapshot.today.cached_input_tokens == 500_000
     assert [%{model: "gpt-6-sol", total_tokens: 1_100_000}] = snapshot.by_model
     assert Enum.any?(snapshot.activity, &(&1.kind == "interrupted"))
     :ok = Operations.close(table)
+    assert Operations.spend_today(table) == 0
   end
 
   test "run and item usage sum a run's rows and accumulate an item across runs" do

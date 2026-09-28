@@ -128,6 +128,8 @@ defmodule SymphonyElixir.TestSupport do
           server_port: nil,
           server_host: nil,
           autopilot: nil,
+          throttle: nil,
+          codex_routing: nil,
           prompt: @workflow_prompt
         ],
         overrides
@@ -171,6 +173,8 @@ defmodule SymphonyElixir.TestSupport do
     server_host = Keyword.get(config, :server_host)
     prompt = Keyword.get(config, :prompt)
     autopilot = Keyword.get(config, :autopilot)
+    throttle = Keyword.get(config, :throttle)
+    codex_routing = Keyword.get(config, :codex_routing)
 
     sections =
       [
@@ -204,6 +208,7 @@ defmodule SymphonyElixir.TestSupport do
         "  turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
+        if(is_nil(codex_routing), do: nil, else: "  routing: #{yaml_value(codex_routing)}"),
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(
           observability_enabled,
@@ -213,6 +218,7 @@ defmodule SymphonyElixir.TestSupport do
         ),
         server_yaml(server_port, server_host),
         if(is_nil(autopilot), do: nil, else: "autopilot: #{yaml_value(autopilot)}"),
+        if(is_nil(throttle), do: nil, else: "throttle: #{yaml_value(throttle)}"),
         "---",
         prompt
       ]

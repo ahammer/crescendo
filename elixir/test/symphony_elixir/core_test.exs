@@ -1240,6 +1240,99 @@ defmodule SymphonyElixir.CoreTest do
     assert_due_in_range(due_at_ms, 9_000, 10_500)
   end
 
+  test "a retry held for a free slot keeps its attempt number" do
+    write_workflow_file!(Workflow.workflow_file_path(), max_concurrent_agents: 1)
+
+    issue_id = "issue-held-retry"
+    orchestrator_name = Module.concat(__MODULE__, :HeldRetryOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    retry_token = make_ref()
+
+    busy = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: "MT-571",
+      issue: %Issue{id: "issue-busy", identifier: "MT-571", state: "In Progress"},
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:max_concurrent_agents, 1)
+      |> Map.put(:running, %{"issue-busy" => busy})
+      |> Map.put(:claimed, MapSet.new(["issue-busy", issue_id]))
+      |> Map.put(:retry_attempts, %{
+        issue_id => %{
+          attempt: 2,
+          timer_ref: nil,
+          retry_token: retry_token,
+          due_at_ms: System.monotonic_time(:millisecond),
+          identifier: "MT-572",
+          error: "agent exited: :boom"
+        }
+      })
+    end)
+
+    # Waiting for capacity is not a failed run: the attempt stays at 2 however
+    # long the wait, so throttling can never push an item toward giving up.
+    for _ <- 1..3 do
+      %{retry_token: token} = :sys.get_state(pid).retry_attempts[issue_id]
+      send(pid, {:retry_issue, issue_id, token})
+    end
+
+    assert %{attempt: 2, identifier: "MT-572", error: "no available orchestrator slots", due_at_ms: due_at_ms} =
+             :sys.get_state(pid).retry_attempts[issue_id]
+
+    assert_due_in_range(due_at_ms, 29_000, 30_500)
+  end
+
+  test "the throttle holds new issue work over budget but lets closing work through" do
+    prompts_dir = Path.join(Path.dirname(Workflow.workflow_file_path()), "prompts")
+    File.mkdir_p!(prompts_dir)
+    File.write!(Path.join(prompts_dir, "pr.md"), "Review")
+    File.write!(Path.join(prompts_dir, "research.md"), "Research")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      autopilot: %{enabled: true, max_item_attempts: 3, prompts: %{pull_request: "prompts/pr.md", research: "prompts/research.md"}},
+      throttle: %{daily_budget_usd: 1}
+    )
+
+    assert :ok = Config.validate!()
+
+    issue = %Issue{id: "issue-budget", identifier: "MT-573", title: "New work", state: "Todo", dispatchable: true, labels: []}
+    policy = SymphonyElixir.Throttle.evaluate(Config.settings!().throttle, nil, 2_000_000, DateTime.utc_now())
+    state = %Orchestrator.State{max_concurrent_agents: 3, running: %{}, claimed: MapSet.new(), retry_attempts: %{}, throttle: policy}
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    assert Orchestrator.should_dispatch_issue_for_test(issue, %{state | throttle: nil})
+
+    # An issue on its final attempt still runs, so it can deliver or close.
+    final = %{state | autopilot: Map.put(state.autopilot, :item_attempts, %{"issue-budget" => 2})}
+    assert Orchestrator.should_dispatch_issue_for_test(issue, final)
+  end
+
+  test "an issue whose model is backed off with no allowed step waits instead of dispatching" do
+    sol = %{"model" => "gpt-6-sol", "effort" => "medium"}
+    routing = %{"label_prefix" => "symphony:model:", "default" => sol, "labels" => %{"symphony:model:sol" => sol}}
+    write_workflow_file!(Workflow.workflow_file_path(), codex_routing: routing)
+
+    issue = %Issue{id: "issue-backed-off", identifier: "MT-574", title: "Routed work", state: "Todo", dispatchable: true, labels: []}
+    policy = %{avoid: %{"gpt-6-sol" => "sol quota 2% left"}, paused: nil, over_budget: nil, allow: [], budget_usd_micro: nil, spent_usd_micro: 0}
+    state = %Orchestrator.State{max_concurrent_agents: 3, running: %{}, claimed: MapSet.new(), retry_attempts: %{}, throttle: policy}
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    assert Orchestrator.should_dispatch_issue_for_test(issue, %{state | throttle: %{policy | avoid: %{}}})
+  end
+
   test "stale retry timer messages do not consume newer retry entries" do
     issue_id = "issue-stale-retry"
     orchestrator_name = Module.concat(__MODULE__, :StaleRetryOrchestrator)

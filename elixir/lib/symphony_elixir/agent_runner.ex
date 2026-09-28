@@ -89,12 +89,9 @@ defmodule SymphonyElixir.AgentRunner do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
 
-    settings = Config.settings!()
-    fixed_routes = %{research: settings.autopilot.research_route, pull_request: settings.autopilot.review_route}
-    item_attempt = Keyword.get(opts, :item_attempt, 1)
     session_opts = [worker_host: worker_host, work_item: issue.identifier]
 
-    with {:ok, route} <- ModelRouting.select_for_run(settings.codex.routing, fixed_routes, issue, item_attempt),
+    with {:ok, route} <- model_route(issue, opts),
          :ok <- log_route(issue, route),
          :ok <- send_model_route(codex_update_recipient, issue, route),
          {:ok, session} <- AppServer.start_session(workspace, [model_route: route] ++ session_opts) do
@@ -106,10 +103,26 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
+  # The orchestrator selects the route at dispatch (with quota back-off);
+  # direct callers get the plain label route.
+  defp model_route(issue, opts) do
+    case Keyword.get_lazy(opts, :model_route, fn -> select_route(issue, Keyword.get(opts, :item_attempt, 1)) end) do
+      {:wait, reason} -> {:error, {:model_route_waiting, reason}}
+      result -> result
+    end
+  end
+
+  defp select_route(issue, item_attempt) do
+    settings = Config.settings!()
+    fixed_routes = %{research: settings.autopilot.research_route, pull_request: settings.autopilot.review_route}
+    ModelRouting.select_for_run(settings.codex.routing, fixed_routes, issue, item_attempt)
+  end
+
   defp log_route(_issue, nil), do: :ok
 
   defp log_route(issue, route) do
-    Logger.info("Selected model route for #{issue_context(issue)} label=#{route["label"]} model=#{route["model"]} effort=#{route["effort"]} tier=#{route["tier"] || "none"}")
+    backoff = if route["backoff"], do: " backed_off_from=#{route["backoff"]["from"]} reason=#{route["backoff"]["reason"]}", else: ""
+    Logger.info("Selected model route for #{issue_context(issue)} label=#{route["label"]} model=#{route["model"]} effort=#{route["effort"]} tier=#{route["tier"] || "none"}#{backoff}")
   end
 
   defp send_model_route(recipient, %Issue{id: issue_id}, route) when is_pid(recipient) do
