@@ -1,0 +1,107 @@
+#!/bin/sh
+# Deploys Crescendo's newest main between runs: build a release and pass the
+# full gate, drain (no new runs; running ones finish), swap, health-check,
+# and roll back when the new release does not come up healthy. Runs from
+# crescendo-deploy.timer with the service environment, and by hand.
+set -eu
+
+root=${CRESCENDO_INSTALL_ROOT:-$HOME/.local/lib/crescendo}
+config=${CRESCENDO_CONFIG_DIR:-$HOME/.config/crescendo}
+state=${CRESCENDO_STATE_DIR:-$HOME/.local/state/crescendo}
+unit=${CRESCENDO_UNIT:-crescendo.service}
+repo=${CRESCENDO_REPO:-https://github.com/ahammer/crescendo.git}
+branch=${CRESCENDO_BRANCH:-main}
+drain_limit=${CRESCENDO_DRAIN_LIMIT_SECONDS:-7200}
+state_url=http://127.0.0.1:${CRESCENDO_PORT:-4280}/api/v1/state
+env_file=$config/service.env
+
+log() { printf 'deploy: %s\n' "$*" >&2; }
+record() {
+  mkdir -p "$state"
+  printf '{"at":"%s","outcome":"%s","release":"%s","detail":"%s"}\n' \
+    "$(date -u +%FT%TZ)" "$1" "$2" "$3" >> "$state/deploys.jsonl"
+}
+
+mkdir -p "$root/releases"
+exec 9>"$root/deploy.lock"
+if ! flock -n 9; then log "another deploy is running"; exit 0; fi
+
+current=$(sed -n 's/^CRESCENDO_RELEASE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$env_file")
+if [ -z "$current" ]; then log "CRESCENDO_RELEASE is not set in $env_file"; exit 1; fi
+
+# 1. The newest commit on the branch.
+if [ ! -d "$root/source.git" ]; then git clone --quiet --mirror "$repo" "$root/source.git"; fi
+git -C "$root/source.git" fetch --quiet --prune origin
+target=$(git -C "$root/source.git" rev-parse "refs/heads/$branch")
+release=$root/releases/$target
+if [ "$release" = "$current" ] || [ "$(basename "$current")" = "$target" ]; then exit 0; fi
+if [ -e "$release/.failed" ]; then log "$target failed before; waiting for a newer commit"; exit 0; fi
+
+# 2. Build and gate it with the full `make all`, reusing the running release's deps.
+if [ ! -e "$release/.built" ]; then
+  log "building $target"
+  rm -rf "$release"
+  mkdir -p "$release/source"
+  git -C "$root/source.git" archive "$target" | tar -x -C "$release/source"
+  if [ -d "$current/source/elixir/deps" ]; then cp -a "$current/source/elixir/deps" "$release/source/elixir/"; fi
+  if ! (cd "$release/source/elixir" && mise trust --quiet . &&
+        machine-lease run -- mise exec -- sh -c 'mix setup && make all') > "$release/build.log" 2>&1; then
+    touch "$release/.failed"
+    record gate_failed "$target" "see $release/build.log"
+    log "gate failed for $target (see $release/build.log)"
+    exit 1
+  fi
+  touch "$release/.built"
+fi
+
+# 3. Drain: no new runs start; wait for the running ones to finish.
+running() {
+  curl -fsS --max-time 10 "$state_url" | python3 -c 'import json, sys; print(len(json.load(sys.stdin).get("running", [])))'
+}
+mkdir -p "$state"
+date -u +%FT%TZ > "$state/drain"
+trap 'rm -f "$state/drain"' EXIT
+waited=0
+while [ "$(running || echo busy)" != 0 ]; do
+  if [ "$waited" -ge "$drain_limit" ]; then
+    record postponed "$target" "runs still active after ${drain_limit}s"
+    log "postponed: runs still active"
+    exit 0
+  fi
+  sleep 30
+  waited=$((waited + 30))
+done
+
+# 4. Swap and restart.
+cp "$env_file" "$env_file.before-$target"
+sed -i "s|^CRESCENDO_RELEASE=.*|CRESCENDO_RELEASE=\"$release\"|" "$env_file"
+systemctl --user restart "$unit"
+
+# 5. Healthy means the state API answers with every project started; otherwise roll back.
+healthy() {
+  curl -fsS --max-time 10 "$state_url" | python3 -c '
+import json, sys
+state = json.load(sys.stdin)
+projects = state.get("projects") or []
+sys.exit(0 if "error" not in state and projects and all(p.get("failure") is None for p in projects) else 1)'
+}
+ok=0
+for _ in $(seq 1 24); do
+  sleep 5
+  if healthy; then ok=1; break; fi
+done
+if [ "$ok" -ne 1 ]; then
+  cp "$env_file.before-$target" "$env_file"
+  systemctl --user restart "$unit"
+  touch "$release/.failed"
+  record rolled_back "$target" "not healthy after restart; back on $(basename "$current")"
+  log "rolled back $target"
+  exit 1
+fi
+record deployed "$target" "replaced $(basename "$current")"
+log "deployed $target"
+
+# 6. Keep the five newest releases, never the running one.
+ls -1dt "$root"/releases/*/ | tail -n +6 | while read -r old; do
+  if [ "${old%/}" != "$release" ]; then rm -rf "$old"; fi
+done

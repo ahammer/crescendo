@@ -1,0 +1,19 @@
+[Unit]
+Description=Crescendo agent orchestration (every project in crescendo.yml)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+EnvironmentFile=%h/.config/crescendo/service.env
+ExecStart=%h/.local/lib/crescendo/bin/start
+Restart=on-failure
+RestartSec=15
+KillMode=control-group
+TimeoutStopSec=30
+UMask=0077
+
+[Install]
+WantedBy=default.target

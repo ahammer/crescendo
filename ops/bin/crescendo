@@ -1,0 +1,15 @@
+#!/bin/sh
+# Runs a Crescendo command with the deployed release, from any directory:
+#   crescendo labels sync ~/.config/crescendo/crescendo.yml
+set -eu
+config=${CRESCENDO_CONFIG_DIR:-$HOME/.config/crescendo}
+if [ -z "${CRESCENDO_RELEASE:-}" ]; then
+  set -a
+  . "$config/service.env"
+  set +a
+fi
+elixir_dir=$CRESCENDO_RELEASE/source/elixir
+eval "$(mise env -C "$elixir_dir" -s bash)"
+bin=$elixir_dir/bin/crescendo
+[ -x "$bin" ] || bin=$elixir_dir/bin/symphony
+exec "$bin" "$@"

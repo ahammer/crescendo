@@ -1,0 +1,9 @@
+[Unit]
+Description=Deploy Crescendo's newest main between runs
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/crescendo/service.env
+ExecStart=%h/.local/lib/crescendo/bin/deploy
+TimeoutStartSec=4h
+UMask=0077

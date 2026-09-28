@@ -32,6 +32,25 @@ Project workflows and their prompt files hot-reload as before. Adding, removing 
 project, or changing the service file, needs a service restart. A project whose workflow cannot
 load is reported on the dashboard (its filter pill is marked) and the other projects still run.
 
+## Install and deploy
+
+`ops/install.sh` installs the scripts to `~/.local/lib/crescendo/bin` and the systemd user units.
+It never enables a unit or overwrites local configuration.
+
+- `bin/start` runs the service from the release `CRESCENDO_RELEASE` (in `service.env`) points at.
+  `CRESCENDO_LOCK` names a lock that anything else must not share; `CRESCENDO_CODEX_VERSION`
+  optionally pins codex.
+- `bin/crescendo` runs a command (below) with the deployed release, from any directory.
+- `bin/deploy`, run by `crescendo-deploy.timer` every 10 minutes, deploys the newest `main`:
+  1. It builds `releases/<sha>` and passes the full `make all` gate under the machine lease.
+  2. It drains, so no new runs start and running ones finish (it waits up to two hours, then
+     postpones).
+  3. It points `service.env` at the release and restarts the service.
+  4. It waits for the state API to answer with every project started, and otherwise rolls back.
+
+  A release that fails its gate or health check is not tried again. Each outcome is appended to
+  `<state>/deploys.jsonl`, and the five newest releases are kept.
+
 ## Commands
 
 These change local files, or a project's own repository through your `gh` login, never the

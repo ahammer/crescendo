@@ -1,0 +1,22 @@
+#!/bin/sh
+# Starts the Crescendo service: every project in the service file, from the
+# release CRESCENDO_RELEASE points at (see service.env).
+set -eu
+test "$(id -u)" -ne 0
+config=${CRESCENDO_CONFIG_DIR:-$HOME/.config/crescendo}
+state=${CRESCENDO_STATE_DIR:-$HOME/.local/state/crescendo}
+# An optional pin, so a codex upgrade never slips in unannounced.
+if [ -n "${CRESCENDO_CODEX_VERSION:-}" ]; then
+  test "$(codex --version)" = "codex-cli $CRESCENDO_CODEX_VERSION"
+fi
+# Crescendo keeps the tracker token from agents; gh keeps the operator's credential.
+GITHUB_TOKEN=$(gh auth token)
+export GITHUB_TOKEN
+cd "$CRESCENDO_RELEASE/source/elixir"
+# Releases before the rename built bin/symphony; rolling back to one still starts.
+bin=./bin/crescendo
+[ -x "$bin" ] || bin=./bin/symphony
+# One orchestrator per machine: anything sharing the lock refuses to start alongside.
+exec flock --nonblock --no-fork "${CRESCENDO_LOCK:-$XDG_RUNTIME_DIR/crescendo.lock}" \
+  mise exec -- "$bin" "$config/crescendo.yml" --logs-root "$state" \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails
