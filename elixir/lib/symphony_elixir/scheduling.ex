@@ -7,9 +7,11 @@ defmodule SymphonyElixir.Scheduling do
   shared by stride scheduling: every grant advances the project's `pass` by
   `1 / weight`, and while projects with waiting work (`demand`) compete, the
   slot goes to the lowest pass, so weights 3, 1, 1 give the first project
-  about three fifths of the grants. A project returning from idle (no
-  demand, no slots) rejoins at the lowest pass among the active projects
-  instead of spending credit it banked while idle.
+  about three fifths of the grants. Passes start at one stride (`1 /
+  weight`), so the heaviest project goes first, and equal passes favor the
+  heavier project. A project returning from idle (no demand, no slots)
+  rejoins at the lowest pass among the active projects instead of spending
+  credit it banked while idle.
 
   Research exclusivity:
 
@@ -46,7 +48,10 @@ defmodule SymphonyElixir.Scheduling do
   def new(slots, projects) do
     %{
       slots: slots,
-      projects: Map.new(projects, fn {id, weight, cap, exclusive} -> {id, %{weight: weight, cap: cap, exclusive: exclusive, pass: 0.0, demand: 0, held: %{}}} end),
+      projects:
+        Map.new(projects, fn {id, weight, cap, exclusive} ->
+          {id, %{weight: weight, cap: cap, exclusive: exclusive, pass: 1 / weight, demand: 0, held: %{}}}
+        end),
       reservation: nil
     }
   end
@@ -160,19 +165,21 @@ defmodule SymphonyElixir.Scheduling do
   defp expire_reservation(%{reservation: %{until_ms: until_ms}} = schedule, now_ms) when now_ms >= until_ms, do: %{schedule | reservation: nil}
   defp expire_reservation(schedule, _now_ms), do: schedule
 
-  # Another project with waiting work, room under its cap and a lower pass
-  # gets the next slot.
+  # Another project with waiting work, room under its cap and a better turn
+  # (a lower pass, or an equal pass and a higher weight) gets the next slot.
   defp favored_rival(schedule, id) do
-    own = Map.fetch!(schedule.projects, id).pass
+    own = turn(Map.fetch!(schedule.projects, id))
 
     schedule.projects
-    |> Enum.filter(fn {other, project} -> other != id and competing?(project) and project.pass < own end)
-    |> Enum.min_by(fn {_other, project} -> project.pass end, fn -> nil end)
+    |> Enum.filter(fn {other, project} -> other != id and competing?(project) and turn(project) < own end)
+    |> Enum.min_by(fn {_other, project} -> turn(project) end, fn -> nil end)
     |> case do
       nil -> nil
       {other, _project} -> other
     end
   end
+
+  defp turn(project), do: {project.pass, -project.weight}
 
   defp competing?(project), do: project.demand > 0 and (is_nil(project.cap) or map_size(project.held) < project.cap)
   defp active?(project), do: project.demand > 0 or project.held != %{}
@@ -204,7 +211,7 @@ defmodule SymphonyElixir.Scheduling do
   defp waiting(schedule) do
     schedule.projects
     |> Enum.filter(fn {_id, project} -> competing?(project) end)
-    |> Enum.min_by(fn {_id, project} -> project.pass end, fn -> nil end)
+    |> Enum.min_by(fn {_id, project} -> turn(project) end, fn -> nil end)
     |> case do
       nil -> []
       {id, _project} -> [id]

@@ -12,6 +12,10 @@ defmodule SymphonyElixir.Governor do
   of one that stops.
 
   `<state>/drain` holds all new dispatch while it exists, for deploys.
+
+  After a start no slot is granted until every project has checked in (or
+  two minutes pass), so the first slots go by weight to the projects with
+  waiting work rather than to whichever orchestrator started fastest.
   """
 
   use GenServer
@@ -64,32 +68,37 @@ defmodule SymphonyElixir.Governor do
        schedule: Scheduling.new(service.slots, projects),
        spend: %{},
        quota: load_quota(service),
-       monitors: %{}
+       monitors: %{},
+       started_ms: System.monotonic_time(:millisecond),
+       warm_up_ms: Application.get_env(:symphony_elixir, :governor_warm_up_ms, 120_000),
+       checked_in: MapSet.new()
      }}
   end
 
   @impl true
   def handle_call({:checkin, project, spend_micro, demand}, {pid, _tag}, state) do
     now = DateTime.utc_now()
+    warming_up = warming_up?(state)
     state = state |> monitor(project, pid) |> Map.update!(:spend, &Map.put(&1, project, {Date.utc_today(), spend_micro}))
-    state = %{state | schedule: Scheduling.report_demand(state.schedule, project, demand)}
+    state = %{state | schedule: Scheduling.report_demand(state.schedule, project, demand), checked_in: MapSet.put(state.checked_in, project)}
+
+    # The last check-in ends the warm-up: every project polls now and the weights decide.
+    if warming_up and not warming_up?(state), do: wake(Map.keys(state.schedule.projects) -- [project])
     {:reply, policy(state, project, now), state}
   end
 
   def handle_call({:acquire, project, item, class}, {pid, _tag}, state) do
     state = monitor(state, project, pid)
 
-    if draining?(state) do
-      {:reply, {:wait, "draining for a deploy"}, state}
-    else
-      case Scheduling.acquire(state.schedule, project, item, class, System.monotonic_time(:millisecond)) do
-        {:ok, schedule} ->
-          {:reply, :ok, %{state | schedule: schedule}}
+    cond do
+      draining?(state) ->
+        {:reply, {:wait, "draining for a deploy"}, state}
 
-        {:wait, reason, schedule, wake} ->
-          wake(wake)
-          {:reply, {:wait, reason}, %{state | schedule: schedule}}
-      end
+      warming_up?(state) ->
+        {:reply, {:wait, "starting up: waiting for every project to check in"}, state}
+
+      true ->
+        grant(state, project, item, class)
     end
   end
 
@@ -146,6 +155,17 @@ defmodule SymphonyElixir.Governor do
 
   def handle_info(_message, state), do: {:noreply, state}
 
+  defp grant(state, project, item, class) do
+    case Scheduling.acquire(state.schedule, project, item, class, System.monotonic_time(:millisecond)) do
+      {:ok, schedule} ->
+        {:reply, :ok, %{state | schedule: schedule}}
+
+      {:wait, reason, schedule, wake} ->
+        wake(wake)
+        {:reply, {:wait, reason}, %{state | schedule: schedule}}
+    end
+  end
+
   defp policy(state, project, now) do
     draining = draining?(state)
     free = Scheduling.free_for(state.schedule, project, System.monotonic_time(:millisecond))
@@ -153,7 +173,7 @@ defmodule SymphonyElixir.Governor do
     state
     |> throttle(now)
     |> Map.merge(%{
-      slots: if(draining, do: 0, else: free),
+      slots: if(draining or warming_up?(state), do: 0, else: free),
       research_exclusive: state.schedule.projects[project].exclusive,
       draining: draining
     })
@@ -183,6 +203,11 @@ defmodule SymphonyElixir.Governor do
   end
 
   defp draining?(state), do: File.exists?(Path.join(Service.state_root(state.service), "drain"))
+
+  defp warming_up?(state) do
+    MapSet.size(state.checked_in) < map_size(state.schedule.projects) and
+      System.monotonic_time(:millisecond) - state.started_ms < state.warm_up_ms
+  end
 
   defp newer?(%{observed_at: %DateTime{} = new}, %{observed_at: %DateTime{} = old}), do: DateTime.compare(new, old) == :gt
   defp newer?(%{observed_at: %DateTime{}}, _old), do: true

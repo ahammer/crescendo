@@ -176,6 +176,32 @@ defmodule SymphonyElixir.ServiceTest do
     assert_eventually(fn -> SymphonyElixir.Governor.snapshot().busy == 0 end)
   end
 
+  test "a project that would start research reports it as waiting work", %{root: root} do
+    dir = Path.join([root, "projects", "theta"])
+    File.mkdir_p!(Path.join(dir, "prompts"))
+    File.write!(Path.join(dir, "prompts/pr.md"), "Review")
+    File.write!(Path.join(dir, "prompts/research.md"), "Research {{ issue.research.channel }}")
+
+    write_workflow_file!(Path.join(dir, "WORKFLOW.md"),
+      tracker_kind: "memory",
+      autopilot: %{enabled: true, prompts: %{pull_request: "prompts/pr.md", research: "prompts/research.md"}}
+    )
+
+    write_project!(root, "iota", [])
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    File.write!(Path.join(root, "crescendo.yml"), "paths: {state: state}\npool: {slots: 1}\nprojects: {theta: {}, iota: {}}")
+    {:ok, service} = Service.load(Path.join(root, "crescendo.yml"))
+    start_supervised!({SymphonyElixir.Governor, service})
+
+    # The only slot is taken, so theta's research has to wait for it.
+    assert :ok = SymphonyElixir.Governor.acquire("iota", "GH-1", :issue)
+    start_supervised!({Projects, service})
+
+    assert_eventually(fn ->
+      Enum.any?(SymphonyElixir.Governor.snapshot().projects, &(&1.id == "theta" and &1.waiting == 1))
+    end)
+  end
+
   test "a restarted service learns each project's last known quota", %{root: root} do
     write_project!(root, "zeta", [])
     File.write!(Path.join(root, "crescendo.yml"), "paths: {state: state}\nprojects: {zeta: {}}")

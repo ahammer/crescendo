@@ -48,6 +48,24 @@ defmodule SymphonyElixir.SchedulingTest do
     assert {_s, ["a"]} = Scheduling.release(s, "b", "b1")
   end
 
+  test "the heavier project goes first, and wins ties" do
+    s = schedule(3, [{"metalrain", 4}, {"babelfit", 1}, {"dartboard", 1}])
+    s = Enum.reduce(["metalrain", "babelfit", "dartboard"], s, &Scheduling.report_demand(&2, &1, 5))
+
+    # Research and review elsewhere wait while the heavy project has work and a better turn.
+    assert {:wait, "the next slot is metalrain's turn", s, ["metalrain"]} = Scheduling.acquire(s, "babelfit", "research:qa", :research, 0)
+    {:ok, s} = Scheduling.acquire(s, "metalrain", "GH-1", :issue, 0)
+    {:ok, s} = Scheduling.acquire(s, "metalrain", "GH-2", :issue, 0)
+    {:ok, s} = Scheduling.acquire(s, "metalrain", "GH-3", :issue, 0)
+    # At an equal pass (1.0) the heavier project still goes first.
+    assert s.projects["metalrain"].pass == s.projects["babelfit"].pass
+    {s, ["metalrain"]} = Scheduling.release(s, "metalrain", "GH-1")
+    assert {:wait, "the next slot is metalrain's turn", _s, ["metalrain"]} = Scheduling.acquire(s, "dartboard", "PR-9", :pull_request, 0)
+
+    {_s, counts} = run_rounds(schedule(1, [{"metalrain", 4}, {"babelfit", 1}, {"dartboard", 1}]), ["babelfit", "dartboard", "metalrain"], 600)
+    assert_in_delta counts["metalrain"], 400, 5
+  end
+
   test "caps limit a project on top of the shared slots" do
     s = Scheduling.new(3, [{"a", 1, 1, "project"}, {"b", 1, nil, "project"}]) |> Scheduling.report_demand("a", 3)
     assert {:ok, s} = Scheduling.acquire(s, "a", "a1", :issue, 0)
@@ -61,10 +79,10 @@ defmodule SymphonyElixir.SchedulingTest do
   test "a project back from idle does not spend credit it banked while idle" do
     s = schedule(1, [{"busy", 1}, {"idle", 1}])
     {s, _counts} = run_rounds(s, ["busy"], 20)
-    assert s.projects["busy"].pass == 20.0
+    assert s.projects["busy"].pass == 21.0
 
     s = s |> Scheduling.report_demand("busy", 1) |> Scheduling.report_demand("idle", 1)
-    assert s.projects["idle"].pass == 20.0
+    assert s.projects["idle"].pass == 21.0
     {_s, counts} = run_rounds(s, ["idle", "busy"], 10)
     assert counts == %{"busy" => 5, "idle" => 5}
   end

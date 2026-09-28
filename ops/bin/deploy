@@ -64,6 +64,8 @@ if [ ! -e "$release/.built" ]; then
 fi
 
 # 3. Drain: no new runs start; wait for the running ones to finish.
+#    CRESCENDO_DRAIN=0 deploys at once instead: running work is interrupted and
+#    resumes from its workspace (an interruption is never a failed attempt).
 running() {
   curl -fsS --max-time 10 "$state_url" | python3 -c 'import json, sys; print(len(json.load(sys.stdin).get("running", [])))'
 }
@@ -73,7 +75,7 @@ date -u +%FT%TZ > "$state/drain"
 trap 'rm -f "$state/drain"' EXIT
 trap 'exit 130' INT TERM
 waited=0
-while [ "$(running || echo busy)" != 0 ]; do
+while [ "${CRESCENDO_DRAIN:-1}" != 0 ] && [ "$(running || echo busy)" != 0 ]; do
   if [ "$waited" -ge "$drain_limit" ]; then
     record postponed "$target" "runs still active after ${drain_limit}s"
     log "postponed: runs still active"

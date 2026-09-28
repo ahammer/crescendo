@@ -2273,10 +2273,21 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp governed?, do: Project.current() != nil and Governor.running?()
 
+  # Waiting work: ready items, or a research run the project would start now.
   defp demand(%State{} = state) do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
-    Enum.count(state.polled_issues, &ready_for_dispatch?(&1, state, active_states, terminal_states))
+    ready = Enum.count(state.polled_issues, &ready_for_dispatch?(&1, state, active_states, terminal_states))
+    if ready == 0 and research_wanted?(state), do: 1, else: ready
+  end
+
+  defp research_wanted?(%State{} = state) do
+    config = Config.settings!()
+    open_issues = open_issue_count(state.polled_issues, config)
+    next = Autopilot.next_research(state.autopilot, config.autopilot, open_issues, DateTime.utc_now())
+
+    config.autopilot.enabled and state.running == %{} and Throttle.admit(state.throttle, :research) == :ok and
+      match?({_autopilot, %Issue{}}, next)
   end
 
   # The route and a service slot are settled before a run starts; either can make it wait.

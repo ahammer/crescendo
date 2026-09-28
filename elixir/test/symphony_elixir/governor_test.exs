@@ -51,6 +51,22 @@ defmodule SymphonyElixir.GovernorTest do
     assert %{busy: 1} = Governor.snapshot()
   end
 
+  test "after a start no slot is granted until every project checks in", %{service: service} do
+    Application.put_env(:symphony_elixir, :governor_warm_up_ms, 60_000)
+    on_exit(fn -> Application.put_env(:symphony_elixir, :governor_warm_up_ms, 0) end)
+    start_supervised!({Governor, service})
+    {:ok, _owner} = Registry.register(SymphonyElixir.ProjectRegistry, {:orchestrator, "a"}, nil)
+
+    assert %{slots: 0} = Governor.checkin("a", 0, 3)
+    assert {:wait, "starting up: waiting for every project to check in"} = Governor.acquire("a", "GH-1", :issue)
+    refute_received :governor_wake
+
+    # The last check-in ends the warm-up and wakes the others to poll now.
+    assert %{slots: 2} = Governor.checkin("b", 0, 0)
+    assert_receive :governor_wake
+    assert :ok = Governor.acquire("a", "GH-1", :issue)
+  end
+
   test "the drain flag holds all new dispatch", %{service: service, state_root: state_root} do
     start_supervised!({Governor, service})
     File.mkdir_p!(state_root)
