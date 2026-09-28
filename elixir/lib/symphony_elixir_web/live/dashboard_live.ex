@@ -1,6 +1,6 @@
 defmodule SymphonyElixirWeb.DashboardLive do
   @moduledoc """
-  Live observability dashboard for Symphony. Stats and charts sit at the top;
+  Live observability dashboard for Crescendo. Stats and charts sit at the top;
   the work queue, pull requests and activity fill the space above a strip of
   fixed worker slots at the bottom, where each running agent's card opens the
   full-screen agent inspector. Phones show one section at a time and stack the
@@ -48,7 +48,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <div class="brand">
           <span class="brand-mark" aria-hidden="true"></span>
           <div class="brand-text">
-            <h1 class="brand-title">Symphony</h1>
+            <h1 class="brand-title">Crescendo</h1>
             <p class="brand-sub"><%= brand_line(@payload) %></p>
           </div>
           <.live_badge />

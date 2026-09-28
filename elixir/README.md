@@ -1,11 +1,12 @@
-# Symphony Elixir
+# Crescendo (Elixir)
 
-This directory contains the current Elixir/OTP implementation of Symphony, based on
-[`SPEC.md`](../SPEC.md) at the repository root.
+This directory contains Crescendo, an Elixir/OTP implementation of Symphony based on
+[`SPEC.md`](../SPEC.md) at the repository root. To run several projects from one service, see
+[`docs/crescendo.md`](../docs/crescendo.md); everything below also applies to each project's
+`WORKFLOW.md` there.
 
 > [!WARNING]
-> Symphony Elixir is prototype software intended for evaluation only and is presented as-is.
-> We recommend implementing your own hardened version based on `SPEC.md`.
+> Crescendo is prototype software intended for evaluation only and is presented as-is.
 
 ## Screenshot
 
@@ -71,7 +72,7 @@ mise trust
 mise install
 mise exec -- mix setup
 mise exec -- mix build
-mise exec -- ./bin/symphony ./WORKFLOW.md
+mise exec -- ./bin/crescendo ./WORKFLOW.md
 ```
 
 ## Burrito releases
@@ -105,10 +106,10 @@ chmod +x ./symphony-v0.0.1-macos_arm64
 
 ## Configuration
 
-Pass a custom workflow file path to `./bin/symphony` when starting the service:
+Pass a custom workflow file path to `./bin/crescendo` when starting the service:
 
 ```bash
-./bin/symphony /path/to/custom/WORKFLOW.md
+./bin/crescendo /path/to/custom/WORKFLOW.md
 ```
 
 If no path is passed, Symphony defaults to `./WORKFLOW.md`.
@@ -349,7 +350,7 @@ requests. Pull requests that reach `max_pr_runs` without merging are closed too.
 to stop and hold it. Handled pull request heads and the research cooldown survive restarts.
 
 ```bash
-GITHUB_REPO=owner/name GITHUB_TOKEN=... mise exec -- ./bin/symphony \
+GITHUB_REPO=owner/name GITHUB_TOKEN=... mise exec -- ./bin/crescendo \
   --i-understand-that-this-will-be-running-without-the-usual-guardrails ./WORKFLOW.autopilot.md
 ```
 

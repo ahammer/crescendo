@@ -152,7 +152,7 @@ defmodule SymphonyElixir.Jira.AgentTool do
   defp tool_error_payload(:missing_jira_api_token) do
     %{
       "error" => %{
-        "message" => "Symphony is missing Jira auth. Set tracker.provider.api_token or export JIRA_API_TOKEN."
+        "message" => "Crescendo is missing Jira auth. Set tracker.provider.api_token or export JIRA_API_TOKEN."
       }
     }
   end

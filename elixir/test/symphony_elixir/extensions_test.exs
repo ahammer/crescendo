@@ -565,7 +565,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
     {:ok, view, html} = live(build_conn(), "/")
-    assert html =~ "Symphony"
+    assert html =~ "Crescendo"
     assert html =~ "MT-HTTP"
     assert html =~ ~s(href="/agents/MT-HTTP")
     assert html =~ "MT-RETRY"

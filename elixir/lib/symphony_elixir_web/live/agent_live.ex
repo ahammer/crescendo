@@ -76,7 +76,7 @@ defmodule SymphonyElixirWeb.AgentLive do
         <% true -> %>
           <section class="insp-message">
             <h2><%= @id %> is not running</h2>
-            <p class="muted">Symphony keeps a run's transcript only while the run is active. Its work lives on in the tracker and its pull request.</p>
+            <p class="muted">Crescendo keeps a run's transcript only while the run is active. Its work lives on in the tracker and its pull request.</p>
             <.link navigate="/" class="insp-home">See all agents</.link>
           </section>
       <% end %>

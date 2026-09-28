@@ -254,13 +254,8 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   # Every command in the run inherits these: the delivery helper checks the
   # route label, and machine-wide tooling attributes work to the work item.
-  defp session_vars(%{route: route, work_item: work_item}) do
-    [
-      route && {"SYMPHONY_SELECTED_MODEL_LABEL", route["label"]},
-      is_binary(work_item) && {"SYMPHONY_WORK_ITEM", work_item}
-    ]
-    |> Enum.filter(& &1)
-  end
+  defp session_vars(%{route: route, work_item: work_item}),
+    do: SymphonyElixir.RunEnv.vars(if(is_binary(work_item), do: work_item), route && route["label"])
 
   defp tracker_secret_port_env(dynamic_tool_binding) do
     dynamic_tool_binding.secret_environment_names
@@ -306,8 +301,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           "experimentalApi" => true
         },
         "clientInfo" => %{
-          "name" => "symphony-orchestrator",
-          "title" => "Symphony Orchestrator",
+          "name" => "crescendo-orchestrator",
+          "title" => "Crescendo Orchestrator",
           "version" => "0.1.0"
         }
       }

@@ -976,7 +976,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp retire_item(state, %Issue{} = issue, reason) do
     comment =
-      "Symphony retired this #{if issue.kind == :pull_request, do: "pull request", else: "issue"} " <>
+      "Crescendo retired this #{if issue.kind == :pull_request, do: "pull request", else: "issue"} " <>
         "after exhausting its attempts, so it will not be retried. Last blocker: #{reason}"
 
     case Tracker.retire(issue, comment) do

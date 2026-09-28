@@ -152,7 +152,7 @@ defmodule SymphonyElixir.Asana.AgentTool do
   defp tool_error_payload(:missing_asana_api_key) do
     %{
       "error" => %{
-        "message" => "Symphony is missing Asana auth. Set tracker.provider.api_key or export ASANA_PAT."
+        "message" => "Crescendo is missing Asana auth. Set tracker.provider.api_key or export ASANA_PAT."
       }
     }
   end

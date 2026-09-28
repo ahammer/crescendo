@@ -1,51 +1,50 @@
-# Symphony
+# Crescendo
 
-Symphony turns project work into isolated, autonomous implementation runs, allowing teams to manage
-work instead of supervising coding agents.
+Crescendo runs autonomous coding agents across several repositories from one local service. Each
+project's issues and pull requests become isolated agent runs. The projects share the worker
+slots, a daily budget and the Codex quota, and a read-only dashboard shows everything in one place.
 
-[![Symphony demo video preview](.github/media/symphony-demo-poster.jpg)](https://player.vimeo.com/video/1186371009?h=5626e4b899)
+Crescendo is based on [Symphony](https://github.com/openai/symphony) by OpenAI (Apache-2.0) and
+implements its [specification](SPEC.md). On top of the Symphony reference implementation it adds:
 
-_In this [demo video](https://player.vimeo.com/video/1186371009?h=5626e4b899), Symphony monitors a Linear board for work and spawns agents to handle the tasks. The agents complete the tasks and provide proof of work: CI status, PR review feedback, complexity analysis, and walkthrough videos. When accepted, the agents land the PR safely. Engineers do not need to supervise Codex; they can manage the work at a higher level._
+- **One service for many projects.** A local `crescendo.yml` names the projects; slots are shared by
+  weight (weights 3,1,1 give the first project about three times the work), with optional caps.
+- **Throttling.** An enforced daily budget that keeps closing open work (pull request reviews,
+  final attempts and continuations still run), and model back-off when the Codex quota runs low.
+- **Model routing.** A ladder that climbs on failed attempts, size labels that start small work on a
+  cheaper model, and effort floors.
+- **Autopilot.** Pull requests are reviewed and merged, stuck work is retried and then delivered in
+  part or closed (nothing waits on an operator), and an empty queue is refilled by research runs per
+  configurable channel.
+- **A read-only dashboard** across projects, with a filter per project.
+
+All configuration is local: [docs/crescendo.md](docs/crescendo.md) covers the service file, and
+[elixir/README.md](elixir/README.md) covers setup and the per-project `WORKFLOW.md`.
 
 > [!WARNING]
-> Symphony is a low-key engineering preview for testing in trusted environments.
+> Crescendo is an engineering preview for trusted environments. Its agents run without the usual
+> guardrails.
 
-## Running Symphony
+## Quick start
 
-### Requirements
+```bash
+cd elixir
+mise trust && mise install
+mise exec -- mix setup && mise exec -- mix build
+mise exec -- ./bin/crescendo ~/.config/crescendo/crescendo.yml \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails
+```
 
-Symphony works best in codebases that have adopted
-[harness engineering](https://openai.com/index/harness-engineering/). Symphony is the next step --
-moving from managing coding agents to managing work that needs to get done.
+A single `WORKFLOW.md` still runs one project on its own, as Symphony does:
+`./bin/crescendo path/to/WORKFLOW.md`.
 
-### Option 1. Make your own
+## About Symphony
 
-Tell your favorite coding agent to build Symphony in a programming language of your choice:
-
-> Implement Symphony according to the following spec:
-> https://github.com/openai/symphony/blob/main/SPEC.md
-
-### Option 2. Use our experimental reference implementation
-
-Check out [elixir/README.md](elixir/README.md) for instructions on how to set up your environment
-and run the Elixir-based Symphony implementation. You can also ask your favorite coding agent to
-help with the setup:
-
-The Elixir implementation can route Codex model and reasoning effort from explicit issue labels;
-see its `codex.routing` workflow setting.
-Its GitHub Issues adapter also respects native issue dependencies before dispatch.
-The Elixir operations dashboard shows upcoming issues and open GitHub PRs, a recent activity
-timeline, and per-model token usage with clearly labeled API-equivalent cost estimates.
-It warns when recorded worker usage reaches an estimated $50 in one UTC day.
-Its optional autopilot mode keeps improving one GitHub repository on its own: it reviews and merges
-trusted pull requests first, implements labeled issues next, and when the queue is empty sends
-research agents to file new cleanup, optimization, and testing issues.
-
-> Set up Symphony for my repository based on
-> https://github.com/openai/symphony/blob/main/elixir/README.md
-
----
+Symphony turns project work into isolated, autonomous implementation runs, so teams manage work
+instead of supervising coding agents. [`SPEC.md`](SPEC.md) is the upstream Symphony specification,
+kept as published; Crescendo's extensions are documented in [docs/crescendo.md](docs/crescendo.md).
 
 ## License
 
-This project is licensed under the [Apache License 2.0](LICENSE).
+This project is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for
+attribution.

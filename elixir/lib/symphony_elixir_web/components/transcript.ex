@@ -143,7 +143,7 @@ defmodule SymphonyElixirWeb.TranscriptComponents do
     ~H"""
     <div class="msg msg-user">
       <div class="bubble bubble-user">
-        <header class="bubble-head"><span class="who">Symphony</span><span class="who-note">task prompt</span><.stamp at={@entry.at} now={@now} /></header>
+        <header class="bubble-head"><span class="who">Crescendo</span><span class="who-note">task prompt</span><.stamp at={@entry.at} now={@now} /></header>
         <details class="fold" phx-mounted={keep_open()}>
           <summary><%= first_line(@entry.text) %></summary>
           <pre class="prompt-text"><%= @entry.text %></pre>

@@ -152,7 +152,7 @@ defmodule SymphonyElixir.GitLab.AgentTool do
   defp tool_error_payload(:missing_gitlab_api_key) do
     %{
       "error" => %{
-        "message" => "Symphony is missing GitLab auth. Set tracker.provider.api_key or export GITLAB_PAT."
+        "message" => "Crescendo is missing GitLab auth. Set tracker.provider.api_key or export GITLAB_PAT."
       }
     }
   end

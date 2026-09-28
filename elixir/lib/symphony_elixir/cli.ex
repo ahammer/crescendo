@@ -87,7 +87,7 @@ defmodule SymphonyElixir.CLI do
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md | path-to-crescendo.yml]"
+    "Usage: crescendo [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md | path-to-crescendo.yml]"
   end
 
   @spec runtime_deps() :: deps()
@@ -128,9 +128,9 @@ defmodule SymphonyElixir.CLI do
   @spec acknowledgement_banner() :: String.t()
   defp acknowledgement_banner do
     lines = [
-      "This Symphony implementation is a low key engineering preview.",
+      "Crescendo, based on OpenAI's Symphony, is a low key engineering preview.",
       "Codex will run without any guardrails.",
-      "SymphonyElixir is not a supported product and is presented as-is.",
+      "Crescendo is not a supported product and is presented as-is.",
       "To proceed, start with `--i-understand-that-this-will-be-running-without-the-usual-guardrails` CLI argument"
     ]
 
@@ -188,7 +188,7 @@ defmodule SymphonyElixir.CLI do
   defp wait_for_shutdown do
     case Process.whereis(SymphonyElixir.Supervisor) do
       nil ->
-        IO.puts(:stderr, "Symphony supervisor is not running")
+        IO.puts(:stderr, "Crescendo supervisor is not running")
         System.halt(1)
 
       pid ->

@@ -505,7 +505,7 @@ defmodule SymphonyElixir.Operations do
       )
 
     Enum.each(active, fn {id, run} ->
-      finish_run(table, id, "interrupted", Map.put(run, :summary, "Worker interrupted by Symphony restart"))
+      finish_run(table, id, "interrupted", Map.put(run, :summary, "Worker interrupted by a Crescendo restart"))
     end)
   end
 

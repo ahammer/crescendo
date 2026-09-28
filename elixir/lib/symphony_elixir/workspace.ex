@@ -398,10 +398,12 @@ defmodule SymphonyElixir.Workspace do
     timeout_ms = Config.settings!().hooks.timeout_ms
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local")
+    # Hooks know their project, work item and hook, like the agent's own commands.
+    env = [{"CRESCENDO_HOOK", hook_name} | SymphonyElixir.RunEnv.vars(Map.get(issue_context, :issue_identifier))]
 
     task =
       Task.async(fn ->
-        System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true)
+        System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true, env: env)
       end)
 
     case Task.yield(task, timeout_ms) do
