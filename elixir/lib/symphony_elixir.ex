@@ -37,7 +37,8 @@ defmodule SymphonyElixir.Application do
 
     shared = [
       {Phoenix.PubSub, name: SymphonyElixir.PubSub},
-      {Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry}
+      {Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry},
+      SymphonyElixir.GitHub.ETagCache
     ]
 
     with {:ok, children} <- runtime_children(Application.get_env(:symphony_elixir, :service_config_path)) do

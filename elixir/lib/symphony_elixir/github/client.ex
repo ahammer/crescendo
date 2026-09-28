@@ -5,6 +5,7 @@ defmodule SymphonyElixir.GitHub.Client do
 
   require Logger
   alias SymphonyElixir.Config
+  alias SymphonyElixir.GitHub.ETagCache
   alias SymphonyElixir.Tracker.Issue
 
   @default_api_url "https://api.github.com"
@@ -624,12 +625,18 @@ defmodule SymphonyElixir.GitHub.Client do
     end
   end
 
+  # GETs are conditional (see ETagCache): unchanged resources answer 304,
+  # which GitHub does not count against the rate limit.
   defp perform_request(method, path, params, body, settings) do
     with {:ok, request_method} <- request_method(method) do
+      url = settings.api_url <> path
+      cache_key = if request_method == :get, do: ETagCache.key(url, params, settings.token)
+      conditional = if cache_key, do: ETagCache.headers(cache_key), else: []
+
       request_opts = [
         method: request_method,
-        url: settings.api_url <> path,
-        headers: github_headers(settings.token),
+        url: url,
+        headers: github_headers(settings.token) ++ conditional,
         params: params,
         connect_options: [timeout: 30_000]
       ]
@@ -637,6 +644,7 @@ defmodule SymphonyElixir.GitHub.Client do
       request_opts = if is_nil(body), do: request_opts, else: Keyword.put(request_opts, :json, body)
 
       case Req.request(request_opts) do
+        {:ok, response} when is_tuple(cache_key) -> {:ok, ETagCache.resolve(cache_key, Map.take(response, [:status, :headers, :body]))}
         {:ok, response} -> {:ok, %{status: response.status, body: response.body}}
         {:error, reason} -> {:error, {:github_api_request, reason}}
       end
