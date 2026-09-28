@@ -178,6 +178,22 @@ defmodule SymphonyElixir.CommandsTest do
     assert {:error, "cannot read " <> _} = Commands.run(["drain", "on", Path.join(root, "absent.yml")], &no_gh/1)
   end
 
+  test "drain off reports when the drain flag cannot be removed", %{root: root, service: service} do
+    File.write!(service, "paths: {state: state}\nprojects: {a: {}}")
+    drain = Path.join([root, "state", "drain"])
+    File.mkdir_p!(drain)
+
+    output =
+      capture_io(fn ->
+        assert {:error, "could not remove drain flag " <> details} = Commands.run(["drain", "off", service], &no_gh/1)
+        assert [^drain, reason] = String.split(details, ": ", parts: 2)
+        assert reason != ""
+      end)
+
+    refute output =~ "Drain off"
+    assert File.dir?(drain)
+  end
+
   test "anything else starts the service; half a command explains the usage" do
     assert Commands.run(["crescendo.yml", "--port", "1"], &no_gh/1) == :not_a_command
     assert Commands.run([], &no_gh/1) == :not_a_command

@@ -74,7 +74,8 @@ crescendo drain on|off ~/.config/crescendo/crescendo.yml
   the project's `labels.prefix` (run `labels sync` first). Old labels stay for history. Runs get
   the prefix as `CRESCENDO_LABEL_PREFIX`, so repository tooling can follow the switch. It exits with
   an error if GitHub cannot list items or add/remove a label.
-- `drain on` stops new runs; running work finishes. `drain off` releases it.
+- `drain on` stops new runs; running work finishes. `drain off` releases it and reports an error if
+  its flag cannot be removed.
 
 ## `crescendo.yml`
 
