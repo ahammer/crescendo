@@ -2622,3 +2622,37 @@ p {
   font-weight: 600;
   vertical-align: 1px;
 }
+
+/* Research rounds under a service: one compact row per project. */
+.research-rows {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.research-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  font-size: 12px;
+}
+
+.research-project {
+  min-width: 76px;
+  font-weight: 650;
+}
+
+.research-channel {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ink-2);
+}
+
+.research-channel.step-running {
+  color: var(--ink);
+  font-weight: 600;
+}

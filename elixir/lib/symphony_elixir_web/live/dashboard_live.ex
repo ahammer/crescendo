@@ -391,7 +391,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
       </details>
       <div :if={@payload.autopilot.enabled} class="sys-block">
         <h3>Autopilot</h3>
-        <ol class="stepper" aria-label="Research round">
+        <ul :if={research_rows(@payload) != []} class="research-rows" aria-label="Research rounds by project">
+          <li :for={{project, channels} <- research_rows(@payload)} class="research-row">
+            <span class="research-project"><%= project %></span>
+            <span :for={{channel, status} <- channels} class={"research-channel step-#{status}"} title={"#{channel}: #{channel_status_label(status) || "idle"}"}>
+              <span class="step-dot" aria-hidden="true"></span><%= channel %>
+            </span>
+          </li>
+        </ul>
+        <ol :if={research_rows(@payload) == []} class="stepper" aria-label="Research round">
           <li :for={channel <- Map.get(@payload.autopilot, :channels, [])} class={"step step-#{channel_status(@payload, channel)}"}>
             <span class="step-dot" aria-hidden="true"></span>
             <span class="step-name"><%= channel %></span>
@@ -648,6 +656,33 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
   end
 
+  # Under a service each project runs its own rounds (channels are named
+  # `project/channel`): one compact row per project, statuses from its own round.
+  defp research_rows(payload) do
+    pending = Map.get(payload.autopilot, :research_pending, [])
+    running = for %{issue_identifier: "research-" <> channel} = entry <- payload.running, do: "#{entry[:project]}/#{channel}"
+
+    payload.autopilot
+    |> Map.get(:channels, [])
+    |> Enum.filter(&String.contains?(&1, "/"))
+    |> Enum.map(&List.to_tuple(String.split(&1, "/", parts: 2)))
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.sort()
+    |> Enum.map(fn {project, channels} ->
+      in_round? = Enum.any?(pending, &String.starts_with?(&1, project <> "/"))
+      {project, Enum.map(channels, &{&1, research_status("#{project}/#{&1}", running, pending, in_round?)})}
+    end)
+  end
+
+  defp research_status(name, running, pending, in_round?) do
+    cond do
+      name in running -> "running"
+      name in pending -> "pending"
+      in_round? -> "done"
+      true -> "idle"
+    end
+  end
+
   defp channel_status_label("running"), do: "running"
   defp channel_status_label("pending"), do: "queued"
   defp channel_status_label("done"), do: "done"
@@ -655,7 +690,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp research_summary(autopilot, now) do
     cond do
-      Map.get(autopilot, :research_running, 0) > 0 -> "A planner has the machine to itself; other work waits for it."
+      Map.get(autopilot, :research_running, 0) > 0 -> "Research is planning new work."
       Map.get(autopilot, :research_pending, []) != [] -> "Round in progress; resumes when the queue is idle."
       next = Map.get(autopilot, :next_research_at) -> "Next research round #{until(next, now)}, once the queue is empty."
       true -> "Research starts when the queue is empty."
