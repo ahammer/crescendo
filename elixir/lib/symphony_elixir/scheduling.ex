@@ -184,21 +184,23 @@ defmodule SymphonyElixir.Scheduling do
   defp competing?(project), do: project.demand > 0 and (is_nil(project.cap) or map_size(project.held) < project.cap)
   defp active?(project), do: project.demand > 0 or project.held != %{}
 
-  # A project going from idle to active rejoins at the lowest pass among the
-  # active projects, so idling never banks credit.
+  # A project going from idle to active rejoins one of its own strides past
+  # the virtual time (the active projects' earliest pass, less the stride
+  # that led to it): idling never banks credit, and a heavier project keeps
+  # its head start when everyone starts together.
   defp activate(schedule, id) do
     project = Map.fetch!(schedule.projects, id)
 
     if active?(project) do
       schedule
     else
-      floor =
+      now =
         schedule.projects
         |> Enum.filter(fn {other, other_project} -> other != id and active?(other_project) end)
-        |> Enum.map(fn {_other, other_project} -> other_project.pass end)
-        |> Enum.min(fn -> project.pass end)
+        |> Enum.map(fn {_other, other_project} -> other_project.pass - 1 / other_project.weight end)
+        |> Enum.min(fn -> nil end)
 
-      put_in(schedule.projects[id].pass, max(project.pass, floor))
+      if now, do: put_in(schedule.projects[id].pass, max(project.pass, now + 1 / project.weight)), else: schedule
     end
   end
 
