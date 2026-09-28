@@ -147,6 +147,22 @@ defmodule SymphonyElixir.ServiceTest do
     assert Project.registry() == SymphonyElixir.ProjectRegistry
   end
 
+  test "a restarted service learns each project's last known quota", %{root: root} do
+    write_project!(root, "zeta", [])
+    File.write!(Path.join(root, "crescendo.yml"), "paths: {state: state}\nprojects: {zeta: {}}")
+    {:ok, service} = Service.load(Path.join(root, "crescendo.yml"))
+
+    quota = SymphonyElixir.Quota.normalize(%{"primary" => %{"usedPercent" => 30, "windowDurationMins" => 10_080}}, DateTime.utc_now())
+    path = Path.join([root, "state", "projects", "zeta", "operations.dets"])
+    {:ok, table} = SymphonyElixir.Operations.open(path, :symphony_operations_zeta)
+    :ok = SymphonyElixir.Operations.save_quota(table, quota)
+    :ok = SymphonyElixir.Operations.close(table)
+
+    start_supervised!({SymphonyElixir.Governor, service})
+    start_supervised!({Projects, service})
+    assert_eventually(fn -> SymphonyElixir.Governor.snapshot().quota == quota end)
+  end
+
   test "under a service, a read outside any project fails instead of falling back to a file" do
     {:ok, service} = Service.parse(%{"projects" => %{"solo" => %{}}}, "/tmp/crescendo.yml")
     previous = Service.current()

@@ -120,6 +120,8 @@ defmodule SymphonyElixir.Orchestrator do
         }
 
         run_terminal_workspace_cleanup()
+        # A restarted service learns the last known quota before the first run reports a new one.
+        if state.codex_quota && governed?(), do: Governor.report_quota(state.codex_quota)
         state = schedule_tick(state, 0)
 
         {:ok, state}

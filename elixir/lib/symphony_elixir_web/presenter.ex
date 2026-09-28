@@ -76,8 +76,8 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp service_settings(_service, [], _project), do: nil
 
-  defp service_runtime([id], id), do: Project.with_project(id, &runtime_context/0)
-  defp service_runtime([_id], _project), do: %{tracker: "1 project", max_turns: nil}
+  # One project (filtered, or the only one) reads as that project.
+  defp service_runtime([id], _project), do: Project.with_project(id, &runtime_context/0)
   defp service_runtime(ids, _project), do: %{tracker: "#{length(ids)} projects", max_turns: nil}
 
   defp project_list(service, snapshots) do

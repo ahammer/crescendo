@@ -60,6 +60,7 @@ defmodule SymphonyElixir.ServiceWebTest do
     alpha = json_response(get(build_conn(), "/api/v1/state?project=alpha"), 200)
     assert alpha["project"] == "alpha"
     assert alpha["runtime"]["tracker"] == "memory:project"
+    assert json_response(get(build_conn(), "/api/v1/state?project=gamma"), 200)["runtime"]["tracker"] == "2 projects"
     assert Enum.map(alpha["upcoming"]["waiting"], & &1["project"]) == ["alpha"]
 
     assert json_response(get(build_conn(), "/api/v1/alpha/MT-404"), 404)["error"]["code"] == "issue_not_found"
