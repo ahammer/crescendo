@@ -36,6 +36,7 @@ defmodule SymphonyElixir.Project do
   def current do
     case Process.get(@key) do
       nil -> inherit()
+      :none -> nil
       id -> id
     end
   end
@@ -49,7 +50,7 @@ defmodule SymphonyElixir.Project do
     try do
       fun.()
     after
-      put(previous)
+      if previous, do: Process.put(@key, previous), else: Process.delete(@key)
     end
   end
 
@@ -69,11 +70,12 @@ defmodule SymphonyElixir.Project do
   @spec registry() :: module()
   def registry, do: @registry
 
-  # The first caller with a project decides; the answer is cached for the
-  # task's lifetime.
+  # The first caller with a project decides; the answer (including "none")
+  # is cached for the task's lifetime.
   defp inherit do
     case Enum.find_value(Process.get(:"$callers") || [], &project_of/1) do
       nil ->
+        Process.put(@key, :none)
         nil
 
       id ->
@@ -83,9 +85,11 @@ defmodule SymphonyElixir.Project do
   end
 
   defp project_of(pid) when is_pid(pid) do
-    case Process.info(pid, :dictionary) do
-      {:dictionary, dictionary} -> with {@key, id} <- List.keyfind(dictionary, @key, 0), do: id
-      nil -> nil
+    with {:dictionary, dictionary} <- Process.info(pid, :dictionary),
+         {@key, id} when is_binary(id) <- List.keyfind(dictionary, @key, 0) do
+      id
+    else
+      _ -> nil
     end
   end
 

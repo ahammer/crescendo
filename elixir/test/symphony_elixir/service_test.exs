@@ -131,6 +131,16 @@ defmodule SymphonyElixir.ServiceTest do
       end)
 
     assert Task.await(task) == nil
+
+    # "No project" is remembered too, and survives running as a project for a while.
+    task =
+      Task.async(fn ->
+        first = Project.current()
+        during = Project.with_project("epsilon", &Project.current/0)
+        {first, during, Project.current()}
+      end)
+
+    assert Task.await(task) == {nil, "epsilon", nil}
     assert Project.with_project("delta", fn -> Task.async(fn -> Project.current() end) |> Task.await() end) == "delta"
     assert Project.with_project("delta", fn -> Project.name(:orchestrator, :legacy) end) == Project.via("delta", :orchestrator)
     assert Project.name(:orchestrator, :legacy) == :legacy

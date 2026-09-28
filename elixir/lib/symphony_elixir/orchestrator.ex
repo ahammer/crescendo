@@ -12,6 +12,7 @@ defmodule SymphonyElixir.Orchestrator do
     Artifacts,
     Autopilot,
     Config,
+    Governor,
     ModelRouting,
     Operations,
     Project,
@@ -294,6 +295,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:retry_issue, _issue_id}, state), do: {:noreply, state}
 
+  # The service Governor kept a slot for this project: poll now to use it.
+  def handle_info(:governor_wake, state) do
+    {:noreply, if(poll_due?(state), do: state, else: schedule_tick(state, 0))}
+  end
+
   def handle_info(msg, state) do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
     {:noreply, state}
@@ -312,6 +318,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
+        :ok = release_slot(issue_id)
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
 
@@ -425,10 +432,11 @@ defmodule SymphonyElixir.Orchestrator do
           state
           | polled_issues: sort_issues_for_dispatch(issues),
             issues_observed_at: DateTime.utc_now(),
-            issues_error: nil,
-            throttle: evaluate_throttle(state)
+            issues_error: nil
         }
         |> put_autopilot(Autopilot.prune_pull_requests(state.autopilot, issues))
+
+      state = %{state | throttle: evaluate_throttle(state)}
 
       {state, issues} = settle_autopilot_items(state, issues)
       state = if available_slots(state) > 0, do: choose_issues(issues, state), else: state
@@ -1117,24 +1125,24 @@ defmodule SymphonyElixir.Orchestrator do
   defp issue_created_at_sort_key(%Issue{}), do: 9_223_372_036_854_775_807
   defp issue_created_at_sort_key(_issue), do: 9_223_372_036_854_775_807
 
-  defp should_dispatch_issue?(
-         %Issue{} = issue,
-         %State{running: running, claimed: claimed, blocked: blocked} = state,
-         active_states,
-         terminal_states
-       ) do
-    candidate_issue?(issue, active_states, terminal_states) and
-      !MapSet.member?(claimed, issue.id) and
-      !Map.has_key?(running, issue.id) and
-      !Map.has_key?(blocked, issue.id) and
-      Autopilot.pull_request_ready?(issue, state.autopilot, Config.settings!().autopilot) and
+  defp should_dispatch_issue?(%Issue{} = issue, %State{} = state, active_states, terminal_states) do
+    ready_for_dispatch?(issue, state, active_states, terminal_states) and
       available_slots(state) > 0 and
-      state_slots_available?(issue, running) and
-      worker_slots_available?(state) and
-      dispatch_admission(state, issue) == :ok
+      state_slots_available?(issue, state.running) and
+      worker_slots_available?(state)
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
+
+  # Everything but capacity: the item could start as soon as a slot frees.
+  defp ready_for_dispatch?(%Issue{} = issue, %State{} = state, active_states, terminal_states) do
+    candidate_issue?(issue, active_states, terminal_states) and
+      !MapSet.member?(state.claimed, issue.id) and
+      !Map.has_key?(state.running, issue.id) and
+      !Map.has_key?(state.blocked, issue.id) and
+      Autopilot.pull_request_ready?(issue, state.autopilot, Config.settings!().autopilot) and
+      dispatch_admission(state, issue) == :ok
+  end
 
   defp state_slots_available?(%Issue{state: issue_state}, running) when is_map(running) do
     limit = Config.max_concurrent_agents_for_state(issue_state)
@@ -1214,13 +1222,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
     case refresh_issue_for_dispatch(issue) do
       {:ok, %Issue{} = refreshed_issue} ->
-        case select_route(state, refreshed_issue) do
+        case admit_run(state, refreshed_issue, dispatch_class(state, refreshed_issue)) do
+          {:ok, state, route} ->
+            do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host, route)
+
           {:wait, reason} ->
             Logger.debug("Holding dispatch for #{issue_context(refreshed_issue)}: #{reason}")
             state
-
-          route ->
-            do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host, route)
         end
 
       {:skip, _reason} ->
@@ -1286,6 +1294,7 @@ defmodule SymphonyElixir.Orchestrator do
     case select_worker_host(state, preferred_worker_host) do
       :no_worker_capacity ->
         Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
+        :ok = release_slot(issue.id)
         state
 
       worker_host ->
@@ -1365,6 +1374,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
+        :ok = release_slot(issue.id)
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
 
         schedule_issue_retry(state, issue.id, next_attempt, %{
@@ -1586,9 +1596,12 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_retry(state, issue, attempt, metadata) do
     case refresh_issue_for_dispatch(issue) do
       {:ok, %Issue{} = refreshed_issue} ->
-        case select_route(state, refreshed_issue) do
-          {:wait, reason} -> {:noreply, hold_retry(state, issue.id, attempt, metadata, reason)}
-          route -> {:noreply, do_dispatch_issue(state, refreshed_issue, attempt, metadata[:worker_host], route)}
+        case admit_run(state, refreshed_issue, retry_class(refreshed_issue)) do
+          {:ok, state, route} ->
+            {:noreply, do_dispatch_issue(state, refreshed_issue, attempt, metadata[:worker_host], route)}
+
+          {:wait, reason} ->
+            {:noreply, hold_retry(state, issue.id, attempt, metadata, reason)}
         end
 
       {:skip, reason} when reason in [:missing, :ci_pending] ->
@@ -1807,10 +1820,16 @@ defmodule SymphonyElixir.Orchestrator do
     Enum.count(issues, &(&1.kind == :issue and Issue.has_required_labels?(&1, config.tracker.required_labels)))
   end
 
-  # A research run has the machine to itself: nothing else dispatches, including
-  # retries, until it finishes.
+  # A research run has the project to itself (unless its exclusivity is
+  # `none`): nothing else dispatches, including retries, until it finishes.
+  # Under a service the Governor's share of the slots applies on top.
   defp available_slots(%State{} = state) do
-    if research_running?(state), do: 0, else: free_slots(state)
+    local = if research_running?(state) and state.throttle[:research_exclusive] != "none", do: 0, else: free_slots(state)
+
+    case state.throttle do
+      %{slots: slots} when is_integer(slots) -> min(local, slots)
+      _ -> local
+    end
   end
 
   defp research_running?(%State{running: running}), do: Enum.any?(running, fn {_id, entry} -> research_entry?(entry) end)
@@ -1964,9 +1983,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_call(:request_refresh, _from, state) do
-    now_ms = System.monotonic_time(:millisecond)
-    already_due? = is_integer(state.next_poll_due_at_ms) and state.next_poll_due_at_ms <= now_ms
-    coalesced = state.poll_check_in_progress == true or already_due?
+    coalesced = poll_due?(state)
     state = if coalesced, do: state, else: schedule_tick(state, 0)
 
     {:reply,
@@ -1976,6 +1993,12 @@ defmodule SymphonyElixir.Orchestrator do
        requested_at: DateTime.utc_now(),
        operations: ["poll", "reconcile"]
      }, state}
+  end
+
+  # A poll is running or already due, so another request adds nothing.
+  defp poll_due?(state) do
+    due_at = state.next_poll_due_at_ms
+    state.poll_check_in_progress == true or (is_integer(due_at) and due_at <= System.monotonic_time(:millisecond))
   end
 
   defp autopilot_snapshot(state) do
@@ -2233,9 +2256,50 @@ defmodule SymphonyElixir.Orchestrator do
     available_slots(state) > 0 and state_slots_available?(issue, state.running)
   end
 
+  # Under a service the Governor owns the budget, quota and slots of every
+  # project; the check-in reports this project's spend and waiting work.
   defp evaluate_throttle(%State{} = state) do
     spent = Operations.spend_today(state.operations)
-    Throttle.evaluate(Config.settings!().throttle, state.codex_quota, spent, DateTime.utc_now())
+
+    if governed?(),
+      do: Governor.checkin(Project.current(), spent, demand(state)),
+      else: Throttle.evaluate(Config.settings!().throttle, state.codex_quota, spent, DateTime.utc_now())
+  end
+
+  defp governed?, do: Project.current() != nil and Governor.running?()
+
+  defp demand(%State{} = state) do
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
+    Enum.count(state.polled_issues, &ready_for_dispatch?(&1, state, active_states, terminal_states))
+  end
+
+  # The route and a service slot are settled before a run starts; either can make it wait.
+  defp admit_run(%State{} = state, %Issue{} = issue, class) do
+    with {:ok, route} <- routed(select_route(state, issue)),
+         {:ok, state} <- acquire_slot(state, issue, class) do
+      {:ok, state, route}
+    end
+  end
+
+  defp routed({:wait, _reason} = wait), do: wait
+  defp routed(route), do: {:ok, route}
+
+  defp acquire_slot(%State{} = state, %Issue{} = issue, class) do
+    if governed?() do
+      with :ok <- Governor.acquire(Project.current(), issue.id, class), do: {:ok, consume_slot(state)}
+    else
+      {:ok, state}
+    end
+  end
+
+  defp consume_slot(%State{throttle: %{slots: slots} = throttle} = state) when is_integer(slots),
+    do: %{state | throttle: %{throttle | slots: max(slots - 1, 0)}}
+
+  defp consume_slot(state), do: state
+
+  defp release_slot(issue_id) do
+    if governed?(), do: Governor.release(Project.current(), issue_id), else: :ok
   end
 
   # Why an otherwise dispatchable item must wait: the throttle (the budget or
@@ -2285,6 +2349,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp route_summary(_route), do: nil
 
+  defp share_quota(operations, quota) do
+    Operations.save_quota(operations, quota)
+    if governed?(), do: Governor.report_quota(quota)
+  end
+
   defp apply_codex_token_delta(
          %{codex_totals: codex_totals} = state,
          %{input_tokens: input, output_tokens: output, total_tokens: total} = token_delta
@@ -2301,7 +2370,7 @@ defmodule SymphonyElixir.Orchestrator do
     case extract_rate_limits(update) do
       %{} = rate_limits ->
         quota = Quota.normalize(rate_limits, DateTime.utc_now()) || state.codex_quota
-        if quota != state.codex_quota, do: Operations.save_quota(state.operations, quota)
+        if quota != state.codex_quota, do: share_quota(state.operations, quota)
         %{state | codex_rate_limits: rate_limits, codex_quota: quota}
 
       _ ->

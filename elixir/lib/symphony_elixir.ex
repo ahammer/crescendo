@@ -62,7 +62,13 @@ defmodule SymphonyElixir.Application do
       {:ok, service} ->
         :ok = SymphonyElixir.Service.put_current(service)
         port = Application.get_env(:symphony_elixir, :server_port_override) || service.port
-        {:ok, [{SymphonyElixir.Projects, service}, {SymphonyElixir.HttpServer, host: service.host, port: port}]}
+
+        {:ok,
+         [
+           {SymphonyElixir.Governor, service},
+           {SymphonyElixir.Projects, service},
+           {SymphonyElixir.HttpServer, host: service.host, port: port}
+         ]}
 
       {:error, message} ->
         {:error, {:invalid_service_config, message}}
