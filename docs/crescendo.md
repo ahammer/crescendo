@@ -68,7 +68,8 @@ crescendo drain on|off ~/.config/crescendo/crescendo.yml
   `projects:`. `--tools` puts mise tools in front of Codex, so the agent and everything it runs
   have them.
 - `labels sync` creates every label a project's workflow uses that its repository lacks: ready,
-  hold, in-review, blocked, one per research channel, sizes and model routes.
+  hold, in-review, blocked, one per research channel, sizes and model routes. It exits with an error
+  if a requested project is unknown or GitHub cannot list or create the labels.
 - `labels migrate` moves every open issue and pull request from each `<old>:` label to its twin under
   the project's `labels.prefix` (run `labels sync` first). Old labels stay for history. Runs get
   the prefix as `CRESCENDO_LABEL_PREFIX`, so repository tooling can follow the switch.
