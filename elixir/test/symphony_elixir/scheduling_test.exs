@@ -66,6 +66,24 @@ defmodule SymphonyElixir.SchedulingTest do
     assert_in_delta counts["metalrain"], 400, 5
   end
 
+  test "a heavier project that starts after the others keeps its head start" do
+    s = schedule(3, [{"metalrain", 4}, {"crescendo", 1}, {"babelfit", 1}])
+    # Lighter projects report work first, as when their orchestrators start faster.
+    s = s |> Scheduling.report_demand("crescendo", 3) |> Scheduling.report_demand("babelfit", 1)
+    s = Scheduling.report_demand(s, "metalrain", 17)
+    assert s.projects["metalrain"].pass == 0.25
+
+    {s, grants} =
+      Enum.reduce(1..3, {s, []}, fn n, {s, grants} ->
+        winner = Enum.find(["crescendo", "babelfit", "metalrain"], &match?({:ok, _}, Scheduling.acquire(s, &1, "#{&1}-#{n}", :issue, 0)))
+        {:ok, s} = Scheduling.acquire(s, winner, "#{winner}-#{n}", :issue, 0)
+        {s, [winner | grants]}
+      end)
+
+    assert grants == ["metalrain", "metalrain", "metalrain"]
+    assert s.projects["metalrain"].pass == 1.0
+  end
+
   test "caps limit a project on top of the shared slots" do
     s = Scheduling.new(3, [{"a", 1, 1, "project"}, {"b", 1, nil, "project"}]) |> Scheduling.report_demand("a", 3)
     assert {:ok, s} = Scheduling.acquire(s, "a", "a1", :issue, 0)
