@@ -343,6 +343,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                "seconds_running" => 42.5
              },
              "rate_limits" => %{"primary" => %{"remaining" => 11}},
+             "quota" => nil,
              "usage" => %{
                "status" => "unavailable",
                "pricing_as_of" => "2026-09-24",
@@ -893,7 +894,19 @@ defmodule SymphonyElixir.ExtensionsTest do
       available_slots: 1
     }
 
-    snapshot = static_snapshot() |> Map.put(:operations, usage) |> Map.put(:upcoming, upcoming) |> Map.put(:blocked, [])
+    quota =
+      SymphonyElixir.Quota.normalize(
+        %{"limitId" => "codex", "planType" => "pro", "primary" => %{"usedPercent" => 75, "windowDurationMins" => 10_080, "resetsAt" => 1_900_000_000}},
+        DateTime.utc_now()
+      )
+
+    snapshot =
+      static_snapshot()
+      |> Map.put(:operations, usage)
+      |> Map.put(:upcoming, upcoming)
+      |> Map.put(:blocked, [])
+      |> Map.put(:quota, quota)
+
     {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
@@ -916,6 +929,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "1 retrying automatically"
     assert html =~ "Systems"
     assert html =~ "Tokens today"
+    assert html =~ "Weekly quota"
+    assert html =~ "Weekly quota 25% left"
 
     payload = SymphonyElixirWeb.Presenter.state_payload(orchestrator_name, 50)
     assert [%{eta_seconds: 600}, %{eta_seconds: 600}, %{eta_seconds: 600}] = payload.upcoming.ready

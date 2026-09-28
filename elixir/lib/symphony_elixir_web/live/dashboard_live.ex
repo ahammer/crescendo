@@ -95,7 +95,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <.health_panel payload={@payload} now={@now} />
           <.runs_panel stats={@payload.run_stats} usage={@payload.usage} />
           <.spend_panel usage={@payload.usage} usage_error={@payload.usage_error} />
-          <.models_panel usage={@payload.usage} rate_limits={@payload.rate_limits} />
+          <.models_panel usage={@payload.usage} quota={@payload.quota} now={@now} />
         </div>
 
         <div class="lists">
@@ -423,7 +423,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   attr(:usage, :map, required: true)
-  attr(:rate_limits, :any, default: nil)
+  attr(:quota, :any, default: nil)
+  attr(:now, :any, required: true)
 
   defp models_panel(assigns) do
     ~H"""
@@ -434,7 +435,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <% else %>
         <Charts.bars title="Tokens by model" rows={model_rows(@usage)} />
       <% end %>
-      <Charts.meter :for={meter <- rate_limit_meters(@rate_limits)} label={meter.label} percent={meter.percent} detail={meter.detail} />
+      <Charts.meter :for={meter <- quota_meters(@quota, @now)} label={meter.label} percent={meter.percent} detail={meter.detail} />
     </section>
     """
   end
@@ -656,31 +657,25 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end)
   end
 
-  defp rate_limit_meters(limits) when is_map(limits) do
-    for {name, window} <- [{"Primary", fetch(limits, "primary")}, {"Secondary", fetch(limits, "secondary")}],
-        is_map(window),
-        percent = fetch(window, "used_percent"),
-        is_number(percent) do
-      %{label: "#{name} window#{window_label(fetch(window, "window_minutes"))}", percent: round(percent), detail: reset_label(fetch(window, "resets_at"))}
+  # One meter per Codex quota window (the weekly one first), marked when stale.
+  defp quota_meters(%{windows: windows}, now) do
+    for window <- windows, is_number(window.used_percent) do
+      %{
+        label: "#{String.capitalize(window.name)} quota",
+        percent: round(window.used_percent),
+        detail: [reset_text(window.resets_at, now), stale_text(window.state)] |> Enum.reject(&is_nil/1) |> Enum.join(" · ")
+      }
     end
   end
 
-  defp rate_limit_meters(_limits), do: []
+  defp quota_meters(_quota, _now), do: []
 
-  defp fetch(map, key), do: Map.get(map, key) || Map.get(map, String.to_atom(key))
+  defp reset_text(nil, _now), do: nil
+  defp reset_text(resets_at, now), do: "resets #{until(resets_at, now)}"
 
-  defp window_label(minutes) when is_integer(minutes) and minutes >= 1_440, do: " (#{div(minutes, 1_440)}d)"
-  defp window_label(minutes) when is_integer(minutes), do: " (#{div(minutes, 60)}h)"
-  defp window_label(_minutes), do: ""
-
-  defp reset_label(seconds) when is_integer(seconds) do
-    case DateTime.from_unix(seconds) do
-      {:ok, at} -> "Resets #{Calendar.strftime(at, "%b %-d %H:%M")} UTC"
-      _ -> nil
-    end
-  end
-
-  defp reset_label(_seconds), do: nil
+  defp stale_text(:stale), do: "last seen over 2h ago"
+  defp stale_text(:reset), do: "window has reset"
+  defp stale_text(_state), do: nil
 
   defp short_date(date) do
     case Date.from_iso8601(date) do

@@ -13,6 +13,7 @@ defmodule SymphonyElixir.Orchestrator do
     Autopilot,
     Config,
     Operations,
+    Quota,
     StatusDashboard,
     Tracker,
     Transcript,
@@ -65,6 +66,7 @@ defmodule SymphonyElixir.Orchestrator do
       next_pulls_due_at_ms: 0,
       codex_totals: nil,
       codex_rate_limits: nil,
+      codex_quota: nil,
       artifacts_root: nil,
       artifacts_swept_ms: nil,
       autopilot: %{pr_handled: %{}, research_finished_at: nil, research_pending: [], item_attempts: %{}}
@@ -102,6 +104,7 @@ defmodule SymphonyElixir.Orchestrator do
           next_pulls_due_at_ms: now_ms,
           codex_totals: @empty_codex_totals,
           codex_rate_limits: nil,
+          codex_quota: Operations.quota(operations),
           artifacts_root: artifacts_root(opts),
           autopilot: Operations.autopilot_state(operations)
         }
@@ -1917,6 +1920,7 @@ defmodule SymphonyElixir.Orchestrator do
          enabled: Config.settings!().tracker.kind == "github"
        },
        rate_limits: Map.get(state, :codex_rate_limits),
+       quota: Map.get(state, :codex_quota),
        polling: %{
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
@@ -2075,7 +2079,7 @@ defmodule SymphonyElixir.Orchestrator do
     Map.put(running_entry, :transcript, transcript)
   end
 
-  @captured_methods ["item/started", "item/completed", "turn/plan/updated", "turn/diff/updated", "turn/completed", "error"]
+  @captured_methods ["item/started", "item/completed", "turn/plan/updated", "turn/diff/updated", "turn/completed", "error", "account/rateLimits/updated"]
 
   # Opt-in protocol capture for building transcript support against real payloads.
   defp maybe_capture_notification(running_entry, update) do
@@ -2206,10 +2210,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp apply_codex_token_delta(state, _token_delta), do: state
 
+  # The raw snapshot feeds the terminal view; the normalized quota feeds the
+  # dashboard and throttling and is persisted so it survives a restart.
   defp apply_codex_rate_limits(%State{} = state, update) when is_map(update) do
     case extract_rate_limits(update) do
       %{} = rate_limits ->
-        %{state | codex_rate_limits: rate_limits}
+        quota = Quota.normalize(rate_limits, DateTime.utc_now()) || state.codex_quota
+        if quota != state.codex_quota, do: Operations.save_quota(state.operations, quota)
+        %{state | codex_rate_limits: rate_limits, codex_quota: quota}
 
       _ ->
         state
@@ -2401,11 +2409,14 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp rate_limits_map?(payload) when is_map(payload) do
+    # The v2 app server names these limitId/limitName; older builds used snake_case.
     limit_id =
       Map.get(payload, "limit_id") ||
         Map.get(payload, :limit_id) ||
+        Map.get(payload, "limitId") ||
         Map.get(payload, "limit_name") ||
-        Map.get(payload, :limit_name)
+        Map.get(payload, :limit_name) ||
+        Map.get(payload, "limitName")
 
     has_buckets =
       Enum.any?(

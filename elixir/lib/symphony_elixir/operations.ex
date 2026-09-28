@@ -263,6 +263,25 @@ defmodule SymphonyElixir.Operations do
     safe_write(fn -> :dets.insert(table, {:autopilot, state}) end)
   end
 
+  @doc "The last Codex quota snapshot, kept so throttling knows the quota after a restart."
+  @spec quota(handle()) :: map() | nil
+  def quota(nil), do: nil
+
+  def quota(table) do
+    case :dets.lookup(table, :quota) do
+      [{:quota, %{} = snapshot}] -> snapshot
+      _ -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  @spec save_quota(handle(), map()) :: :ok
+  def save_quota(nil, _snapshot), do: :ok
+  def save_quota(table, snapshot), do: safe_write(fn -> :dets.insert(table, {:quota, snapshot}) end)
+
   defp do_event(table, kind, details) do
     sequence =
       case :dets.lookup(table, :sequence) do

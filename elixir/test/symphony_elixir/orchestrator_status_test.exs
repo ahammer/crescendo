@@ -470,6 +470,79 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot.rate_limits == rate_limits
   end
 
+  test "orchestrator snapshot normalizes v2 account rate-limit notifications into quota" do
+    issue_id = "issue-rate-limit-snapshot"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-221",
+      title: "Rate limit snapshot test",
+      description: "Capture codex rate limit state",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-221"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :V2RateLimitOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+    started_at = DateTime.utc_now()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    rate_limits = %{
+      "credits" => %{"balance" => "0", "hasCredits" => false, "unlimited" => false},
+      "limitId" => "codex",
+      "limitName" => nil,
+      "planType" => "pro",
+      "primary" => %{"resetsAt" => 1_790_716_234, "usedPercent" => 75, "windowDurationMins" => 10_080},
+      "secondary" => nil
+    }
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: %{"method" => "account/rateLimits/updated", "params" => %{"rateLimits" => rate_limits}},
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert snapshot.rate_limits == rate_limits
+    assert %{limit_id: "codex", plan: "pro", windows: %{"weekly" => %{used_percent: 75.0}}} = snapshot.quota
+  end
+
   test "orchestrator token accounting prefers total_token_usage over last_token_usage in token_count payloads" do
     issue_id = "issue-token-precedence"
 

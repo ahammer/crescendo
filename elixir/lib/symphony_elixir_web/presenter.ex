@@ -3,7 +3,10 @@ defmodule SymphonyElixirWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias SymphonyElixir.{Config, Operations, Orchestrator, StatusDashboard, Transcript, Workspace}
+  alias SymphonyElixir.{Config, Operations, Orchestrator, Quota, StatusDashboard, Transcript, Workspace}
+
+  # Quota older than this is shown as stale (throttling settings refine it).
+  @quota_stale_ms 7_200_000
 
   @doc """
   The dashboard and `/api/v1/state` projection. Running entries carry a light
@@ -39,6 +42,7 @@ defmodule SymphonyElixirWeb.Presenter do
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
           codex_totals: snapshot.codex_totals,
           rate_limits: snapshot.rate_limits,
+          quota: quota_payload(Map.get(snapshot, :quota), now),
           usage: usage,
           usage_error: Map.get(snapshot, :operations_error),
           upcoming: upcoming_payload(Map.get(snapshot, :upcoming), usage, settings),
@@ -411,7 +415,7 @@ defmodule SymphonyElixirWeb.Presenter do
         [
           tracker_check(Map.get(snapshot, :upcoming), settings, now),
           pulls_check(Map.get(snapshot, :pull_requests), now),
-          model_check(Map.get(snapshot, :rate_limits), usage, now),
+          model_check(Map.get(snapshot, :quota), usage, now),
           store_check(usage),
           disk_check(settings)
         ],
@@ -486,17 +490,52 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp pulls_check(_pulls, _now), do: nil
 
-  defp model_check(limits, usage, now) do
-    used = primary_percent(limits)
+  # The tightest quota window speaks for the provider; failures come second.
+  defp model_check(quota, usage, now) do
     cutoff = DateTime.add(now, -3_600, :second)
     failures = usage |> Map.get(:activity, []) |> Enum.count(&(&1[:kind] == "attempt_failed" and after?(&1[:at], cutoff)))
 
+    tightest =
+      quota
+      |> quota_windows(now)
+      |> Enum.filter(&is_number(&1.remaining_percent))
+      |> Enum.min_by(& &1.remaining_percent, fn -> nil end)
+
     cond do
-      is_number(used) and used >= 90 -> check("Model provider", "warning", "Primary rate window #{round(used)}% used")
+      tightest && tightest.remaining_percent <= 10 -> check("Model provider", "warning", quota_text(tightest))
       failures >= 3 -> check("Model provider", "warning", "#{failures} failed runs in the last hour")
-      is_number(used) -> check("Model provider", "healthy", "Primary rate window #{round(used)}% used")
+      tightest -> check("Model provider", "healthy", quota_text(tightest))
       true -> check("Model provider", "healthy", "No recent failures")
     end
+  end
+
+  defp quota_text(window), do: "#{String.capitalize(window.name)} quota #{round(window.remaining_percent)}% left"
+
+  defp quota_payload(nil, _now), do: nil
+
+  defp quota_payload(quota, now) do
+    %{limit_id: quota.limit_id, plan: quota.plan, observed_at: iso8601(quota.observed_at), windows: quota_windows(quota, now)}
+  end
+
+  # Longest window first: the weekly quota is the one throttling watches.
+  defp quota_windows(nil, _now), do: []
+
+  defp quota_windows(quota, now) do
+    quota.windows
+    |> Map.values()
+    |> Enum.sort_by(&(&1.window_minutes || 0), :desc)
+    |> Enum.map(fn window ->
+      {state, remaining} = Quota.remaining(quota, window.name, now, @quota_stale_ms)
+
+      %{
+        name: window.name,
+        state: state,
+        used_percent: window.used_percent,
+        remaining_percent: remaining,
+        window_minutes: window.window_minutes,
+        resets_at: window.resets_at && window.resets_at |> DateTime.from_unix!() |> DateTime.to_iso8601()
+      }
+    end)
   end
 
   defp after?(at, cutoff) when is_binary(at) do
@@ -507,15 +546,6 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp after?(_at, _cutoff), do: false
-
-  defp primary_percent(%{} = limits) do
-    case Map.get(limits, "primary") || Map.get(limits, :primary) do
-      %{} = window -> Map.get(window, "used_percent") || Map.get(window, :used_percent)
-      _ -> nil
-    end
-  end
-
-  defp primary_percent(_limits), do: nil
 
   defp store_check(%{status: "ok"}), do: check("Usage history", "healthy", "Recording runs and spend")
   defp store_check(_usage), do: check("Usage history", "critical", "History unavailable")
