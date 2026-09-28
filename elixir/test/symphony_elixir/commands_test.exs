@@ -81,6 +81,7 @@ defmodule SymphonyElixir.CommandsTest do
         do: assert(label in created)
 
     assert output =~ "shimmer: created crescendo:blocked"
+    assert Enum.count(created, &(&1 == "crescendo:blocked")) == 1
     assert output =~ "shimmer: could not create crescendo:model:astra: HTTP 422: already taken"
 
     # A listing failure still creates everything; only the named projects sync.

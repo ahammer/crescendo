@@ -139,14 +139,16 @@ defmodule SymphonyElixir.Commands do
     routing = settings.codex.routing || %{}
     size_prefix = routing["size_label_prefix"] || "#{prefix}:size:"
 
-    Enum.map(settings.tracker.required_labels, &{&1, "0e8a16", "Authorizes Crescendo to work on this issue."}) ++
-      Enum.map(settings.tracker.excluded_labels, &{&1, "bfd4f2", excluded_description(&1, prefix)}) ++
-      [{settings.autopilot.blocked_label, "ededed", "The last attempt ended blocked; Crescendo retries it later."}] ++
-      Enum.map(Map.keys(settings.autopilot.channels), &{"#{prefix}:channel:#{&1}", "d4c5f9", "Filed by Crescendo's #{&1} research."}) ++
-      Enum.map(Map.keys(routing["sizes"] || %{}), &{size_prefix <> &1, "c2e0c6", "Starts on a cheaper model; failed attempts escalate."}) ++
-      Enum.map(routing["labels"] || %{}, fn {label, route} ->
-        {label, "fbca04", "Start this issue on #{route["model"]} #{route["effort"]}; failed attempts escalate."}
-      end)
+    # The blocked label comes first: it is also excluded, and its own description wins.
+    ([{settings.autopilot.blocked_label, "ededed", "The last attempt ended blocked; Crescendo retries it later."}] ++
+       Enum.map(settings.tracker.required_labels, &{&1, "0e8a16", "Authorizes Crescendo to work on this issue."}) ++
+       Enum.map(settings.tracker.excluded_labels, &{&1, "bfd4f2", excluded_description(&1, prefix)}) ++
+       Enum.map(Map.keys(settings.autopilot.channels), &{"#{prefix}:channel:#{&1}", "d4c5f9", "Filed by Crescendo's #{&1} research."}) ++
+       Enum.map(Map.keys(routing["sizes"] || %{}), &{size_prefix <> &1, "c2e0c6", "Starts on a cheaper model; failed attempts escalate."}) ++
+       Enum.map(routing["labels"] || %{}, fn {label, route} ->
+         {label, "fbca04", "Start this issue on #{route["model"]} #{route["effort"]}; failed attempts escalate."}
+       end))
+    |> Enum.uniq_by(fn {name, _color, _description} -> String.downcase(name) end)
   end
 
   defp excluded_description(label, prefix) do
