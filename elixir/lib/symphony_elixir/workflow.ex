@@ -36,27 +36,23 @@ defmodule SymphonyElixir.Workflow do
         }
 
   @spec current() :: {:ok, loaded_workflow()} | {:error, term()}
-  def current do
-    case Process.whereis(WorkflowStore) do
-      pid when is_pid(pid) ->
-        WorkflowStore.current()
-
-      _ ->
-        load()
-    end
-  end
+  def current, do: WorkflowStore.current()
 
   @spec load() :: {:ok, loaded_workflow()} | {:error, term()}
   def load do
     load(workflow_file_path())
   end
 
-  @spec load(Path.t()) :: {:ok, loaded_workflow()} | {:error, term()}
-  def load(path) when is_binary(path) do
+  @doc """
+  Loads a workflow file. `defaults` (service-wide settings) are merged under
+  its front matter: maps merge key by key and the file's values win.
+  """
+  @spec load(Path.t(), map()) :: {:ok, loaded_workflow()} | {:error, term()}
+  def load(path, defaults \\ %{}) when is_binary(path) and is_map(defaults) do
     case File.read(path) do
       {:ok, content} ->
         with {:ok, workflow} <- parse(content) do
-          load_prompt_files(workflow, Path.dirname(Path.expand(path)))
+          load_prompt_files(%{workflow | config: deep_merge(defaults, workflow.config)}, Path.dirname(Path.expand(path)))
         end
 
       {:error, reason} ->
@@ -115,6 +111,15 @@ defmodule SymphonyElixir.Workflow do
         {:error, reason} ->
           {:halt, {:error, {:missing_prompt_file, path, reason}}}
       end
+    end)
+  end
+
+  @doc "Merges `override` into `base`: nested maps merge, anything else is replaced."
+  @spec deep_merge(map(), map()) :: map()
+  def deep_merge(base, override) when is_map(base) and is_map(override) do
+    Map.merge(base, override, fn
+      _key, %{} = left, %{} = right -> deep_merge(left, right)
+      _key, _left, right -> right
     end)
   end
 

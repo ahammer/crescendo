@@ -14,6 +14,7 @@ defmodule SymphonyElixir.Orchestrator do
     Config,
     ModelRouting,
     Operations,
+    Project,
     Quota,
     StatusDashboard,
     Throttle,
@@ -87,6 +88,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   @impl true
   def init(opts) do
+    # Everything this process (and every task it starts) reads resolves the project's configuration.
+    :ok = Project.put(Keyword.get(opts, :project))
+
     case Config.settings() do
       {:ok, config} ->
         now_ms = System.monotonic_time(:millisecond)
@@ -1826,7 +1830,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec request_refresh(GenServer.server()) :: map() | :unavailable
   def request_refresh(server) do
-    if Process.whereis(server) do
+    if GenServer.whereis(server) do
       GenServer.call(server, :request_refresh)
     else
       :unavailable
@@ -1838,7 +1842,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec snapshot(GenServer.server(), timeout()) :: map() | :timeout | :unavailable
   def snapshot(server, timeout) do
-    if Process.whereis(server) do
+    if GenServer.whereis(server) do
       try do
         GenServer.call(server, :snapshot, timeout)
       catch

@@ -35,19 +35,38 @@ defmodule SymphonyElixir.Application do
   def start_runtime do
     :ok = SymphonyElixir.LogFile.configure()
 
-    children = [
+    shared = [
       {Phoenix.PubSub, name: SymphonyElixir.PubSub},
-      SymphonyElixir.WorkflowStore,
-      SymphonyElixir.AgentRuntimeSupervisor,
-      SymphonyElixir.HttpServer,
-      SymphonyElixir.StatusDashboard
+      {Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry}
     ]
 
-    Supervisor.start_link(
-      children,
-      strategy: :one_for_one,
-      name: SymphonyElixir.Supervisor
-    )
+    with {:ok, children} <- runtime_children(Application.get_env(:symphony_elixir, :service_config_path)) do
+      Supervisor.start_link(shared ++ children, strategy: :one_for_one, name: SymphonyElixir.Supervisor)
+    end
+  end
+
+  # A single WORKFLOW.md runs one unnamed project under the legacy names; a
+  # service file runs every configured project side by side.
+  defp runtime_children(nil) do
+    {:ok,
+     [
+       SymphonyElixir.WorkflowStore,
+       SymphonyElixir.AgentRuntimeSupervisor,
+       SymphonyElixir.HttpServer,
+       SymphonyElixir.StatusDashboard
+     ]}
+  end
+
+  defp runtime_children(path) do
+    case SymphonyElixir.Service.load(path) do
+      {:ok, service} ->
+        :ok = SymphonyElixir.Service.put_current(service)
+        port = Application.get_env(:symphony_elixir, :server_port_override) || service.port
+        {:ok, [{SymphonyElixir.Projects, service}, {SymphonyElixir.HttpServer, host: service.host, port: port}]}
+
+      {:error, message} ->
+        {:error, {:invalid_service_config, message}}
+    end
   end
 
   @impl true

@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.CLI do
   @moduledoc """
-  Escript entrypoint for running Symphony with an explicit WORKFLOW.md path.
+  Escript entrypoint for running Symphony with an explicit WORKFLOW.md path,
+  or a service file (`*.yml`) that runs several projects in one service.
   """
 
   alias SymphonyElixir.LogFile
@@ -62,7 +63,7 @@ defmodule SymphonyElixir.CLI do
     expanded_path = Path.expand(workflow_path)
 
     if deps.file_regular?.(expanded_path) do
-      :ok = deps.set_workflow_file_path.(expanded_path)
+      :ok = config_setter(expanded_path, deps).(expanded_path)
 
       case deps.ensure_all_started.() do
         {:ok, _started_apps} ->
@@ -76,9 +77,17 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
+  defp config_setter(path, deps) do
+    if Path.extname(path) in [".yml", ".yaml"],
+      do: Map.get(deps, :set_service_config_path, &set_service_config_path/1),
+      else: deps.set_workflow_file_path
+  end
+
+  defp set_service_config_path(path), do: Application.put_env(:symphony_elixir, :service_config_path, path)
+
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]"
+    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md | path-to-crescendo.yml]"
   end
 
   @spec runtime_deps() :: deps()

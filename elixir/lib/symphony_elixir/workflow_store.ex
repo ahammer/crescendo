@@ -1,6 +1,11 @@
 defmodule SymphonyElixir.WorkflowStore do
   @moduledoc """
   Caches the last known good workflow and reloads it when `WORKFLOW.md` changes.
+
+  The single-workflow runtime has one store under this module's name that
+  follows `Workflow.workflow_file_path/0`. A service project has its own store
+  (`Project.via(id, :workflow_store)`) with a fixed path and service defaults
+  merged under its front matter; calls resolve the current project's store.
   """
 
   use GenServer
@@ -8,66 +13,72 @@ defmodule SymphonyElixir.WorkflowStore do
 
   alias SymphonyElixir.Config
   alias SymphonyElixir.Config.Schema
-  alias SymphonyElixir.Workflow
+  alias SymphonyElixir.{Project, Workflow}
 
   @poll_interval_ms 1_000
 
   defmodule State do
     @moduledoc false
 
-    defstruct [:path, :stamp, :workflow, :settings]
+    # `fixed_path` and `defaults` are set for service projects; the legacy
+    # store follows `Workflow.workflow_file_path/0` and has no defaults.
+    defstruct [:path, :stamp, :workflow, :settings, :fixed_path, defaults: %{}]
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+    GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
   @spec current() :: {:ok, Workflow.loaded_workflow()} | {:error, term()}
   def current do
-    case Process.whereis(__MODULE__) do
-      pid when is_pid(pid) ->
-        GenServer.call(__MODULE__, :current)
-
-      _ ->
-        Workflow.load()
+    case server() do
+      {:ok, server} -> GenServer.call(server, :current)
+      :legacy_file -> Workflow.load()
+      error -> error
     end
   end
 
   @spec settings() :: {:ok, Schema.t()} | {:error, term()}
   def settings do
-    case Process.whereis(__MODULE__) do
-      pid when is_pid(pid) ->
-        GenServer.call(__MODULE__, :settings)
-
-      _ ->
-        case load_state(Workflow.workflow_file_path()) do
-          {:ok, %State{settings: settings}} -> {:ok, settings}
-          {:error, reason} -> {:error, reason}
-        end
+    case server() do
+      {:ok, server} -> GenServer.call(server, :settings)
+      :legacy_file -> with {:ok, %State{} = state} <- load_legacy_file(), do: {:ok, state.settings}
+      error -> error
     end
   end
 
   @spec force_reload() :: :ok | {:error, term()}
   def force_reload do
-    case Process.whereis(__MODULE__) do
-      pid when is_pid(pid) ->
-        GenServer.call(__MODULE__, :force_reload)
+    case server() do
+      {:ok, server} -> GenServer.call(server, :force_reload)
+      :legacy_file -> with {:ok, _state} <- load_legacy_file(), do: :ok
+      error -> error
+    end
+  end
 
-      _ ->
-        case load_state(Workflow.workflow_file_path()) do
-          {:ok, _state} -> :ok
-          {:error, reason} -> {:error, reason}
-        end
+  defp load_legacy_file, do: load_state(Workflow.workflow_file_path(), %{})
+
+  # Without a running store, the single-workflow runtime reads the file
+  # directly; a project's store must be running.
+  defp server do
+    case {Project.current(), GenServer.whereis(Project.name(:workflow_store, __MODULE__))} do
+      {_project, pid} when is_pid(pid) -> {:ok, pid}
+      {nil, nil} -> :legacy_file
+      {project, nil} -> {:error, {:project_not_running, project}}
     end
   end
 
   @impl true
-  def init(_opts) do
-    case load_state(Workflow.workflow_file_path()) do
+  def init(opts) do
+    :ok = Project.put(Keyword.get(opts, :project))
+    fixed_path = Keyword.get(opts, :path)
+    defaults = Keyword.get(opts, :defaults, %{})
+
+    case load_state(fixed_path || Workflow.workflow_file_path(), defaults) do
       {:ok, state} ->
         schedule_poll()
-        {:ok, state}
+        {:ok, %{state | fixed_path: fixed_path}}
 
       {:error, reason} ->
         {:stop, reason}
@@ -120,7 +131,7 @@ defmodule SymphonyElixir.WorkflowStore do
   end
 
   defp reload_state(%State{} = state) do
-    path = Workflow.workflow_file_path()
+    path = state.fixed_path || Workflow.workflow_file_path()
 
     if path != state.path do
       reload_path(path, state)
@@ -130,9 +141,9 @@ defmodule SymphonyElixir.WorkflowStore do
   end
 
   defp reload_path(path, state) do
-    case load_state(path) do
+    case load_state(path, state.defaults) do
       {:ok, new_state} ->
-        {:ok, new_state}
+        {:ok, %{new_state | fixed_path: state.fixed_path}}
 
       {:error, reason} ->
         log_reload_error(path, reason)
@@ -154,12 +165,12 @@ defmodule SymphonyElixir.WorkflowStore do
     end
   end
 
-  defp load_state(path) do
-    with {:ok, workflow} <- Workflow.load(path),
+  defp load_state(path, defaults) do
+    with {:ok, workflow} <- Workflow.load(path, defaults),
          {:ok, settings} <- Schema.parse(workflow.config),
          :ok <- Config.validate_settings(settings),
          {:ok, stamp} <- current_stamp(path, workflow.prompt_paths) do
-      {:ok, %State{path: path, stamp: stamp, workflow: workflow, settings: settings}}
+      {:ok, %State{path: path, stamp: stamp, workflow: workflow, settings: settings, defaults: defaults}}
     else
       {:error, reason} ->
         {:error, reason}
