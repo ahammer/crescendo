@@ -11,7 +11,7 @@ defmodule SymphonyElixir.PromptBuilder do
   def build_prompt(issue, opts \\ []) do
     template =
       Workflow.current()
-      |> prompt_template!(Map.get(issue, :kind, :issue))
+      |> prompt_template!(Map.get(issue, :kind, :issue), issue)
       |> parse_template!()
 
     template
@@ -27,17 +27,20 @@ defmodule SymphonyElixir.PromptBuilder do
     |> IO.iodata_to_binary()
   end
 
-  defp prompt_template!({:ok, %{prompt_template: prompt}}, :issue), do: default_prompt(prompt)
+  defp prompt_template!({:ok, %{prompt_template: prompt}}, :issue, _issue), do: default_prompt(prompt)
 
-  defp prompt_template!({:ok, workflow}, kind) do
-    workflow
-    |> Map.get(:prompt_templates, %{})
-    |> Map.get(Atom.to_string(kind)) || raise(RuntimeError, "missing_prompt_template: #{kind}")
+  defp prompt_template!({:ok, workflow}, kind, issue) do
+    templates = Map.get(workflow, :prompt_templates, %{})
+    Enum.find_value(template_keys(kind, issue), &Map.get(templates, &1)) || raise(RuntimeError, "missing_prompt_template: #{kind}")
   end
 
-  defp prompt_template!({:error, reason}, _kind) do
+  defp prompt_template!({:error, reason}, _kind, _issue) do
     raise RuntimeError, "workflow_unavailable: #{inspect(reason)}"
   end
+
+  # A research channel's own prompt wins over the shared research prompt.
+  defp template_keys(:research, %{research: %{channel: channel}}) when is_binary(channel), do: ["research:#{channel}", "research"]
+  defp template_keys(kind, _issue), do: [Atom.to_string(kind)]
 
   defp parse_template!(prompt) when is_binary(prompt) do
     Solid.parse!(prompt)

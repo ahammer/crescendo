@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.OperationsTest do
   use ExUnit.Case
 
+  alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Operations
 
   test "model usage and activity survive reopening the local ledger" do
@@ -32,6 +33,36 @@ defmodule SymphonyElixir.OperationsTest do
     assert Enum.any?(snapshot.activity, &(&1.kind == "interrupted"))
     :ok = Operations.close(table)
     assert Operations.spend_today(table) == 0
+  end
+
+  test "prices come from the built-in table with configured models on top" do
+    pricing = %{
+      "as_of" => "2026-10-01",
+      "models" => %{
+        "gpt-6-sol" => %{"input" => 2, "cached_input" => 0.2, "output" => 10},
+        "gpt-7" => %{"input" => 1.5, "cached_input" => 0.15, "output" => 6}
+      }
+    }
+
+    {:ok, settings} = Schema.parse(%{"pricing" => pricing})
+    rates = Operations.rates(settings.pricing)
+    assert rates["gpt-6-sol"] == {2_000_000, 200_000, 10_000_000}
+    assert rates["gpt-7"] == {1_500_000, 150_000, 6_000_000}
+    assert rates["gpt-6-astra"] == Operations.rates(nil)["gpt-6-astra"]
+    assert Operations.price_date(settings.pricing) == "2026-10-01"
+    assert Operations.price_date(nil) == "2026-09-24"
+
+    path = Path.join(System.tmp_dir!(), "symphony-operations-pricing-#{System.unique_integer([:positive])}.dets")
+    on_exit(fn -> File.rm(path) end)
+    {:ok, table} = Operations.open(path, :symphony_operations_pricing_test)
+    :ok = Operations.usage(table, "run-1", "gpt-7", %{input_tokens: 1_000_000, output_tokens: 100_000, total_tokens: 1_100_000}, "GH-1", rates)
+    assert %{usd_micro: 2_100_000, unpriced_tokens: 0} = Operations.run_usage(table, "run-1")
+    :ok = Operations.close(table)
+
+    for bad <- [%{"x" => %{"input" => 1}}, %{"x" => %{"input" => -1, "cached_input" => 0, "output" => 1}}, %{"x" => 3}] do
+      assert {:error, {:invalid_workflow_config, message}} = Schema.parse(%{"pricing" => %{"models" => bad}})
+      assert message =~ "pricing.models"
+    end
   end
 
   test "run and item usage sum a run's rows and accumulate an item across runs" do

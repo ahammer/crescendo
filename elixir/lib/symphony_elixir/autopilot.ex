@@ -188,8 +188,11 @@ defmodule SymphonyElixir.Autopilot do
     |> Enum.map(&research_item(autopilot_settings, &1))
   end
 
+  # A channel is its focus text or an object that may also set its own issue
+  # counts and route; its own prompt file is chosen by the prompt builder.
   defp research_item(autopilot_settings, channel) do
-    focus = Map.fetch!(autopilot_settings.channels, channel)
+    spec = channel_spec(Map.fetch!(autopilot_settings.channels, channel))
+    prefix = Map.get(autopilot_settings, :label_prefix, "symphony")
 
     %Issue{
       id: "research:#{channel}",
@@ -197,14 +200,18 @@ defmodule SymphonyElixir.Autopilot do
       identifier: "research-#{channel}",
       title: "Research #{channel} improvements",
       state: @research_state,
-      labels: ["symphony:research", "symphony:channel:#{channel}"],
+      labels: ["#{prefix}:research", "#{prefix}:channel:#{channel}"],
       dispatchable: true,
       research: %{
         channel: channel,
-        focus: focus,
-        min_issues: autopilot_settings.min_issues_per_channel,
-        max_issues: autopilot_settings.max_issues_per_channel
+        focus: spec["focus"],
+        min_issues: spec["min_issues"] || autopilot_settings.min_issues_per_channel,
+        max_issues: spec["max_issues"] || autopilot_settings.max_issues_per_channel,
+        route: spec["route"]
       }
     }
   end
+
+  defp channel_spec(focus) when is_binary(focus), do: %{"focus" => focus}
+  defp channel_spec(%{} = spec), do: spec
 end

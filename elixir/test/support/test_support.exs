@@ -130,6 +130,7 @@ defmodule SymphonyElixir.TestSupport do
           autopilot: nil,
           throttle: nil,
           codex_routing: nil,
+          extra_config: %{},
           prompt: @workflow_prompt
         ],
         overrides
@@ -175,6 +176,7 @@ defmodule SymphonyElixir.TestSupport do
     autopilot = Keyword.get(config, :autopilot)
     throttle = Keyword.get(config, :throttle)
     codex_routing = Keyword.get(config, :codex_routing)
+    extra_config = Keyword.get(config, :extra_config)
 
     sections =
       [
@@ -219,6 +221,7 @@ defmodule SymphonyElixir.TestSupport do
         server_yaml(server_port, server_host),
         if(is_nil(autopilot), do: nil, else: "autopilot: #{yaml_value(autopilot)}"),
         if(is_nil(throttle), do: nil, else: "throttle: #{yaml_value(throttle)}"),
+        Enum.map_join(extra_config, "\n", fn {key, value} -> "#{key}: #{yaml_value(value)}" end),
         "---",
         prompt
       ]

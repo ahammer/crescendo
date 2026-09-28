@@ -306,6 +306,54 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Labels do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:prefix, :string, default: "symphony")
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:prefix], empty_values: [])
+      |> update_change(:prefix, &(&1 |> String.trim() |> String.downcase()))
+      |> validate_format(:prefix, ~r/^[a-z0-9][a-z0-9-]*$/, message: "must be lowercase letters, digits, or dashes")
+    end
+  end
+
+  defmodule Pricing do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:as_of, :string)
+      field(:models, :map, default: %{})
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:as_of, :models], empty_values: [])
+      |> validate_change(:models, fn :models, models ->
+        if Enum.all?(models, &valid_price?/1),
+          do: [],
+          else: [models: "must map model names to input, cached_input and output USD per million tokens"]
+      end)
+    end
+
+    defp valid_price?({model, %{"input" => input, "cached_input" => cached, "output" => output} = price}) do
+      is_binary(model) and map_size(price) == 3 and Enum.all?([input, cached, output], &(is_number(&1) and &1 >= 0))
+    end
+
+    defp valid_price?(_entry), do: false
+  end
+
   defmodule Throttle do
     @moduledoc false
     use Ecto.Schema
@@ -381,10 +429,14 @@ defmodule SymphonyElixir.Config.Schema do
       field(:trusted_associations, {:array, :string}, default: ["OWNER", "MEMBER", "COLLABORATOR"])
       field(:trusted_authors, {:array, :string}, default: [])
       field(:prompts, :map, default: %{})
+      # Derived from `labels.prefix`; not configured here.
+      field(:label_prefix, :string, default: "symphony")
     end
 
     @prompt_kinds ["pull_request", "research"]
     @channel_name ~r/^[a-z0-9][a-z0-9-]*$/
+    @channel_keys ["focus", "prompt", "min_issues", "max_issues", "route"]
+    @channel_error "names must be lowercase letters, digits, or dashes and map to focus text or {focus, prompt, min_issues, max_issues, route}"
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
@@ -424,6 +476,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> update_change(:trusted_associations, fn values -> Enum.map(values, &(String.trim(&1) |> String.upcase())) end)
       |> update_change(:trusted_authors, fn values -> Enum.map(values, &(String.trim(&1) |> String.downcase())) end)
       |> validate_change(:channels, &validate_channels/2)
+      |> validate_channel_ranges()
       |> validate_change(:prompts, &validate_prompts/2)
     end
 
@@ -438,13 +491,40 @@ defmodule SymphonyElixir.Config.Schema do
         map_size(channels) == 0 ->
           [{field, "must name at least one channel"}]
 
-        Enum.all?(channels, fn {name, focus} -> Regex.match?(@channel_name, name) and is_binary(focus) end) ->
+        Enum.all?(channels, fn {name, spec} -> Regex.match?(@channel_name, name) and valid_channel?(spec) end) ->
           []
 
         true ->
-          [{field, "names must be lowercase letters, digits, or dashes and map to focus text"}]
+          [{field, @channel_error}]
       end
     end
+
+    # A channel is its focus text, or an object that can also name its own
+    # prompt file, issue counts and research route.
+    defp valid_channel?(focus) when is_binary(focus), do: true
+
+    defp valid_channel?(%{"focus" => focus} = spec) when is_binary(focus) do
+      Map.keys(spec) -- @channel_keys == [] and
+        (is_nil(spec["prompt"]) or (is_binary(spec["prompt"]) and String.trim(spec["prompt"]) != "")) and
+        Enum.all?([spec["min_issues"], spec["max_issues"]], &(is_nil(&1) or (is_integer(&1) and &1 > 0))) and
+        (is_nil(spec["route"]) or SymphonyElixir.ModelRouting.validate_route(spec["route"]) == :ok)
+    end
+
+    defp valid_channel?(_spec), do: false
+
+    defp validate_channel_ranges(%{valid?: false} = changeset), do: changeset
+
+    defp validate_channel_ranges(changeset) do
+      defaults = {get_field(changeset, :min_issues_per_channel), get_field(changeset, :max_issues_per_channel)}
+
+      case Enum.find(get_field(changeset, :channels), &inverted_range?(&1, defaults)) do
+        nil -> changeset
+        {name, _spec} -> add_error(changeset, :channels, "#{name} min_issues must not exceed max_issues")
+      end
+    end
+
+    defp inverted_range?({_name, %{} = spec}, {min, max}), do: (spec["min_issues"] || min) > (spec["max_issues"] || max)
+    defp inverted_range?(_channel, _defaults), do: false
 
     defp validate_prompts(field, prompts) do
       if Enum.all?(prompts, fn {kind, path} -> kind in @prompt_kinds and is_binary(path) and String.trim(path) != "" end),
@@ -472,6 +552,8 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
     embeds_one(:autopilot, Autopilot, on_replace: :update, defaults_to_struct: true)
     embeds_one(:throttle, Throttle, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:labels, Labels, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:pricing, Pricing, on_replace: :update, defaults_to_struct: true)
   end
 
   @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
@@ -479,6 +561,7 @@ defmodule SymphonyElixir.Config.Schema do
     config
     |> normalize_keys()
     |> drop_nil_values()
+    |> derive_label_defaults()
     |> changeset()
     |> apply_action(:validate)
     |> case do
@@ -568,6 +651,8 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:server, with: &Server.changeset/2)
     |> cast_embed(:autopilot, with: &Autopilot.changeset/2)
     |> cast_embed(:throttle, with: &Throttle.changeset/2)
+    |> cast_embed(:labels, with: &Labels.changeset/2)
+    |> cast_embed(:pricing, with: &Pricing.changeset/2)
     |> validate_fixed_route_floors()
   end
 
@@ -576,17 +661,47 @@ defmodule SymphonyElixir.Config.Schema do
   defp validate_fixed_route_floors(changeset) do
     with %{} = codex <- get_field(changeset, :codex),
          %{} = autopilot <- get_field(changeset, :autopilot),
-         {:error, message} <- first_floor_error(codex.routing, [autopilot.research_route, autopilot.review_route]) do
+         {:error, message} <- first_floor_error(codex.routing, fixed_routes(autopilot)) do
       add_error(changeset, :autopilot, message)
     else
       _ -> changeset
     end
   end
 
+  defp fixed_routes(autopilot) do
+    channel_routes = for {_name, %{"route" => %{} = route}} <- autopilot.channels, do: route
+    [autopilot.research_route, autopilot.review_route | channel_routes]
+  end
+
   defp first_floor_error(routing, routes) do
     Enum.find_value(routes, :ok, fn route ->
       with :ok <- SymphonyElixir.ModelRouting.check_floor(routing, route), do: nil
     end)
+  end
+
+  # Labels Symphony reads itself follow `labels.prefix` unless set explicitly:
+  # model and size route labels and the blocked label. Only sections that are
+  # present are filled; absent ones keep their defaults.
+  defp derive_label_defaults(config) do
+    prefix =
+      case config do
+        %{"labels" => %{"prefix" => prefix}} when is_binary(prefix) -> prefix |> String.trim() |> String.downcase()
+        _ -> "symphony"
+      end
+
+    config
+    |> put_new_in(["codex", "routing"], "label_prefix", "#{prefix}:model:")
+    |> put_new_in(["codex", "routing"], "size_label_prefix", "#{prefix}:size:")
+    |> put_new_in(["autopilot"], "blocked_label", "#{prefix}:blocked")
+  end
+
+  defp put_new_in(%{} = config, [], key, value), do: Map.put_new(config, key, value)
+
+  defp put_new_in(%{} = config, [section | rest], key, value) do
+    case Map.get(config, section) do
+      %{} = inner -> Map.put(config, section, put_new_in(inner, rest, key, value))
+      _ -> config
+    end
   end
 
   # Under autopilot a worker ends a failed attempt by adding the blocked label;
@@ -662,7 +777,10 @@ defmodule SymphonyElixir.Config.Schema do
         turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
     }
 
-    %{settings | tracker: exclude_blocked_label(tracker, settings.autopilot), workspace: workspace, codex: codex}
+    autopilot = %{settings.autopilot | label_prefix: settings.labels.prefix}
+    tracker = exclude_blocked_label(tracker, autopilot)
+
+    %{settings | tracker: tracker, workspace: workspace, codex: codex, autopilot: autopilot}
   end
 
   defp normalize_keys(value) when is_map(value) do

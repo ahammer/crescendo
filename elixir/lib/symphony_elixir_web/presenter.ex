@@ -22,8 +22,8 @@ defmodule SymphonyElixirWeb.Presenter do
 
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
       %{} = snapshot ->
-        usage = Map.get(snapshot, :operations) || Operations.snapshot(nil)
         settings = settings()
+        usage = usage_payload(snapshot, settings)
 
         counts = %{
           running: length(snapshot.running),
@@ -350,6 +350,11 @@ defmodule SymphonyElixirWeb.Presenter do
   defp item_kind("PR-" <> _), do: "pull_request"
   defp item_kind("research" <> _), do: "research"
   defp item_kind(_identifier), do: "issue"
+
+  defp usage_payload(snapshot, settings) do
+    pricing = if settings, do: settings.pricing
+    (Map.get(snapshot, :operations) || Operations.snapshot(nil)) |> Map.put(:pricing_as_of, Operations.price_date(pricing))
+  end
 
   defp settings do
     case Config.settings() do

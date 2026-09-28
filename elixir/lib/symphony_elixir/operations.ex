@@ -6,7 +6,8 @@ defmodule SymphonyElixir.Operations do
   @table :symphony_operations
   @event_limit 2_000
   @price_date "2026-09-24"
-  # Standard, short-context API prices in micro-USD per million tokens.
+  # Standard, short-context API prices in micro-USD per million tokens
+  # (input, cached input, output); `pricing.models` overrides or adds models.
   @rates %{
     "gpt-6-astra" => {5_000_000, 500_000, 25_000_000},
     "gpt-6-sol" => {1_000_000, 100_000, 5_000_000},
@@ -18,6 +19,24 @@ defmodule SymphonyElixir.Operations do
   }
 
   @type handle :: atom() | nil
+  @type rates :: %{optional(String.t()) => {non_neg_integer(), non_neg_integer(), non_neg_integer()}}
+
+  @doc "Price table: the built-in rates with `pricing.models` (USD per million tokens) applied on top."
+  @spec rates(map() | nil) :: rates()
+  def rates(%{models: %{} = models}) do
+    Enum.reduce(models, @rates, fn {model, price}, acc ->
+      Map.put(acc, model, {usd_micro(price["input"]), usd_micro(price["cached_input"]), usd_micro(price["output"])})
+    end)
+  end
+
+  def rates(_pricing), do: @rates
+
+  @doc "When the price table was last checked: `pricing.as_of`, else the built-in date."
+  @spec price_date(map() | nil) :: String.t()
+  def price_date(%{as_of: as_of}) when is_binary(as_of), do: as_of
+  def price_date(_pricing), do: @price_date
+
+  defp usd_micro(usd), do: round(usd * 1_000_000)
 
   @spec open(Path.t(), atom()) :: {:ok, handle()} | {:error, term()}
   def open(path, table \\ @table) when is_binary(path) and is_atom(table) do
@@ -61,26 +80,30 @@ defmodule SymphonyElixir.Operations do
   end
 
   @spec usage(handle(), String.t() | nil, String.t() | nil, map()) :: :ok
-  def usage(table, run_id, model, delta), do: usage(table, run_id, model, delta, nil)
+  def usage(table, run_id, model, delta), do: usage(table, run_id, model, delta, nil, @rates)
+
+  @spec usage(handle(), String.t() | nil, String.t() | nil, map(), String.t() | nil) :: :ok
+  def usage(table, run_id, model, delta, item), do: usage(table, run_id, model, delta, item, @rates)
 
   @doc """
-  Records a token delta for one run. With a work-item identifier, the delta
-  also accumulates into that item's running total across all of its runs.
+  Records a token delta for one run, priced with `rates`. With a work-item
+  identifier, the delta also accumulates into that item's running total
+  across all of its runs.
   """
-  @spec usage(handle(), String.t() | nil, String.t() | nil, map(), String.t() | nil) :: :ok
-  def usage(nil, _run_id, _model, _delta, _item), do: :ok
-  def usage(_table, nil, _model, _delta, _item), do: :ok
+  @spec usage(handle(), String.t() | nil, String.t() | nil, map(), String.t() | nil, rates()) :: :ok
+  def usage(nil, _run_id, _model, _delta, _item, _rates), do: :ok
+  def usage(_table, nil, _model, _delta, _item, _rates), do: :ok
 
-  def usage(table, run_id, model, delta, item) do
+  def usage(table, run_id, model, delta, item, rates) do
     if Enum.any?([:input_tokens, :cached_input_tokens, :output_tokens, :total_tokens], &(Map.get(delta, &1, 0) > 0)) do
-      safe_write(fn -> record_usage(table, run_id, model, delta, item) end)
+      safe_write(fn -> record_usage(table, run_id, model, delta, item, rates) end)
     else
       :ok
     end
   end
 
-  defp record_usage(table, run_id, model, delta, item) do
-    price = do_usage(table, run_id, model, delta)
+  defp record_usage(table, run_id, model, delta, item, rates) do
+    price = do_usage(table, run_id, model, delta, rates)
     if is_binary(item), do: add_item_usage(table, item, run_id, delta, price)
   end
 
@@ -153,7 +176,7 @@ defmodule SymphonyElixir.Operations do
   defp empty_cost, do: %{usd_micro: 0, total_tokens: 0, unpriced_tokens: 0}
   defp empty_item_usage, do: %{usd_micro: 0, total_tokens: 0, unpriced_tokens: 0, runs: 0, since: nil}
 
-  defp do_usage(table, run_id, model, delta) do
+  defp do_usage(table, run_id, model, delta, rates) do
     date = Date.utc_today() |> Date.to_iso8601()
     key = {:usage, run_id, date, model || "unknown"}
 
@@ -167,7 +190,7 @@ defmodule SymphonyElixir.Operations do
     cached = min(input, max(0, Map.get(delta, :cached_input_tokens, 0)))
     output = max(0, Map.get(delta, :output_tokens, 0))
     total = max(input + output, Map.get(delta, :total_tokens, 0))
-    price = price_numerator(model, input, cached, output)
+    price = price_numerator(rates, model, input, cached, output)
     price_total = Map.get(previous, :usd_numerator, previous.usd_micro * 1_000_000) + (price || 0)
 
     value = %{
@@ -492,8 +515,8 @@ defmodule SymphonyElixir.Operations do
     Map.new(left, fn {key, value} -> {key, value + Map.get(right, key, 0)} end)
   end
 
-  defp price_numerator(model, input, cached, output) do
-    case Map.get(@rates, model) do
+  defp price_numerator(rates, model, input, cached, output) do
+    case Map.get(rates, model) do
       {input_rate, cached_rate, output_rate} ->
         (input - cached) * input_rate + cached * cached_rate + output * output_rate
 

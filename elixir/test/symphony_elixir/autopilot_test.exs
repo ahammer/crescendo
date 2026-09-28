@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.AutopilotTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.{Autopilot, Operations, PromptBuilder}
+  alias SymphonyElixir.{Autopilot, Config.Schema, Operations, PromptBuilder}
 
   @settings %{
     enabled: true,
@@ -217,10 +217,89 @@ defmodule SymphonyElixir.AutopilotTest do
       assert String.ends_with?(missing_path, "prompts/missing.md")
     end
 
+    test "research channels can carry their own prompt, counts and route, and labels follow the prefix" do
+      prompts_dir = Path.join(Path.dirname(Workflow.workflow_file_path()), "prompts")
+      File.mkdir_p!(prompts_dir)
+      File.write!(Path.join(prompts_dir, "pr.md"), "Review {{ issue.identifier }}")
+      File.write!(Path.join(prompts_dir, "qa.md"), "QA {{ issue.research.focus }} ({{ issue.research.min_issues }}-{{ issue.research.max_issues }})")
+      File.write!(Path.join(prompts_dir, "shared.md"), "Shared {{ issue.research.channel }}")
+      sol = %{model: "gpt-6-sol", effort: "medium"}
+      qa_route = %{model: "gpt-6-sol", effort: "xhigh"}
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        codex_routing: %{default: sol, labels: %{"crescendo:model:sol" => sol}},
+        extra_config: %{"labels" => %{"prefix" => " Crescendo "}},
+        autopilot: %{
+          enabled: true,
+          channels: %{
+            "qa" => %{focus: "Journeys", prompt: "prompts/qa.md", min_issues: 2, max_issues: 4, route: qa_route},
+            "docs" => "Docs drift"
+          },
+          prompts: %{pull_request: "prompts/pr.md", research: "prompts/shared.md"}
+        }
+      )
+
+      assert :ok = Config.validate!()
+      settings = Config.settings!()
+      assert settings.labels.prefix == "crescendo"
+      assert settings.autopilot.blocked_label == "crescendo:blocked"
+      assert "crescendo:blocked" in settings.tracker.excluded_labels
+      assert %{"label_prefix" => "crescendo:model:", "size_label_prefix" => "crescendo:size:"} = settings.codex.routing
+
+      [docs, qa] = Autopilot.research_items(settings.autopilot)
+      assert qa.labels == ["crescendo:research", "crescendo:channel:qa"]
+      assert qa.research == %{channel: "qa", focus: "Journeys", min_issues: 2, max_issues: 4, route: %{"model" => "gpt-6-sol", "effort" => "xhigh"}}
+      assert docs.research.route == nil
+      assert PromptBuilder.build_prompt(qa) == "QA Journeys (2-4)"
+      assert PromptBuilder.build_prompt(docs) == "Shared docs"
+
+      # A channel's prompt file hot-reloads like the others.
+      File.write!(Path.join(prompts_dir, "qa.md"), "QA v2")
+      assert :ok = WorkflowStore.force_reload()
+      assert PromptBuilder.build_prompt(qa) == "QA v2"
+
+      # Without a shared research prompt every channel must bring its own.
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        autopilot: %{enabled: true, channels: %{"qa" => %{focus: "Journeys", prompt: "prompts/qa.md"}}, prompts: %{pull_request: "prompts/pr.md"}}
+      )
+
+      assert :ok = Config.validate!()
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        autopilot: %{enabled: true, channels: %{"qa" => %{focus: "Journeys", prompt: "prompts/qa.md"}, "docs" => "Docs"}, prompts: %{pull_request: "prompts/pr.md"}}
+      )
+
+      assert {:error, {:invalid_workflow_config, "autopilot requires prompts.pull_request and prompts.research"}} = Config.validate!()
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        autopilot: %{channels: %{"qa" => %{focus: "Journeys", prompt: "prompts/missing-qa.md"}}}
+      )
+
+      assert {:error, {:missing_prompt_file, missing_path, :enoent}} = Workflow.load()
+      assert String.ends_with?(missing_path, "prompts/missing-qa.md")
+
+      assert {:error, {:invalid_workflow_config, message}} = Schema.parse(%{"labels" => %{"prefix" => "bad prefix"}})
+      assert message =~ "labels.prefix"
+    end
+
     test "autopilot config rejects bad channels, prompts, trackers, and missing prompts" do
+      luna_medium = %{model: "gpt-6-luna", effort: "medium"}
+
       invalid = [
         {%{channels: %{}}, "autopilot.channels"},
         {%{channels: %{"Bad Name" => "x"}}, "autopilot.channels"},
+        {%{channels: %{"qa" => %{max_issues: 2}}}, "autopilot.channels"},
+        {%{channels: %{"qa" => %{focus: "x", extra: 1}}}, "autopilot.channels"},
+        {%{channels: %{"qa" => %{focus: "x", prompt: " "}}}, "autopilot.channels"},
+        {%{channels: %{"qa" => %{focus: "x", min_issues: 0}}}, "autopilot.channels"},
+        {%{channels: %{"qa" => %{focus: "x", route: %{model: "m"}}}}, "autopilot.channels"},
+        {%{channels: %{"qa" => 7}}, "autopilot.channels"},
+        {%{channels: %{"qa" => %{focus: "x", min_issues: 5}}}, "qa min_issues must not exceed max_issues"},
+        {%{channels: %{"qa" => %{focus: "x", route: luna_medium}}}, "gpt-6-luna must run at max effort"},
         {%{prompts: %{other: "x.md"}}, "autopilot.prompts"},
         {%{max_pr_runs: 0}, "autopilot.max_pr_runs"},
         {%{max_item_attempts: 0}, "autopilot.max_item_attempts"},
@@ -228,8 +307,19 @@ defmodule SymphonyElixir.AutopilotTest do
         {%{research_route: %{model: "astra", effort: "extreme"}}, "autopilot.research_route"}
       ]
 
+      floors = %{
+        default: %{model: "gpt-6-sol", effort: "medium"},
+        labels: %{"symphony:model:sol" => %{model: "gpt-6-sol", effort: "medium"}},
+        effort_floor: %{"gpt-6-luna" => "max"}
+      }
+
       for {autopilot, field} <- invalid do
-        write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", autopilot: autopilot)
+        write_workflow_file!(Workflow.workflow_file_path(),
+          tracker_kind: "memory",
+          autopilot: autopilot,
+          codex_routing: floors
+        )
+
         assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
         assert message =~ field
       end

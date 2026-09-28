@@ -264,7 +264,8 @@ defmodule SymphonyElixir.Orchestrator do
           Map.get(updated_running_entry, :run_id),
           Map.get(updated_running_entry, :model),
           token_delta,
-          updated_running_entry.identifier
+          updated_running_entry.identifier,
+          Operations.rates(Config.settings!().pricing)
         )
 
         maybe_record_turn_event(state.operations, updated_running_entry, update)

@@ -89,13 +89,14 @@ defmodule SymphonyElixir.Workflow do
   end
 
   # `autopilot.prompts` maps a work-item kind to a template file resolved
-  # relative to WORKFLOW.md. The WORKFLOW.md body stays the issue prompt.
+  # relative to WORKFLOW.md, and a research channel may name its own file
+  # (`research:<channel>`). The WORKFLOW.md body stays the issue prompt.
   defp load_prompt_files(%{config: config} = workflow, base_dir) do
     # Unknown kinds are left for schema validation to reject.
     prompts =
       case config do
-        %{"autopilot" => %{"prompts" => %{} = prompts}} -> Map.take(prompts, ["pull_request", "research"])
-        _ -> %{}
+        %{"autopilot" => %{} = autopilot} -> kind_prompts(autopilot) ++ channel_prompts(autopilot)
+        _ -> []
       end
 
     Enum.reduce_while(prompts, {:ok, workflow}, fn {kind, relative_path}, {:ok, acc} ->
@@ -116,6 +117,14 @@ defmodule SymphonyElixir.Workflow do
       end
     end)
   end
+
+  defp kind_prompts(%{"prompts" => %{} = prompts}), do: prompts |> Map.take(["pull_request", "research"]) |> Enum.to_list()
+  defp kind_prompts(_autopilot), do: []
+
+  defp channel_prompts(%{"channels" => %{} = channels}),
+    do: for({name, %{"prompt" => path}} <- channels, is_binary(path) and String.trim(path) != "", do: {"research:#{name}", path})
+
+  defp channel_prompts(_autopilot), do: []
 
   defp split_front_matter(content) do
     lines = String.split(content, ~r/\R/, trim: false)

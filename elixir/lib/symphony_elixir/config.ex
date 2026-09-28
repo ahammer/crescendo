@@ -123,12 +123,18 @@ defmodule SymphonyElixir.Config do
       settings.autopilot.enabled and settings.tracker.kind not in ["github", "memory"] ->
         {:error, {:invalid_workflow_config, "autopilot requires tracker.kind github"}}
 
-      settings.autopilot.enabled and map_size(settings.autopilot.prompts) < 2 ->
+      settings.autopilot.enabled and not autopilot_prompts?(settings.autopilot) ->
         {:error, {:invalid_workflow_config, "autopilot requires prompts.pull_request and prompts.research"}}
 
       true ->
         Tracker.validate_config(settings.tracker)
     end
+  end
+
+  # Research needs the shared prompt unless every channel names its own.
+  defp autopilot_prompts?(autopilot) do
+    Map.has_key?(autopilot.prompts, "pull_request") and
+      (Map.has_key?(autopilot.prompts, "research") or Enum.all?(autopilot.channels, fn {_name, spec} -> is_map(spec) and is_binary(spec["prompt"]) end))
   end
 
   defp format_config_error(reason) do
