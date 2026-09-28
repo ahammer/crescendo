@@ -59,6 +59,7 @@ running service:
 ```bash
 crescendo project add ~/.config/crescendo/crescendo.yml nubu3d ahammer/Nubu3D [--branch main] [--prefix crescendo] [--tools node@22,rust@1.82]
 crescendo labels sync ~/.config/crescendo/crescendo.yml [nubu3d]
+crescendo labels migrate ~/.config/crescendo/crescendo.yml metalrain --from symphony
 crescendo drain on|off ~/.config/crescendo/crescendo.yml
 ```
 
@@ -68,6 +69,9 @@ crescendo drain on|off ~/.config/crescendo/crescendo.yml
   have them.
 - `labels sync` creates every label a project's workflow uses that its repository lacks: ready,
   hold, in-review, blocked, one per research channel, sizes and model routes.
+- `labels migrate` moves every open issue and pull request from each `<old>:` label to its twin under
+  the project's `labels.prefix` (run `labels sync` first). Old labels stay for history. Runs get
+  the prefix as `CRESCENDO_LABEL_PREFIX`, so repository tooling can follow the switch.
 - `drain on` stops new runs; running work finishes. `drain off` releases it.
 
 ## `crescendo.yml`

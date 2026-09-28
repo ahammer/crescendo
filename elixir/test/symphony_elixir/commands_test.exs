@@ -108,6 +108,32 @@ defmodule SymphonyElixir.CommandsTest do
     assert {:error, "cannot read " <> _} = Commands.run(["labels", "sync", Path.join(root, "absent.yml")], &no_gh/1)
   end
 
+  test "labels migrate moves open issues and pull requests to the project's prefix", %{service: service} do
+    capture_io(fn -> Commands.run(["project", "add", service, "metalrain", "ahammer/metalrain"], &no_gh/1) end)
+    File.write!(service, "projects: {metalrain: {}}")
+    parent = self()
+    listing = "repos/ahammer/metalrain/issues?state=open&per_page=100&labels="
+
+    gh = fn
+      ["api", "--paginate", ^listing <> "symphony%3Aready" | _] -> {"12\n34\n", 0}
+      ["api", "--paginate", ^listing <> "symphony%3Ahold" | _] -> {"HTTP 502", 1}
+      ["api", "--paginate" | _] -> {"", 0}
+      ["api", "-X", "POST", "repos/ahammer/metalrain/issues/34/labels" | _] -> {"HTTP 403", 1}
+      ["api", "-X", method, path | _] -> send(parent, {:gh, method, path}) && {"", 0}
+    end
+
+    output = capture_io(fn -> assert :ok = Commands.run(["labels", "migrate", service, "metalrain", "--from", "symphony"], gh) end)
+
+    assert_received {:gh, "POST", "repos/ahammer/metalrain/issues/12/labels"}
+    assert_received {:gh, "DELETE", "repos/ahammer/metalrain/issues/12/labels/symphony:ready"}
+    assert output =~ "metalrain: #12 symphony:ready -> crescendo:ready"
+    assert output =~ "metalrain: #34 could not move symphony:ready: HTTP 403"
+    assert output =~ "symphony:hold: could not list items: HTTP 502"
+
+    assert {:error, "no project nubu"} = Commands.run(["labels", "migrate", service, "nubu", "--from", "symphony"], gh)
+    assert {:error, "cannot read " <> _} = Commands.run(["labels", "migrate", service <> ".missing", "x", "--from", "s"], gh)
+  end
+
   test "drain on holds new dispatch until drain off", %{root: root, service: service} do
     File.write!(service, "paths: {state: state}\nprojects: {a: {}}")
     drain = Path.join([root, "state", "drain"])

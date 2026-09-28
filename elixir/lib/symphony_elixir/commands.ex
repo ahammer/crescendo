@@ -5,11 +5,15 @@ defmodule SymphonyElixir.Commands do
 
       crescendo project add <crescendo.yml> <id> <owner/repo> [--branch main] [--prefix crescendo] [--tools java@21,gradle@8]
       crescendo labels sync <crescendo.yml> [<project>]
+      crescendo labels migrate <crescendo.yml> <project> --from <old-prefix>
       crescendo drain on|off <crescendo.yml>
 
   `project add` writes `projects/<id>/` from the built-in templates (never
   overwriting) and prints the line to add under `projects:`. `labels sync`
   creates the labels a project's workflow uses that its repository lacks.
+  `labels migrate` moves every open issue and pull request from each
+  `<old-prefix>:` label to its twin under the project's prefix (run
+  `labels sync` first); the old labels stay for history.
   `drain on` holds all new dispatch (running work finishes); `drain off`
   releases it.
   """
@@ -29,6 +33,7 @@ defmodule SymphonyElixir.Commands do
 
   def run(["project", "add" | rest], _gh), do: with_service_dir(rest, &project_add/2)
   def run(["labels", "sync", path | projects], gh), do: labels_sync(path, projects, gh)
+  def run(["labels", "migrate", path, project, "--from", old], gh), do: labels_migrate(path, project, old, gh)
   def run(["drain", mode, path], _gh) when mode in ["on", "off"], do: drain(mode, path)
   def run(["project" | _rest], _gh), do: {:error, usage()}
   def run(["labels" | _rest], _gh), do: {:error, usage()}
@@ -41,6 +46,7 @@ defmodule SymphonyElixir.Commands do
     Usage:
       crescendo project add <crescendo.yml> <id> <owner/repo> [--branch main] [--prefix crescendo] [--tools java@21]
       crescendo labels sync <crescendo.yml> [<project>...]
+      crescendo labels migrate <crescendo.yml> <project> --from <old-prefix>
       crescendo drain on|off <crescendo.yml>
     """
   end
@@ -105,17 +111,59 @@ defmodule SymphonyElixir.Commands do
   end
 
   defp sync_project(project, gh) do
-    with {:ok, workflow} <- Workflow.load(project.workflow, project.defaults),
-         {:ok, settings} <- Schema.parse(workflow.config),
-         repo when is_binary(repo) <- settings.tracker.provider["repo"] do
+    with {:ok, settings, repo} <- project_settings(project) do
       existing = existing_labels(repo, gh)
 
       for {name, _color, _description} = label <- labels(settings), String.downcase(name) not in existing, do: create_label(project.id, repo, label, gh)
 
       :ok
+    end
+  end
+
+  defp labels_migrate(path, id, old_prefix, gh) do
+    with {:ok, service} <- Service.load(path),
+         %Service.Project{} = project <- Enum.find(Service.projects(service), &(&1.id == id)) || {:error, "no project #{id}"},
+         {:ok, settings, repo} <- project_settings(project) do
+      prefix = settings.labels.prefix
+
+      for {name, _color, _description} <- labels(settings), String.starts_with?(name, prefix <> ":") do
+        old = old_prefix <> String.replace_prefix(name, prefix, "")
+        Enum.each(open_items(repo, old, gh), &move_label(id, repo, &1, old, name, gh))
+      end
+
+      :ok
+    end
+  end
+
+  defp project_settings(project) do
+    with {:ok, workflow} <- Workflow.load(project.workflow, project.defaults),
+         {:ok, settings} <- Schema.parse(workflow.config),
+         repo when is_binary(repo) <- settings.tracker.provider["repo"] do
+      {:ok, settings, repo}
     else
       nil -> {:error, "#{project.id}: tracker.provider.repo is not set"}
       {:error, reason} -> {:error, "#{project.id}: #{inspect(reason)}"}
+    end
+  end
+
+  # The issues API lists pull requests too, and labels them the same way.
+  defp open_items(repo, label, gh) do
+    case gh.(["api", "--paginate", "repos/#{repo}/issues?state=open&per_page=100&labels=#{URI.encode_www_form(label)}", "--jq", ".[].number"]) do
+      {output, 0} ->
+        String.split(output, "\n", trim: true)
+
+      {output, _status} ->
+        IO.puts("#{label}: could not list items: #{String.trim(output)}")
+        []
+    end
+  end
+
+  defp move_label(id, repo, number, old, new, gh) do
+    with {_output, 0} <- gh.(["api", "-X", "POST", "repos/#{repo}/issues/#{number}/labels", "-f", "labels[]=#{new}"]),
+         {_output, 0} <- gh.(["api", "-X", "DELETE", "repos/#{repo}/issues/#{number}/labels/#{URI.encode(old)}"]) do
+      IO.puts("#{id}: ##{number} #{old} -> #{new}")
+    else
+      {output, _status} -> IO.puts("#{id}: ##{number} could not move #{old}: #{String.trim(output)}")
     end
   end
 
