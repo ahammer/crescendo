@@ -51,7 +51,7 @@ defmodule SymphonyElixir.ServiceWebTest do
     state = json_response(get(build_conn(), "/api/v1/state"), 200)
 
     assert state["project"] == nil
-    assert [%{"id" => "alpha", "weight" => 2, "failure" => nil}, %{"id" => "beta"}] = state["projects"]
+    assert [%{"id" => "alpha", "weight" => 2, "failure" => nil, "started" => true}, %{"id" => "beta"}] = state["projects"]
     assert state["runtime"]["tracker"] == "2 projects"
     assert state["header"]["max_agents"] == 2
     assert Enum.map(state["upcoming"]["waiting"], &{&1["project"], &1["title"]}) == [{"alpha", "Held work"}, {"beta", "Private work"}]

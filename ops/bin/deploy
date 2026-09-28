@@ -44,6 +44,11 @@ if [ ! -e "$release/.built" ]; then
   mkdir -p "$release/source"
   git -C "$root/source.git" archive "$target" | tar -x -C "$release/source"
   if [ -d "$current/source/elixir/deps" ]; then cp -a "$current/source/elixir/deps" "$release/source/elixir/"; fi
+  # The dialyzer PLT takes minutes to build from scratch; the running release's is a good start.
+  if ls "$current"/source/elixir/_build/dev/dialyxir_* > /dev/null 2>&1; then
+    mkdir -p "$release/source/elixir/_build/dev"
+    cp -a "$current"/source/elixir/_build/dev/dialyxir_* "$release/source/elixir/_build/dev/"
+  fi
   if ! (cd "$release/source/elixir" && mise trust --quiet . &&
         machine-lease run -- mise exec -- sh -c 'mix setup && make all') > "$release/build.log" 2>&1; then
     touch "$release/.failed"
@@ -77,13 +82,14 @@ cp "$env_file" "$env_file.before-$target"
 sed -i "s|^CRESCENDO_RELEASE=.*|CRESCENDO_RELEASE=\"$release\"|" "$env_file"
 systemctl --user restart "$unit"
 
-# 5. Healthy means the state API answers with every project started; otherwise roll back.
+# 5. Healthy means the state API answers with every project's orchestrator running; otherwise roll back.
 healthy() {
   curl -fsS --max-time 10 "$state_url" | python3 -c '
 import json, sys
 state = json.load(sys.stdin)
 projects = state.get("projects") or []
-sys.exit(0 if "error" not in state and projects and all(p.get("failure") is None for p in projects) else 1)'
+started = all(p.get("started") and p.get("failure") is None for p in projects)
+sys.exit(0 if "error" not in state and projects and started else 1)'
 }
 ok=0
 for _ in $(seq 1 24); do
@@ -105,3 +111,6 @@ log "deployed $target"
 ls -1dt "$root"/releases/*/ | tail -n +6 | while read -r old; do
   if [ "${old%/}" != "$release" ]; then rm -rf "$old"; fi
 done
+
+# 7. The release's own scripts and units replace these (last, since this script is one of them).
+sh "$release/source/ops/install.sh" > /dev/null

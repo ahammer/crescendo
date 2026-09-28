@@ -94,6 +94,7 @@ defmodule SymphonyElixirWeb.Presenter do
       %{
         id: project.id,
         weight: project.weight,
+        started: is_pid(GenServer.whereis(Project.via(project.id, :orchestrator))),
         running: length(snapshot[:running] || []),
         ready: length(get_in(snapshot, [:upcoming, :ready]) || []),
         failure: failures[project.id]
