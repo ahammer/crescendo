@@ -166,7 +166,8 @@ defmodule SymphonyElixir.ServiceTest do
     assert :ok = SymphonyElixir.Governor.acquire("eta", issue.id, :issue)
     assert %{busy: 1} = SymphonyElixir.Governor.snapshot()
 
-    entry = %{pid: worker, ref: make_ref(), identifier: issue.identifier, issue: issue, started_at: DateTime.utc_now(), session_id: nil}
+    entry = %{pid: worker, ref: make_ref(), identifier: issue.identifier, issue: issue, started_at: DateTime.utc_now()}
+    entry = Map.put(entry, :session_id, nil)
     :sys.replace_state(orchestrator, fn state -> %{state | running: %{issue.id => entry}, claimed: MapSet.new([issue.id])} end)
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | state: "Closed"}])
 
