@@ -53,7 +53,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </div>
           <.live_badge />
         </div>
-        <nav :if={(@payload[:projects] || []) != []} class="project-filter" aria-label="Projects">
+        <nav :if={length(@payload[:projects] || []) > 1} class="project-filter" aria-label="Projects">
           <.link patch="/" class={["project-pill", is_nil(@payload[:project]) && "is-active"]}>All</.link>
           <.link
             :for={project <- @payload.projects}
@@ -490,8 +490,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp load_payload(project), do: Presenter.payload(project: project, orchestrator: orchestrator(), timeout: snapshot_timeout_ms())
 
-  # Lists that mix projects name each item's project.
-  defp mixed?(payload), do: (payload[:projects] || []) != [] and is_nil(payload[:project])
+  # Lists that mix projects name each item's project; one project needs neither filter nor names.
+  defp mixed?(payload), do: length(payload[:projects] || []) > 1 and is_nil(payload[:project])
   defp orchestrator, do: Endpoint.config(:orchestrator) || SymphonyElixir.Orchestrator
   defp snapshot_timeout_ms, do: Endpoint.config(:snapshot_timeout_ms) || 15_000
 
