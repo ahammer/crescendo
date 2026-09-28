@@ -65,7 +65,9 @@ running() {
 }
 mkdir -p "$state"
 date -u +%FT%TZ > "$state/drain"
+# However the script ends (even when stopped), dispatch resumes.
 trap 'rm -f "$state/drain"' EXIT
+trap 'exit 130' INT TERM
 waited=0
 while [ "$(running || echo busy)" != 0 ]; do
   if [ "$waited" -ge "$drain_limit" ]; then
