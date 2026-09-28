@@ -71,8 +71,9 @@ autopilot:
     docs: >-
       Documentation that is missing, wrong or stale: setup steps that fail when followed,
       undocumented public APIs, and examples that do not build.
-  min_issues_per_channel: 2
-  max_issues_per_channel: 4
+  # Every research run files at least three evidence-backed issues.
+  min_issues_per_channel: 3
+  max_issues_per_channel: 5
   research_route: {model: gpt-6-astra, effort: max}
   review_route: {model: gpt-6-astra, effort: medium}
   max_open_issues: 10
