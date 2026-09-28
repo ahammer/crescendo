@@ -66,8 +66,8 @@ mise exec -- elixir --version
 ## Run
 
 ```bash
-git clone https://github.com/openai/symphony
-cd symphony/elixir
+git clone https://github.com/ahammer/crescendo
+cd crescendo/elixir
 mise trust
 mise install
 mise exec -- mix setup
@@ -77,7 +77,7 @@ mise exec -- ./bin/crescendo ./WORKFLOW.md
 
 ## Burrito releases
 
-Symphony ships self-contained executables built with
+Crescendo's release workflows build self-contained executables with
 [Burrito](https://github.com/burrito-elixir/burrito). They embed Erlang/OTP, Elixir, and Symphony,
 but still expect `codex`, `git`, and the selected tracker credentials on the target machine.
 
@@ -92,12 +92,14 @@ Supported release targets:
 artifacts without creating a release.
 
 The `burrito-nightly` workflow builds each push to `main`, with no scheduled rebuilds.
-After all four platform smoke tests pass, it updates the rolling
-[`nightly` prerelease](https://github.com/openai/symphony/releases/tag/nightly),
-including binaries and checksums. Nightly binaries use a `-nightly` version suffix;
-the release notes identify the source commit. Stable releases remain unchanged.
+After all four platform smoke tests pass, it publishes a rolling `nightly` prerelease with binaries
+and checksums. Nightly binaries use a `-nightly` version suffix; the release notes identify the
+source commit. Stable releases remain unchanged.
 
-After downloading the executable for your platform from a release:
+Download a platform build from [Crescendo Releases](https://github.com/ahammer/crescendo/releases).
+If no suitable artifact is published, follow the [source build steps above](#run).
+
+After downloading a published executable for your platform:
 
 ```bash
 chmod +x ./symphony-v0.0.1-macos_arm64
@@ -537,8 +539,9 @@ actively running subagents, which is very useful during development.
 
 ### What's the easiest way to set this up for my own codebase?
 
-Launch `codex` in your repo, give it the URL to the Symphony repo, and ask it to set things up for
-you.
+Launch `codex` in your repo, give it the URL to the [Crescendo repository](https://github.com/ahammer/crescendo),
+which is based on [OpenAI's Symphony](https://github.com/openai/symphony), and ask it to set things
+up for you.
 
 ## License
 
