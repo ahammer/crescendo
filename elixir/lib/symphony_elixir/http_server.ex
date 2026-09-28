@@ -18,9 +18,10 @@ defmodule SymphonyElixir.HttpServer do
 
   @spec start_link(keyword()) :: GenServer.on_start() | :ignore
   def start_link(opts \\ []) do
-    case Keyword.get(opts, :port, Config.server_port()) do
+    # A service passes its host and port; only the single-workflow runtime reads them from WORKFLOW.md.
+    case Keyword.get_lazy(opts, :port, &Config.server_port/0) do
       port when is_integer(port) and port >= 0 ->
-        host = Keyword.get(opts, :host, Config.settings!().server.host)
+        host = Keyword.get_lazy(opts, :host, fn -> Config.settings!().server.host end)
         orchestrator = Keyword.get(opts, :orchestrator, Orchestrator)
         snapshot_timeout_ms = Keyword.get(opts, :snapshot_timeout_ms, 15_000)
 

@@ -151,6 +151,9 @@ defmodule SymphonyElixir.Config do
       :workflow_front_matter_not_a_map ->
         "Failed to parse WORKFLOW.md: workflow front matter must decode to a map"
 
+      :no_project_context ->
+        "No project context: under a service, configuration is read as one of its projects"
+
       other ->
         "Invalid WORKFLOW.md config: #{inspect(other)}"
     end

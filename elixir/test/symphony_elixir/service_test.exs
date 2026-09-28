@@ -147,6 +147,27 @@ defmodule SymphonyElixir.ServiceTest do
     assert Project.registry() == SymphonyElixir.ProjectRegistry
   end
 
+  test "under a service, a read outside any project fails instead of falling back to a file" do
+    {:ok, service} = Service.parse(%{"projects" => %{"solo" => %{}}}, "/tmp/crescendo.yml")
+    previous = Service.current()
+    :ok = Service.put_current(service)
+    :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
+
+    on_exit(fn ->
+      :persistent_term.put({Service, :current}, previous)
+      Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
+    end)
+
+    assert SymphonyElixir.WorkflowStore.settings() == {:error, :no_project_context}
+    assert_raise ArgumentError, ~r/No project context/, fn -> Config.settings!() end
+
+    # The HTTP server takes a service's host and port without reading any workflow.
+    assert {:ok, pid} = SymphonyElixir.HttpServer.start_link(host: "127.0.0.1", port: 0)
+    assert is_integer(SymphonyElixir.HttpServer.bound_port())
+    Process.unlink(pid)
+    Supervisor.stop(pid)
+  end
+
   defp assert_eventually(check, attempts \\ 50) do
     cond do
       check.() -> :ok

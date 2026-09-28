@@ -60,11 +60,12 @@ defmodule SymphonyElixir.WorkflowStore do
   defp load_legacy_file, do: load_state(Workflow.workflow_file_path(), %{})
 
   # Without a running store, the single-workflow runtime reads the file
-  # directly; a project's store must be running.
+  # directly; a project's store must be running, and under a service every
+  # configuration read must come from a project.
   defp server do
     case {Project.current(), GenServer.whereis(Project.name(:workflow_store, __MODULE__))} do
       {_project, pid} when is_pid(pid) -> {:ok, pid}
-      {nil, nil} -> :legacy_file
+      {nil, nil} -> if SymphonyElixir.Service.current(), do: {:error, :no_project_context}, else: :legacy_file
       {project, nil} -> {:error, {:project_not_running, project}}
     end
   end
