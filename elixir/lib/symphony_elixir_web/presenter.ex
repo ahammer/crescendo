@@ -5,7 +5,7 @@ defmodule SymphonyElixirWeb.Presenter do
 
   alias SymphonyElixir.{Config, Governor, Operations, Orchestrator, Project, Projects, Quota, Service}
   alias SymphonyElixir.{StatusDashboard, Transcript, Workspace}
-  alias SymphonyElixirWeb.ServiceSnapshot
+  alias SymphonyElixirWeb.{Redaction, ServiceSnapshot}
 
   # Quota older than this is shown as stale (throttling settings refine it).
   @quota_stale_ms 7_200_000
@@ -57,7 +57,11 @@ defmodule SymphonyElixirWeb.Presenter do
     |> ServiceSnapshot.merge(governor)
     |> build(service_settings(service, selected, project), service_runtime(selected, project), now, opts)
     |> Map.merge(%{project: project, projects: project_list(service, snapshots)})
+    |> Redaction.payload(redacted(service))
   end
+
+  # Private projects' work stays off the public dashboard and API.
+  defp redacted(service), do: for(project <- Service.projects(service), project.redact, into: MapSet.new(), do: project.id)
 
   defp project_snapshot(id, timeout),
     do: Project.with_project(id, fn -> Orchestrator.snapshot(Project.via(id, :orchestrator), timeout) end)
@@ -172,8 +176,15 @@ defmodule SymphonyElixirWeb.Presenter do
         ids
         |> Enum.filter(&(opts[:project] in [nil, &1]))
         |> Enum.find_value({:error, :issue_not_found}, &project_item(&1, issue_identifier, Keyword.fetch!(opts, :timeout)))
+        |> redact_item(redacted(service))
     end
   end
+
+  defp redact_item({:ok, %{project: project} = payload}, redacted) do
+    if project in redacted, do: {:ok, Redaction.item(payload)}, else: {:ok, payload}
+  end
+
+  defp redact_item(error, _redacted), do: error
 
   defp project_item(id, issue_identifier, timeout) do
     Project.with_project(id, fn ->

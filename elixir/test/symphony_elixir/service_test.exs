@@ -57,6 +57,8 @@ defmodule SymphonyElixir.ServiceTest do
   end
 
   test "service files are validated", %{root: root} do
+    path = Path.join(root, "crescendo.yml")
+
     for {yaml, message} <- [
           {"projects: {}", "projects must name at least one project"},
           {"projects: {Bad_Id: {}}", "projects ids must be"},
@@ -76,6 +78,9 @@ defmodule SymphonyElixir.ServiceTest do
     end
 
     assert {:error, "cannot read " <> _} = Service.load(Path.join(root, "missing.yml"))
+
+    # An explicit null keeps the default.
+    assert {:ok, %{project_list: [%{cap: nil, redact: false}]}} = Service.parse(%{"projects" => %{"a" => %{"cap" => nil}}}, path)
   end
 
   test "projects run side by side, each reading its own configuration", %{root: root} do

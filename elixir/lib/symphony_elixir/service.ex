@@ -11,7 +11,7 @@ defmodule SymphonyElixir.Service do
       defaults: {codex: {routing: ...}}      # merged under every project's front matter
       projects:
         metalrain: {weight: 1, research_exclusive: global}
-        nubu3d: {workflow: projects/nubu3d/WORKFLOW.md}
+        nubu3d: {workflow: projects/nubu3d/WORKFLOW.md, redact: true}
 
   A project's workflow defaults to `projects/<id>/WORKFLOW.md` next to this
   file. `throttle` and `pricing` apply service-wide; `defaults` fills in
@@ -32,7 +32,7 @@ defmodule SymphonyElixir.Service do
   defmodule Project do
     @moduledoc "One project of the service."
     @enforce_keys [:id, :workflow]
-    defstruct [:id, :workflow, :cap, weight: 1, research_exclusive: "project", enabled: true, defaults: %{}]
+    defstruct [:id, :workflow, :cap, weight: 1, research_exclusive: "project", enabled: true, redact: false, defaults: %{}]
 
     @type t :: %__MODULE__{
             id: String.t(),
@@ -41,6 +41,7 @@ defmodule SymphonyElixir.Service do
             weight: pos_integer(),
             research_exclusive: String.t(),
             enabled: boolean(),
+            redact: boolean(),
             defaults: map()
           }
   end
@@ -154,18 +155,17 @@ defmodule SymphonyElixir.Service do
   end
 
   defp valid_project?(%{} = spec) do
-    Map.keys(spec) -- ["workflow", "weight", "cap", "research_exclusive", "enabled"] == [] and
-      optional(spec["workflow"], &(is_binary(&1) and String.trim(&1) != "")) and
-      optional(spec["weight"], &(is_integer(&1) and &1 > 0)) and
-      optional(spec["cap"], &(is_integer(&1) and &1 > 0)) and
-      optional(spec["research_exclusive"], &(&1 in @exclusive)) and
-      optional(spec["enabled"], &is_boolean/1)
+    Map.keys(spec) -- ["workflow", "weight", "cap", "research_exclusive", "enabled", "redact"] == [] and
+      Enum.all?(spec, fn {key, value} -> valid_project_value?(key, value) end)
   end
 
   defp valid_project?(_spec), do: false
 
-  defp optional(nil, _check), do: true
-  defp optional(value, check), do: check.(value)
+  defp valid_project_value?(_key, nil), do: true
+  defp valid_project_value?("workflow", value), do: is_binary(value) and String.trim(value) != ""
+  defp valid_project_value?(key, value) when key in ["weight", "cap"], do: is_integer(value) and value > 0
+  defp valid_project_value?("research_exclusive", value), do: value in @exclusive
+  defp valid_project_value?(_flag, value), do: is_boolean(value)
 
   # Service pricing reaches every project (spend is priced where it is
   # recorded); relative paths resolve against the service file.
@@ -189,6 +189,7 @@ defmodule SymphonyElixir.Service do
       cap: spec["cap"],
       research_exclusive: spec["research_exclusive"] || "project",
       enabled: Map.get(spec, "enabled", true),
+      redact: Map.get(spec, "redact", false),
       defaults: defaults
     }
   end

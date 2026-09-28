@@ -17,7 +17,7 @@ defmodule SymphonyElixir.ServiceWebTest do
       write_workflow_file!(Path.join(dir, "WORKFLOW.md"), tracker_kind: "memory", tracker_excluded_labels: ["hold"])
     end
 
-    File.write!(Path.join(root, "crescendo.yml"), "paths: {state: state}\npool: {slots: 2}\nprojects: {alpha: {weight: 2}, beta: {}}")
+    File.write!(Path.join(root, "crescendo.yml"), "paths: {state: state}\npool: {slots: 2}\nprojects: {alpha: {weight: 2}, beta: {redact: true}}")
     {:ok, service} = Service.load(Path.join(root, "crescendo.yml"))
 
     # A held issue shows in the queue without starting an agent.
@@ -54,7 +54,7 @@ defmodule SymphonyElixir.ServiceWebTest do
     assert [%{"id" => "alpha", "weight" => 2, "failure" => nil}, %{"id" => "beta"}] = state["projects"]
     assert state["runtime"]["tracker"] == "2 projects"
     assert state["header"]["max_agents"] == 2
-    assert Enum.map(state["upcoming"]["waiting"], & &1["project"]) == ["alpha", "beta"]
+    assert Enum.map(state["upcoming"]["waiting"], &{&1["project"], &1["title"]}) == [{"alpha", "Held work"}, {"beta", "Private work"}]
     assert %{"service_slots" => 2, "busy" => 0} = state["throttle"]
 
     alpha = json_response(get(build_conn(), "/api/v1/state?project=alpha"), 200)

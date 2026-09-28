@@ -1,0 +1,78 @@
+defmodule SymphonyElixirWeb.Redaction do
+  @moduledoc """
+  Keeps a private project's work off the public dashboard and API.
+
+  For a project marked `redact: true` in the service file, items show only
+  what they are and how they are doing: identifiers, links back to the
+  tracker, kind, state, model, attempts, tokens and cost. Titles,
+  descriptions, labels, messages, transcripts, plans, changed files,
+  images, branches, errors and run ids are dropped.
+  """
+
+  @hidden "Private work"
+  @empty_workspace %{
+    progress: %{done: 0, total: 0},
+    plan: [],
+    plan_explanation: nil,
+    files: [],
+    latest_image: nil,
+    images: 0,
+    entries: 0,
+    now: nil,
+    said: nil
+  }
+
+  @doc "Scrubs every item of the `redacted` projects from a dashboard/state payload."
+  @spec payload(map(), MapSet.t(String.t())) :: map()
+  def payload(payload, redacted) do
+    if Enum.empty?(redacted) or Map.has_key?(payload, :error) do
+      payload
+    else
+      scrub = fn items, fun -> scrub(items, redacted, fun) end
+
+      payload
+      |> Map.update(:running, [], &scrub.(&1, fn entry -> running(entry) end))
+      |> Map.update(:retrying, [], &scrub.(&1, fn entry -> %{entry | error: nil, workspace_path: nil} end))
+      |> Map.update(:blocked, [], &scrub.(&1, fn entry -> blocked(entry) end))
+      |> update_in([:upcoming, :ready], &scrub.(&1, fn item -> %{item | title: @hidden} end))
+      |> update_in([:upcoming, :waiting], &scrub.(&1, fn item -> %{item | title: @hidden} end))
+      |> update_in([:pull_requests, :items], &scrub.(&1, fn pull -> pull(pull) end))
+      |> update_in([:usage, :activity], &scrub.(&1, fn event -> Map.delete(event, :summary) end))
+    end
+  end
+
+  defp scrub(items, redacted, fun), do: Enum.map(items || [], &scrub_item(&1, redacted, fun))
+
+  defp scrub_item(item, redacted, fun), do: if(item[:project] in redacted, do: fun.(item), else: item)
+
+  @doc "A redacted project's single-item payload: only its status."
+  @spec item(map()) :: map()
+  def item(payload), do: Map.take(payload, [:project, :issue_identifier, :issue_id, :status]) |> Map.put(:redacted, true)
+
+  defp running(entry) do
+    entry
+    |> Map.merge(%{
+      title: @hidden,
+      labels: [],
+      description: nil,
+      branch: nil,
+      workspace_path: nil,
+      session_id: nil,
+      run_id: nil,
+      last_message: nil,
+      recent_events: [],
+      pull_request: nil,
+      research: entry[:research] && Map.take(entry.research, [:channel]),
+      workspace: @empty_workspace
+    })
+    |> Map.replace(:transcript, [])
+  end
+
+  defp blocked(entry), do: %{entry | error: nil, workspace_path: nil, session_id: nil, last_message: nil}
+
+  defp pull(pull) do
+    pull
+    |> Map.put(:title, @hidden)
+    |> Map.drop([:head_ref, :author, :body])
+  end
+end

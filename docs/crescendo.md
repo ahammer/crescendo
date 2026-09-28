@@ -67,6 +67,10 @@ projects:
   - `cap`: the most slots it may hold at once.
   - `research_exclusive`: `none`, `project` (default) or `global` (see below).
   - `enabled` (default true).
+  - `redact` (default false): keep a private repository's work off the public dashboard and API.
+    Its items show only identifiers, links, kind, state, model, attempts, tokens and cost; titles,
+    descriptions, messages, transcripts, plans, files, images, branches, errors and run ids are
+    dropped.
 
 Relative paths resolve against the service file's directory.
 
