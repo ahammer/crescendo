@@ -16,8 +16,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
   @sections [{"queue", "Queue"}, {"prs", "PRs"}, {"activity", "Activity"}, {"stats", "Stats"}]
 
   @impl true
-  def mount(_params, _session, socket) do
-    {:ok, socket |> assign(:section, "queue") |> LiveRefresh.start(&load_payload/0)}
+  def mount(params, _session, socket) do
+    project = params["project"]
+    {:ok, socket |> assign(section: "queue", project: project) |> LiveRefresh.start(fn -> load_payload(project) end)}
+  end
+
+  # The project filter lives in the URL (`?project=`), so views can be shared.
+  @impl true
+  def handle_params(params, _uri, socket) do
+    case params["project"] do
+      project when project == socket.assigns.project -> {:noreply, socket}
+      project -> {:noreply, socket |> assign(:project, project) |> LiveRefresh.replace(fn -> load_payload(project) end)}
+    end
   end
 
   @impl true
@@ -43,6 +53,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </div>
           <.live_badge />
         </div>
+        <nav :if={(@payload[:projects] || []) != []} class="project-filter" aria-label="Projects">
+          <.link patch="/" class={["project-pill", is_nil(@payload[:project]) && "is-active"]}>All</.link>
+          <.link
+            :for={project <- @payload.projects}
+            patch={"/?project=#{project.id}"}
+            class={["project-pill", @payload[:project] == project.id && "is-active", project.failure && "is-failed"]}
+            title={project.failure || "#{project.running} running · #{project.ready} ready"}
+          ><%= project.id %><span :if={project.running > 0} class="tab-count"><%= project.running %></span></.link>
+        </nav>
         <div :if={!@payload[:error]} class="stats">
           <.stat
             label="Agents"
@@ -99,9 +118,16 @@ defmodule SymphonyElixirWeb.DashboardLive do
         </div>
 
         <div class="lists">
-          <.queue_section upcoming={@payload.upcoming} counts={@payload.counts} active={@section == "queue"} />
-          <.pulls_section :if={@payload.pull_requests.enabled} pulls={@payload.pull_requests} count={@payload.counts.open_prs} now={@now} active={@section == "prs"} />
-          <.activity_section usage={@payload.usage} now={@now} active={@section == "activity"} />
+          <.queue_section upcoming={@payload.upcoming} counts={@payload.counts} active={@section == "queue"} mixed={mixed?(@payload)} />
+          <.pulls_section
+            :if={@payload.pull_requests.enabled}
+            pulls={@payload.pull_requests}
+            count={@payload.counts.open_prs}
+            now={@now}
+            active={@section == "prs"}
+            mixed={mixed?(@payload)}
+          />
+          <.activity_section usage={@payload.usage} now={@now} active={@section == "activity"} mixed={mixed?(@payload)} />
         </div>
 
         <section class="dock" aria-labelledby="dock-title">
@@ -111,7 +137,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <.attention blocked={@payload.blocked} retrying={@payload.retrying} now={@now} />
           </header>
           <div class="dock-slots">
-            <.agent_card :for={entry <- @payload.running} entry={entry} now={@now} />
+            <.agent_card :for={entry <- @payload.running} entry={entry} now={@now} mixed={mixed?(@payload)} />
             <.free_slot :for={next <- free_slots(@payload)} next={next} idle={idle_reason(@payload, @now)} />
           </div>
         </section>
@@ -143,6 +169,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   attr(:entry, :map, required: true)
   attr(:now, :any, required: true)
+  attr(:mixed, :boolean, default: false)
 
   # A whole card is the way into the inspector, so it holds no other links.
   defp agent_card(assigns) do
@@ -161,9 +188,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
       )
 
     ~H"""
-    <.link navigate={"/agents/#{@entry.issue_identifier}"} class={"agent-card agent-#{@kind}"} aria-label={"Inspect #{@entry.issue_identifier}"}>
+    <.link navigate={agent_path(@entry)} class={"agent-card agent-#{@kind}"} aria-label={"Inspect #{@entry.issue_identifier}"}>
       <div class="card-top">
         <span class={"kind-chip kind-#{@kind}"}><%= kind_label(@kind) %></span>
+        <.project_chip :if={@mixed} project={@entry[:project]} />
         <span class="card-id"><%= @entry.issue_identifier %></span>
         <span :if={(@entry[:item_attempt] || 1) > 1 or @entry[:final_attempt]} class={if @entry[:final_attempt], do: "status-tag status-critical", else: "status-tag status-warning"}>
           Attempt <%= @entry[:item_attempt] || 1 %><%= if @entry[:final_attempt], do: " · final" %>
@@ -230,6 +258,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   attr(:upcoming, :map, required: true)
   attr(:counts, :map, required: true)
   attr(:active, :boolean, default: false)
+  attr(:mixed, :boolean, default: false)
 
   defp queue_section(assigns) do
     ~H"""
@@ -245,13 +274,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <ul class="rows">
           <li :for={issue <- Enum.take(@upcoming.ready, 25)} class="row">
             <.issue_identifier identifier={issue.issue_identifier} url={issue.issue_url} />
-            <span class="row-title" title={issue.title}><%= issue.title %></span>
+            <span class="row-title" title={issue.title}><.project_chip :if={@mixed} project={issue[:project]} /><%= issue.title %></span>
             <span class="row-meta numeric" title="Estimated from recent run times of similar work"><%= eta(issue[:eta_seconds]) %></span>
             <span class="row-state"><span class="dot dot-good" aria-hidden="true"></span>Ready</span>
           </li>
           <li :for={issue <- Enum.take(@upcoming.waiting, 25)} class="row row-waiting">
             <.issue_identifier identifier={issue.issue_identifier} url={issue.issue_url} />
-            <span class="row-title" title={issue.title}><%= issue.title %></span>
+            <span class="row-title" title={issue.title}><.project_chip :if={@mixed} project={issue[:project]} /><%= issue.title %></span>
             <span class="row-meta">—</span>
             <span class="row-state" title={waiting_title(issue)}><span class="dot dot-warning" aria-hidden="true"></span><%= waiting_label(issue.reason) %></span>
           </li>
@@ -265,6 +294,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   attr(:count, :integer, required: true)
   attr(:now, :any, required: true)
   attr(:active, :boolean, default: false)
+  attr(:mixed, :boolean, default: false)
 
   defp pulls_section(assigns) do
     ~H"""
@@ -280,7 +310,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <ul class="rows">
           <li :for={pull <- recent_pulls(@pulls.items)} class="row">
             <a class="issue-id issue-id-link" href={external_url(pull.url)} target="_blank" rel="noopener noreferrer">#<%= pull.number %></a>
-            <span class="row-title" title={pull.title}><%= pull.title %></span>
+            <span class="row-title" title={pull.title}><.project_chip :if={@mixed} project={pull[:project]} /><%= pull.title %></span>
             <span class="row-meta numeric" title={pull[:updated_at]}><%= compact_ago(pull[:updated_at], @now) %></span>
             <span class="row-state"><span class={["ring", !pull.draft && "ring-open"]} aria-hidden="true"></span><%= if pull.draft, do: "Draft", else: "Open" %></span>
           </li>
@@ -293,6 +323,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   attr(:usage, :map, required: true)
   attr(:now, :any, required: true)
   attr(:active, :boolean, default: false)
+  attr(:mixed, :boolean, default: false)
 
   defp activity_section(assigns) do
     ~H"""
@@ -306,7 +337,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <ul class="rows">
           <li :for={event <- activity(@usage)} class="row row-event">
             <time class="row-meta numeric" datetime={event.at} title={event.at}><%= compact_ago(event.at, @now) %></time>
-            <span class="row-title" title={Map.get(event, :summary)}><span class={"dot dot-#{event_tone(event.kind)}"} aria-hidden="true"></span><%= event_text(event) %></span>
+            <span class="row-title" title={Map.get(event, :summary)}>
+              <span class={"dot dot-#{event_tone(event.kind)}"} aria-hidden="true"></span><.project_chip :if={@mixed} project={event[:project]} /><%= event_text(event) %>
+            </span>
             <%= cond do %>
               <% Map.get(event, :issue_identifier) -> %>
                 <.issue_identifier identifier={event.issue_identifier} url={Map.get(event, :issue_url)} />
@@ -418,6 +451,16 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </tr>
         </tbody>
       </table>
+      <table :if={length(@usage[:by_project] || []) > 1} class="spend-table">
+        <thead><tr><th scope="col">Project</th><th scope="col">Today</th><th scope="col">14 days</th></tr></thead>
+        <tbody>
+          <tr :for={row <- Enum.sort_by(@usage.by_project, & &1.today_usd_micro, :desc)}>
+            <th scope="row"><%= row.project %></th>
+            <td class="numeric"><%= format_usd(row.today_usd_micro) %></td>
+            <td class="numeric"><%= format_usd(row.days_usd_micro) %></td>
+          </tr>
+        </tbody>
+      </table>
     </section>
     """
   end
@@ -445,7 +488,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
     """
   end
 
-  defp load_payload, do: Presenter.state_payload(orchestrator(), snapshot_timeout_ms())
+  defp load_payload(project), do: Presenter.payload(project: project, orchestrator: orchestrator(), timeout: snapshot_timeout_ms())
+
+  # Lists that mix projects name each item's project.
+  defp mixed?(payload), do: (payload[:projects] || []) != [] and is_nil(payload[:project])
   defp orchestrator, do: Endpoint.config(:orchestrator) || SymphonyElixir.Orchestrator
   defp snapshot_timeout_ms, do: Endpoint.config(:snapshot_timeout_ms) || 15_000
 

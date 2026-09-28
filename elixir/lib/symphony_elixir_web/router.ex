@@ -28,17 +28,19 @@ defmodule SymphonyElixirWeb.Router do
 
     live("/", DashboardLive, :index)
     live("/agents/:id", AgentLive, :show)
+    live("/agents/:project/:id", AgentLive, :show)
   end
 
   scope "/", SymphonyElixirWeb do
     get("/api/v1/state", ObservabilityApiController, :state)
 
+    # Read-only: the dashboard is served publicly, so nothing here changes state.
     match(:*, "/", ObservabilityApiController, :method_not_allowed)
     match(:*, "/api/v1/state", ObservabilityApiController, :method_not_allowed)
-    post("/api/v1/refresh", ObservabilityApiController, :refresh)
-    match(:*, "/api/v1/refresh", ObservabilityApiController, :method_not_allowed)
     get("/api/v1/:issue_identifier", ObservabilityApiController, :issue)
     match(:*, "/api/v1/:issue_identifier", ObservabilityApiController, :method_not_allowed)
+    get("/api/v1/:project/:issue_identifier", ObservabilityApiController, :issue)
+    match(:*, "/api/v1/:project/:issue_identifier", ObservabilityApiController, :method_not_allowed)
     match(:*, "/*path", ObservabilityApiController, :not_found)
   end
 end

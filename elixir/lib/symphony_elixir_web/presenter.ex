@@ -3,7 +3,9 @@ defmodule SymphonyElixirWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias SymphonyElixir.{Config, Operations, Orchestrator, Quota, StatusDashboard, Transcript, Workspace}
+  alias SymphonyElixir.{Config, Governor, Operations, Orchestrator, Project, Projects, Quota, Service}
+  alias SymphonyElixir.{StatusDashboard, Transcript, Workspace}
+  alias SymphonyElixirWeb.ServiceSnapshot
 
   # Quota older than this is shown as stale (throttling settings refine it).
   @quota_stale_ms 7_200_000
@@ -17,52 +19,121 @@ defmodule SymphonyElixirWeb.Presenter do
   @spec state_payload(GenServer.name(), timeout(), keyword()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms, opts \\ []) do
     now = DateTime.utc_now()
-    generated_at = now |> DateTime.truncate(:second) |> DateTime.to_iso8601()
-    transcripts = Keyword.get(opts, :transcripts, false)
 
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
       %{} = snapshot ->
-        settings = settings()
-        usage = usage_payload(snapshot, settings)
-
-        counts = %{
-          running: length(snapshot.running),
-          retrying: length(snapshot.retrying),
-          blocked: length(Map.get(snapshot, :blocked, [])),
-          ready: length(get_in(snapshot, [:upcoming, :ready]) || []),
-          waiting: length(get_in(snapshot, [:upcoming, :waiting]) || []),
-          open_prs: length(get_in(snapshot, [:pull_requests, :items]) || [])
-        }
-
-        %{
-          generated_at: generated_at,
-          counts: counts,
-          running: Enum.map(snapshot.running, &running_entry_payload(&1, transcripts)),
-          retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
-          blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
-          codex_totals: snapshot.codex_totals,
-          rate_limits: snapshot.rate_limits,
-          quota: quota_payload(Map.get(snapshot, :quota), now),
-          throttle: throttle_payload(Map.get(snapshot, :throttle)),
-          usage: usage,
-          usage_error: Map.get(snapshot, :operations_error),
-          upcoming: upcoming_payload(Map.get(snapshot, :upcoming), usage, settings),
-          autopilot: Map.get(snapshot, :autopilot) || %{enabled: false},
-          polling: Map.get(snapshot, :polling),
-          runtime: runtime_context(),
-          pull_requests: pulls_payload(Map.get(snapshot, :pull_requests)),
-          header: header_payload(snapshot, usage, settings, counts),
-          history: history_payload(usage),
-          health: health_payload(snapshot, usage, settings, now),
-          run_stats: run_stats(usage)
-        }
+        build(snapshot, settings(), runtime_context(), now, opts)
 
       :timeout ->
-        %{generated_at: generated_at, error: %{code: "snapshot_timeout", message: "Snapshot timed out"}}
+        %{generated_at: generated_at(now), error: %{code: "snapshot_timeout", message: "Snapshot timed out"}}
 
       :unavailable ->
-        %{generated_at: generated_at, error: %{code: "snapshot_unavailable", message: "Snapshot unavailable"}}
+        %{generated_at: generated_at(now), error: %{code: "snapshot_unavailable", message: "Snapshot unavailable"}}
     end
+  end
+
+  @doc """
+  The dashboard and state API payload wherever it runs: the single-workflow
+  runtime's orchestrator (`orchestrator:`), or under a service every project
+  merged, or only `project:`, with the service's projects for filtering.
+  """
+  @spec payload(keyword()) :: map()
+  def payload(opts) do
+    case Service.current() do
+      nil -> state_payload(Keyword.fetch!(opts, :orchestrator), Keyword.fetch!(opts, :timeout), opts)
+      service -> service_payload(service, opts)
+    end
+  end
+
+  defp service_payload(service, opts) do
+    now = DateTime.utc_now()
+    ids = service |> Service.projects() |> Enum.map(& &1.id)
+    project = if opts[:project] in ids, do: opts[:project]
+    selected = if project, do: [project], else: ids
+    snapshots = for id <- selected, %{} = snapshot <- [project_snapshot(id, Keyword.fetch!(opts, :timeout))], do: {id, snapshot}
+    governor = if Governor.running?(), do: Governor.snapshot()
+
+    snapshots
+    |> ServiceSnapshot.merge(governor)
+    |> build(service_settings(service, selected, project), service_runtime(selected, project), now, opts)
+    |> Map.merge(%{project: project, projects: project_list(service, snapshots)})
+  end
+
+  defp project_snapshot(id, timeout),
+    do: Project.with_project(id, fn -> Orchestrator.snapshot(Project.via(id, :orchestrator), timeout) end)
+
+  # A service view of the settings: its slots (or one project's share), budget and pricing.
+  defp service_settings(service, [first | _], project) do
+    case Project.with_project(first, &Config.settings/0) do
+      {:ok, settings} ->
+        slots = if project, do: min(settings.agent.max_concurrent_agents, service.slots), else: service.slots
+        %{settings | agent: %{settings.agent | max_concurrent_agents: slots}, throttle: service.throttle, pricing: service.pricing}
+
+      {:error, _reason} ->
+        nil
+    end
+  end
+
+  defp service_settings(_service, [], _project), do: nil
+
+  defp service_runtime([id], id), do: Project.with_project(id, &runtime_context/0)
+  defp service_runtime([_id], _project), do: %{tracker: "1 project", max_turns: nil}
+  defp service_runtime(ids, _project), do: %{tracker: "#{length(ids)} projects", max_turns: nil}
+
+  defp project_list(service, snapshots) do
+    failures = Projects.failures()
+    by_id = Map.new(snapshots)
+
+    for project <- Service.projects(service) do
+      snapshot = by_id[project.id] || %{}
+
+      %{
+        id: project.id,
+        weight: project.weight,
+        running: length(snapshot[:running] || []),
+        ready: length(get_in(snapshot, [:upcoming, :ready]) || []),
+        failure: failures[project.id]
+      }
+    end
+  end
+
+  defp generated_at(now), do: now |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+  defp build(snapshot, settings, runtime, now, opts) do
+    transcripts = Keyword.get(opts, :transcripts, false)
+    usage = usage_payload(snapshot, settings)
+
+    counts = %{
+      running: length(snapshot.running),
+      retrying: length(snapshot.retrying),
+      blocked: length(Map.get(snapshot, :blocked, [])),
+      ready: length(get_in(snapshot, [:upcoming, :ready]) || []),
+      waiting: length(get_in(snapshot, [:upcoming, :waiting]) || []),
+      open_prs: length(get_in(snapshot, [:pull_requests, :items]) || [])
+    }
+
+    %{
+      generated_at: generated_at(now),
+      counts: counts,
+      running: Enum.map(snapshot.running, &running_entry_payload(&1, transcripts)),
+      retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
+      blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
+      codex_totals: snapshot.codex_totals,
+      rate_limits: snapshot.rate_limits,
+      quota: quota_payload(Map.get(snapshot, :quota), now),
+      throttle: throttle_payload(Map.get(snapshot, :throttle)),
+      usage: usage,
+      usage_error: Map.get(snapshot, :operations_error),
+      upcoming: upcoming_payload(Map.get(snapshot, :upcoming), usage, settings),
+      autopilot: Map.get(snapshot, :autopilot) || %{enabled: false},
+      polling: Map.get(snapshot, :polling),
+      runtime: runtime,
+      pull_requests: pulls_payload(Map.get(snapshot, :pull_requests)),
+      header: header_payload(snapshot, usage, settings, counts),
+      history: history_payload(usage),
+      health: health_payload(snapshot, usage, settings, now),
+      run_stats: run_stats(usage)
+    }
   end
 
   @spec issue_payload(String.t(), GenServer.name(), timeout()) :: {:ok, map()} | {:error, :issue_not_found}
@@ -84,15 +155,33 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
-  @spec refresh_payload(GenServer.name()) :: {:ok, map()} | {:error, :unavailable}
-  def refresh_payload(orchestrator) do
-    case Orchestrator.request_refresh(orchestrator) do
-      :unavailable ->
-        {:error, :unavailable}
+  @doc """
+  One work item's payload wherever it runs: the single-workflow runtime's
+  orchestrator, or under a service the given project (or the first project
+  that has it).
+  """
+  @spec item_payload(String.t(), keyword()) :: {:ok, map()} | {:error, :issue_not_found}
+  def item_payload(issue_identifier, opts) do
+    case Service.current() do
+      nil ->
+        issue_payload(issue_identifier, Keyword.fetch!(opts, :orchestrator), Keyword.fetch!(opts, :timeout))
 
-      payload ->
-        {:ok, Map.update!(payload, :requested_at, &DateTime.to_iso8601/1)}
+      service ->
+        ids = service |> Service.projects() |> Enum.map(& &1.id)
+
+        ids
+        |> Enum.filter(&(opts[:project] in [nil, &1]))
+        |> Enum.find_value({:error, :issue_not_found}, &project_item(&1, issue_identifier, Keyword.fetch!(opts, :timeout)))
     end
+  end
+
+  defp project_item(id, issue_identifier, timeout) do
+    Project.with_project(id, fn ->
+      case issue_payload(issue_identifier, Project.via(id, :orchestrator), timeout) do
+        {:ok, payload} -> {:ok, Map.put(payload, :project, id)}
+        {:error, :issue_not_found} -> nil
+      end
+    end)
   end
 
   # Static context the dashboard shows beside live state: which tracker scope
@@ -174,6 +263,7 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp running_entry_payload(entry) do
     %{
+      project: Map.get(entry, :project),
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       issue_url: Map.get(entry, :issue_url),
@@ -209,6 +299,7 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp retry_entry_payload(entry) do
     %{
+      project: Map.get(entry, :project),
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       issue_url: Map.get(entry, :issue_url),
@@ -222,6 +313,7 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp blocked_entry_payload(entry) do
     %{
+      project: Map.get(entry, :project),
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       issue_url: Map.get(entry, :issue_url),
@@ -392,7 +484,10 @@ defmodule SymphonyElixirWeb.Presenter do
       over_budget: throttle.over_budget,
       paused: throttle.paused,
       allow: throttle.allow,
-      avoid: throttle.avoid |> Enum.sort() |> Enum.map(fn {model, reason} -> %{model: model, reason: reason} end)
+      avoid: throttle.avoid |> Enum.sort() |> Enum.map(fn {model, reason} -> %{model: model, reason: reason} end),
+      # A service's shared slots (absent for a single workflow).
+      service_slots: throttle[:service_slots],
+      busy: throttle[:busy]
     }
   end
 

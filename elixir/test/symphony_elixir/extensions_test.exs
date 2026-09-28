@@ -251,7 +251,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     "said" => nil
   }
 
-  test "phoenix observability api preserves state, issue, and refresh responses" do
+  test "phoenix observability api preserves state and issue responses and serves no writes" do
     snapshot = static_snapshot()
     orchestrator_name = Module.concat(__MODULE__, :ObservabilityApiOrchestrator)
 
@@ -277,6 +277,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              "counts" => %{"running" => 1, "retrying" => 1, "blocked" => 1, "ready" => 0, "waiting" => 0, "open_prs" => 0},
              "running" => [
                %{
+                 "project" => nil,
                  "issue_id" => "issue-http",
                  "issue_identifier" => "MT-HTTP",
                  "issue_url" => "https://example.org/issues/MT-HTTP",
@@ -310,6 +311,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              ],
              "retrying" => [
                %{
+                 "project" => nil,
                  "issue_id" => "issue-retry",
                  "issue_identifier" => "MT-RETRY",
                  "issue_url" => "https://example.org/issues/MT-RETRY",
@@ -322,6 +324,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              ],
              "blocked" => [
                %{
+                 "project" => nil,
                  "issue_id" => "issue-blocked",
                  "issue_identifier" => "MT-BLOCKED",
                  "issue_url" => "https://example.org/issues/MT-BLOCKED",
@@ -444,10 +447,9 @@ defmodule SymphonyElixir.ExtensionsTest do
              "error" => %{"code" => "issue_not_found", "message" => "Issue not found"}
            }
 
-    conn = post(build_conn(), "/api/v1/refresh", %{})
-
-    assert %{"queued" => true, "coalesced" => false, "operations" => ["poll", "reconcile"]} =
-             json_response(conn, 202)
+    # The API is read-only: nothing reachable over HTTP changes state.
+    assert json_response(post(build_conn(), "/api/v1/refresh", %{}), 405) ==
+             %{"error" => %{"code" => "method_not_allowed", "message" => "Method not allowed"}}
   end
 
   test "phoenix observability api preserves 405, 404, and unavailable behavior" do
@@ -457,7 +459,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert json_response(post(build_conn(), "/api/v1/state", %{}), 405) ==
              %{"error" => %{"code" => "method_not_allowed", "message" => "Method not allowed"}}
 
-    assert json_response(get(build_conn(), "/api/v1/refresh"), 405) ==
+    assert json_response(post(build_conn(), "/api/v1/metalrain/MT-1", %{}), 405) ==
              %{"error" => %{"code" => "method_not_allowed", "message" => "Method not allowed"}}
 
     assert json_response(post(build_conn(), "/", %{}), 405) ==
@@ -475,14 +477,6 @@ defmodule SymphonyElixir.ExtensionsTest do
              %{
                "generated_at" => state_payload["generated_at"],
                "error" => %{"code" => "snapshot_unavailable", "message" => "Snapshot unavailable"}
-             }
-
-    assert json_response(post(build_conn(), "/api/v1/refresh", %{}), 503) ==
-             %{
-               "error" => %{
-                 "code" => "orchestrator_unavailable",
-                 "message" => "Orchestrator is unavailable"
-               }
              }
   end
 
@@ -1033,8 +1027,7 @@ defmodule SymphonyElixir.ExtensionsTest do
         body: ""
       )
 
-    assert refresh_response.status == 202
-    assert refresh_response.body["queued"] == true
+    assert refresh_response.status == 405
 
     method_not_allowed_response =
       Req.post!("http://127.0.0.1:#{port}/api/v1/state",

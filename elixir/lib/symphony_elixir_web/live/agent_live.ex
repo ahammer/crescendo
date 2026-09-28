@@ -13,10 +13,14 @@ defmodule SymphonyElixirWeb.AgentLive do
   alias SymphonyElixirWeb.{Endpoint, LiveRefresh, Presenter, TranscriptComponents}
 
   @impl true
-  def mount(%{"id" => id}, _session, socket) do
+  def mount(%{"id" => id} = params, _session, socket) do
+    project = params["project"]
+
+    # Every project loads so the other agents stay one tap away; the agent
+    # itself is matched by project and identifier.
     socket =
       socket
-      |> assign(id: id, pane: "chat", agent: nil, ended: false)
+      |> assign(id: id, project: project, pane: "chat", agent: nil, ended: false)
       |> LiveRefresh.start(fn -> load_payload(id) end)
       |> track_agent()
 
@@ -31,8 +35,8 @@ defmodule SymphonyElixirWeb.AgentLive do
 
   # The agent stays on screen after its run ends, marked as ended; a snapshot
   # that failed to load says nothing about the run, so it changes nothing.
-  defp track_agent(%{assigns: %{payload: %{running: running}, id: id}} = socket) do
-    case Enum.find(running, &(&1.issue_identifier == id)) do
+  defp track_agent(%{assigns: %{payload: %{running: running}, id: id, project: project}} = socket) do
+    case Enum.find(running, &(&1.issue_identifier == id and project in [nil, &1[:project]])) do
       nil -> assign(socket, :ended, not is_nil(socket.assigns.agent))
       agent -> assign(socket, agent: agent, ended: false)
     end
@@ -42,7 +46,7 @@ defmodule SymphonyElixirWeb.AgentLive do
 
   @impl true
   def render(assigns) do
-    assigns = assign(assigns, :others, others(assigns.payload, assigns.id))
+    assigns = assign(assigns, :others, others(assigns.payload, assigns))
 
     ~H"""
     <section class="inspector">
@@ -54,7 +58,7 @@ defmodule SymphonyElixirWeb.AgentLive do
           <span :if={@agent && !@ended} class="insp-runtime numeric"><%= format_runtime(runtime_seconds(@agent.started_at, @now)) %></span>
         </div>
         <nav :if={@others != []} class="insp-others" aria-label="Other running agents">
-          <.link :for={other <- @others} navigate={"/agents/#{other.issue_identifier}"} class="other-pill">
+          <.link :for={other <- @others} navigate={agent_path(other)} class="other-pill">
             <span class={"tab-dot kind-dot-#{kind_name(other)}"} aria-hidden="true"></span><%= other.issue_identifier %>
           </.link>
         </nav>
@@ -229,10 +233,12 @@ defmodule SymphonyElixirWeb.AgentLive do
     ]
   end
 
-  defp others(%{running: running}, id), do: Enum.reject(running, &(&1.issue_identifier == id))
-  defp others(_payload, _id), do: []
+  defp others(%{running: running}, %{id: id, project: project}),
+    do: Enum.reject(running, &(&1.issue_identifier == id and project in [nil, &1[:project]]))
 
-  defp load_payload(id), do: Presenter.state_payload(orchestrator(), snapshot_timeout_ms(), transcripts: id)
+  defp others(_payload, _assigns), do: []
+
+  defp load_payload(id), do: Presenter.payload(transcripts: id, orchestrator: orchestrator(), timeout: snapshot_timeout_ms())
   defp orchestrator, do: Endpoint.config(:orchestrator) || SymphonyElixir.Orchestrator
   defp snapshot_timeout_ms, do: Endpoint.config(:snapshot_timeout_ms) || 15_000
 end

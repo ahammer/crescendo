@@ -9,31 +9,20 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
   alias SymphonyElixirWeb.{Endpoint, Presenter}
 
   @spec state(Conn.t(), map()) :: Conn.t()
-  def state(conn, _params) do
-    json(conn, Presenter.state_payload(orchestrator(), snapshot_timeout_ms()))
+  def state(conn, params) do
+    json(conn, Presenter.payload(project: params["project"], orchestrator: orchestrator(), timeout: snapshot_timeout_ms()))
   end
 
   @spec issue(Conn.t(), map()) :: Conn.t()
-  def issue(conn, %{"issue_identifier" => issue_identifier}) do
-    case Presenter.issue_payload(issue_identifier, orchestrator(), snapshot_timeout_ms()) do
+  def issue(conn, %{"issue_identifier" => issue_identifier} = params) do
+    opts = [project: params["project"], orchestrator: orchestrator(), timeout: snapshot_timeout_ms()]
+
+    case Presenter.item_payload(issue_identifier, opts) do
       {:ok, payload} ->
         json(conn, payload)
 
       {:error, :issue_not_found} ->
         error_response(conn, 404, "issue_not_found", "Issue not found")
-    end
-  end
-
-  @spec refresh(Conn.t(), map()) :: Conn.t()
-  def refresh(conn, _params) do
-    case Presenter.refresh_payload(orchestrator()) do
-      {:ok, payload} ->
-        conn
-        |> put_status(202)
-        |> json(payload)
-
-      {:error, :unavailable} ->
-        error_response(conn, 503, "orchestrator_unavailable", "Orchestrator is unavailable")
     end
   end
 

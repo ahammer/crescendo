@@ -26,6 +26,10 @@ defmodule SymphonyElixirWeb.LiveRefresh do
     socket
   end
 
+  @doc "Swaps the loader (for example when a filter changes) and reloads now."
+  @spec replace(LiveView.Socket.t(), (-> map())) :: LiveView.Socket.t()
+  def replace(socket, load), do: socket |> assign(:load, load) |> reload()
+
   @doc "Handles the tick, update and deferred-reload messages `start/2` sets up."
   @spec handle_info(term(), LiveView.Socket.t()) :: LiveView.Socket.t()
   def handle_info(:runtime_tick, socket) do

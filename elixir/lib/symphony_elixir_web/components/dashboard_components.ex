@@ -121,6 +121,21 @@ defmodule SymphonyElixirWeb.DashboardComponents do
     |> Enum.take(8)
   end
 
+  @doc "Where an agent's inspector lives: under its project when the service runs several."
+  @spec agent_path(map()) :: String.t()
+  def agent_path(%{project: project, issue_identifier: id}) when is_binary(project), do: "/agents/#{project}/#{id}"
+  def agent_path(%{issue_identifier: id}), do: "/agents/#{id}"
+
+  attr(:project, :any, default: nil)
+
+  @doc "Names an item's project in lists that mix projects."
+  @spec project_chip(map()) :: Phoenix.LiveView.Rendered.t()
+  def project_chip(assigns) do
+    ~H"""
+    <span :if={@project} class="project-chip"><%= @project %></span>
+    """
+  end
+
   @spec route_model(map()) :: String.t()
   def route_model(%{route: %{model: model}}) when is_binary(model), do: model
   def route_model(entry), do: entry[:model] || "pending"
