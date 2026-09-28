@@ -1,0 +1,147 @@
+---
+# <%= @id %>: <%= @repo %>. Local Crescendo project config; see docs/crescendo.md.
+labels:
+  prefix: <%= @prefix %>
+tracker:
+  kind: github
+  provider:
+    repo: <%= @repo %>
+    token: $GITHUB_TOKEN
+  required_labels: ["<%= @prefix %>:ready"]
+  # `<%= @prefix %>:blocked` (autopilot.blocked_label) is excluded automatically.
+  excluded_labels: ["<%= @prefix %>:hold", "<%= @prefix %>:in-review"]
+  active_states: [open]
+  terminal_states: [closed]
+polling:
+  interval_ms: 30000
+workspace:
+  root: ~/.local/share/crescendo/workspaces/<%= @id %>
+hooks:
+  timeout_ms: 1800000
+  after_create: |
+    set -eu
+    git clone --filter=blob:none git@github.com:<%= @repo %>.git .
+    git checkout <%= @base_branch %>
+  before_run: |
+    set -eu
+    git fetch --prune origin
+agent:
+  max_concurrent_agents: 2
+  max_turns: 20
+  max_attempts: 3
+codex:
+  # Toolchains the project needs go in front of codex, e.g. `mise exec java@21 -- codex ...`,
+  # so the agent and everything it runs have them on PATH.
+  command: <%= @codex_command %>
+  routing:
+    # Cheapest to strongest; failed attempts climb (sol medium, sol xhigh, astra max).
+    # luna max only starts issues sized tiny or small.
+    ladder:
+      - {model: "gpt-6-luna", effort: "max"}
+      - {model: "gpt-6-sol", effort: "medium"}
+      - {model: "gpt-6-sol", effort: "xhigh"}
+      - {model: "gpt-6-astra", effort: "medium"}
+      - {model: "gpt-6-astra", effort: "max"}
+    escalation: [0, 1, 3]
+    default: {model: "gpt-6-sol", effort: "medium"}
+    sizes:
+      tiny: {model: "gpt-6-luna", effort: "max"}
+      small: {model: "gpt-6-luna", effort: "max"}
+    effort_floor: {gpt-6-luna: max}
+    labels:
+      "<%= @prefix %>:model:sol": {model: "gpt-6-sol", effort: "medium"}
+      "<%= @prefix %>:model:astra": {model: "gpt-6-astra", effort: "medium"}
+  approval_policy: never
+  thread_sandbox: danger-full-access
+  turn_sandbox_policy:
+    type: dangerFullAccess
+autopilot:
+  enabled: true
+  channels:
+    testing: >-
+      Behavior the tests do not prove, found by running the suite: failing, flaky or slow tests,
+      untested modules and edge cases, and promises in the README that no test checks.
+    qa: >-
+      User-visible defects found by building and using the product as a user would (its Linux
+      desktop target when it has one, otherwise its CLI or library API): crashes, wrong results,
+      confusing flows, and documented examples that do not work.
+    cleanup: >-
+      Code quality found by reading and running the code: dead or duplicated code, unclear names,
+      inconsistent APIs, error handling that hides failures, and stale dependencies.
+    docs: >-
+      Documentation that is missing, wrong or stale: setup steps that fail when followed,
+      undocumented public APIs, and examples that do not build.
+  min_issues_per_channel: 2
+  max_issues_per_channel: 4
+  research_route: {model: gpt-6-astra, effort: max}
+  review_route: {model: gpt-6-astra, effort: medium}
+  max_open_issues: 10
+  research_cooldown_ms: 1800000
+  max_pr_runs: 5
+  pr_recheck_ms: 3600000
+  max_item_attempts: 3
+  trusted_associations: [OWNER, MEMBER, COLLABORATOR]
+  trusted_authors: [<%= @owner %>]
+  prompts:
+    pull_request: prompts/pull_request.md
+    research: prompts/research.md
+---
+
+You own GitHub issue {{ issue.identifier }} in `<%= @repo %>` through delivery. This is an unattended,
+trusted session in an isolated clone of the repository. Only an open issue carrying `<%= @prefix %>:ready`
+authorizes work. Read `README.md`, `AGENTS.md` and `CONTRIBUTING.md` when they exist, and follow the
+repository's own conventions.
+
+This is attempt {{ item_attempt }} of 3. Nothing is parked: an attempt either advances delivery or ends
+blocked and is retried later behind other work.
+
+Issue: {{ issue.url }}
+Title: {{ issue.title }}
+Description:
+{{ issue.description }}
+
+{% if attempt %}
+Continuation or retry {{ attempt }}: start from what the repository, the open pull request and the workpad
+already show instead of from scratch.
+{% endif %}
+
+## Workpad
+
+Keep one issue comment headed `Crescendo workpad` up to date: the plan, what you verified with which
+commands, and any blocker. Create it on your first attempt and edit it afterwards; never post a second one.
+
+## Deliver
+
+1. Work on a branch named `crescendo/{{ issue.id }}-<short-slug>` from `<%= @base_branch %>`. Reuse the
+   branch and pull request from an earlier attempt when they exist.
+2. Reproduce or confirm the problem first, then make the smallest change that fully solves the issue,
+   with tests that prove it.
+3. Run the checks the repository's CI runs (see `.github/workflows/`), plus focused tests for your change.
+   Builds, test suites, emulators and desktop apps take the machine lease: run them as
+   `machine-lease run -- <command>`. Waiting for the lease is normal; do not kill a waiting command.
+4. Open a pull request against `<%= @base_branch %>` whose body says `Closes #{{ issue.id }}` and lists
+   the evidence (commands and results). Then add the label `<%= @prefix %>:in-review` to the issue and stop:
+   a reviewer run reviews, fixes and merges the pull request once CI is green.
+
+Keep scratch files inside the workspace under `.scratch/` (never commit it) and delete them before you
+finish. Stop every process you started.
+
+## Blocked attempts
+
+{% if final_attempt %}
+**This is the final attempt; the issue will not be retried.** Resolve it now, in order of preference:
+
+1. Deliver it in full as above.
+2. Split and deliver: file a new issue (labels `<%= @prefix %>:ready` and this issue's
+   `<%= @prefix %>:channel:*` label, if any) holding each unmet criterion with its evidence and blocker,
+   and deliver the part you verified.
+3. Close as won't fix: close your pull request with the reason, then close the issue as not planned,
+   linking the evidence.
+
+Never end this attempt blocked.
+{% else %}
+If a real external blocker or three unsuccessful repair rounds stop you, record the blocker, what you
+tried and what the next attempt should do differently in the workpad. Keep the branch, the pull request
+and `<%= @prefix %>:ready`, then add `<%= @prefix %>:blocked` to the issue as your very last action.
+Crescendo records the failed attempt, clears the label and retries the issue later.
+{% endif %}

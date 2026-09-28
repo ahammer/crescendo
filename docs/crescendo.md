@@ -32,6 +32,25 @@ Project workflows and their prompt files hot-reload as before. Adding, removing 
 project, or changing the service file, needs a service restart. A project whose workflow cannot
 load is reported on the dashboard (its filter pill is marked) and the other projects still run.
 
+## Commands
+
+These change local files, or a project's own repository through your `gh` login, never the
+running service:
+
+```bash
+crescendo project add ~/.config/crescendo/crescendo.yml nubu3d ahammer/Nubu3D [--branch main] [--prefix crescendo] [--tools node@22,rust@1.82]
+crescendo labels sync ~/.config/crescendo/crescendo.yml [nubu3d]
+crescendo drain on|off ~/.config/crescendo/crescendo.yml
+```
+
+- `project add` writes `projects/<id>/` (a `WORKFLOW.md`, a pull request review prompt and a research
+  prompt) from the built-in templates. It never overwrites, and it prints the line to add under
+  `projects:`. `--tools` puts mise tools in front of Codex, so the agent and everything it runs
+  have them.
+- `labels sync` creates every label a project's workflow uses that its repository lacks: ready,
+  hold, in-review, blocked, one per research channel, sizes and model routes.
+- `drain on` stops new runs; running work finishes. `drain off` releases it.
+
 ## `crescendo.yml`
 
 ```yaml

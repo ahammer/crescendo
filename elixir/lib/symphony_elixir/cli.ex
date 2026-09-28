@@ -26,6 +26,23 @@ defmodule SymphonyElixir.CLI do
   @doc false
   @spec main([String.t()], (-> ensure_started_result())) :: no_return()
   def main(args, ensure_all_started) do
+    case SymphonyElixir.Commands.run(args, &gh/1) do
+      :not_a_command ->
+        start(args, ensure_all_started)
+
+      :ok ->
+        System.halt(0)
+
+      {:error, message} ->
+        IO.puts(:stderr, message)
+        System.halt(1)
+    end
+  end
+
+  defp gh(args), do: System.cmd("gh", args, stderr_to_stdout: true)
+
+  @spec start([String.t()], (-> ensure_started_result())) :: no_return()
+  defp start(args, ensure_all_started) do
     case evaluate(args, runtime_deps(ensure_all_started)) do
       :ok ->
         wait_for_shutdown()
