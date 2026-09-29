@@ -63,12 +63,27 @@ defmodule SymphonyElixir.Commands do
 
   defp write_project(dir, id, repo, opts) do
     target = Path.join([dir, "projects", id])
+    prefix = Keyword.get(opts, :prefix, "crescendo")
 
     cond do
-      not Regex.match?(~r/^[a-z0-9][a-z0-9-]*$/, id) -> {:error, "project ids are lowercase letters, digits, or dashes"}
-      not Regex.match?(~r{^[\w.-]+/[\w.-]+$}, repo) -> {:error, "the repository must be owner/name"}
-      File.exists?(target) -> {:error, "#{target} already exists; nothing was written"}
-      true -> render_project(target, id, repo, opts)
+      not Regex.match?(~r/^[a-z0-9][a-z0-9-]*$/, id) ->
+        {:error, "project ids are lowercase letters, digits, or dashes"}
+
+      not Regex.match?(~r{^[\w.-]+/[\w.-]+$}, repo) ->
+        {:error, "the repository must be owner/name"}
+
+      File.exists?(target) ->
+        {:error, "#{target} already exists; nothing was written"}
+
+      true ->
+        with {:ok, prefix} <- validate_label_prefix(prefix), do: render_project(target, id, repo, Keyword.put(opts, :prefix, prefix))
+    end
+  end
+
+  defp validate_label_prefix(prefix) do
+    case Schema.parse(%{"labels" => %{"prefix" => prefix}}) do
+      {:ok, settings} -> {:ok, settings.labels.prefix}
+      {:error, {:invalid_workflow_config, reason}} -> {:error, "invalid --prefix value #{inspect(prefix)}: #{reason}"}
     end
   end
 

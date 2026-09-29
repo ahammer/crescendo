@@ -96,8 +96,9 @@ crescendo drain on|off ~/.config/crescendo/crescendo.yml
 
 - `project add` writes `projects/<id>/` (a `WORKFLOW.md`, a pull request review prompt and a research
   prompt) from the built-in templates. It never overwrites, and it prints the line to add under
-  `projects:`. `--tools` puts mise tools in front of Codex, so the agent and everything it runs
-  have them.
+  `projects:`. `--prefix` follows the workflow's `labels.prefix` rules: it is trimmed and lowercased,
+  then must contain only lowercase letters, digits or dashes. `--tools` puts mise tools in front of
+  Codex, so the agent and everything it runs have them.
 - `labels sync` creates every label a project's workflow uses that its repository lacks: ready,
   hold, in-review, blocked, one per research channel, sizes and model routes. It exits with an error
   if a requested project is unknown or GitHub cannot list or create the labels.
