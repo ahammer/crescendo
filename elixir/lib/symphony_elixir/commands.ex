@@ -76,13 +76,13 @@ defmodule SymphonyElixir.Commands do
         {:error, "#{target} already exists; nothing was written"}
 
       true ->
-        with :ok <- validate_label_prefix(prefix), do: render_project(target, id, repo, opts)
+        with {:ok, prefix} <- validate_label_prefix(prefix), do: render_project(target, id, repo, Keyword.put(opts, :prefix, prefix))
     end
   end
 
   defp validate_label_prefix(prefix) do
     case Schema.parse(%{"labels" => %{"prefix" => prefix}}) do
-      {:ok, _settings} -> :ok
+      {:ok, settings} -> {:ok, settings.labels.prefix}
       {:error, {:invalid_workflow_config, reason}} -> {:error, "invalid --prefix value #{inspect(prefix)}: #{reason}"}
     end
   end

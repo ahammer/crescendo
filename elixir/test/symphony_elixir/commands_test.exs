@@ -43,7 +43,7 @@ defmodule SymphonyElixir.CommandsTest do
 
   test "project add takes a branch and prefix and rejects bad input", %{root: root, service: service} do
     capture_io(fn ->
-      assert :ok = Commands.run(["project", "add", service, "dartboard", "ahammer/dart_board", "--branch", "master", "--prefix", "board"], &no_gh/1)
+      assert :ok = Commands.run(["project", "add", service, "dartboard", "ahammer/dart_board", "--branch", "master", "--prefix", " Board "], &no_gh/1)
     end)
 
     {:ok, workflow} = Workflow.load(Path.join([root, "projects", "dartboard", "WORKFLOW.md"]))
@@ -51,6 +51,7 @@ defmodule SymphonyElixir.CommandsTest do
     assert workflow.config["hooks"]["after_create"] =~ "git checkout master"
     assert workflow.config["labels"] == %{"prefix" => "board"}
     assert settings.labels.prefix == "board"
+    assert settings.tracker.required_labels == ["board:ready"]
     assert workflow.config["codex"]["command"] == "codex --config shell_environment_policy.inherit=all app-server"
 
     assert {:error, "project ids are" <> _} = Commands.run(["project", "add", service, "Bad", "a/b"], &no_gh/1)
@@ -66,6 +67,17 @@ defmodule SymphonyElixir.CommandsTest do
     assert message =~ "invalid --prefix value"
     assert message =~ "lowercase letters, digits, or dashes"
     refute File.exists?(Path.join([root, "projects", "demo"]))
+  end
+
+  test "project add quotes prefixes that YAML could read as another type", %{root: root, service: service} do
+    capture_io(fn ->
+      assert :ok = Commands.run(["project", "add", service, "demo", "ahammer/crescendo", "--prefix", "true"], &no_gh/1)
+    end)
+
+    assert {:ok, workflow} = Workflow.load(Path.join([root, "projects", "demo", "WORKFLOW.md"]))
+    assert {:ok, settings} = Schema.parse(workflow.config)
+    assert settings.labels.prefix == "true"
+    assert settings.tracker.required_labels == ["true:ready"]
   end
 
   test "labels sync creates the labels a project's workflow uses that its repository lacks", %{service: service} do
