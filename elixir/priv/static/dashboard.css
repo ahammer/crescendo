@@ -3143,3 +3143,35 @@ p {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 0 18px;
 }
+
+/* Autopilot tasks: where they come from, and when each runs next. */
+.task-source {
+  padding: 1px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.task-source.source-repo {
+  border-color: rgba(34, 211, 238, 0.45);
+  color: var(--accent-2);
+}
+
+.task-source.source-repo-error {
+  border-color: rgba(240, 82, 82, 0.55);
+  color: var(--critical-ink);
+}
+
+.task-when {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.research-channel.step-retry .step-dot {
+  background: var(--warning);
+}

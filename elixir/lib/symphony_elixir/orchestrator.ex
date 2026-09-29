@@ -76,7 +76,7 @@ defmodule SymphonyElixir.Orchestrator do
       throttle: nil,
       artifacts_root: nil,
       artifacts_swept_ms: nil,
-      autopilot: %{pr_handled: %{}, research_finished_at: nil, research_pending: [], item_attempts: %{}}
+      autopilot: %{pr_handled: %{}, tasks: %{}, item_attempts: %{}}
     ]
   end
 
@@ -341,10 +341,10 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  # Research runs are one-shot: whatever the outcome, the round is over and the
-  # next research pass waits for the cooldown.
-  defp handle_agent_down(_reason, state, issue_id, %{issue: %Issue{kind: :research}} = running_entry, _session_id) do
-    finish_research(state, issue_id, running_entry)
+  # Research runs are one-shot: their deliveries are checked, and the task is
+  # due again after its interval, or retried sooner when it fell short.
+  defp handle_agent_down(reason, state, issue_id, %{issue: %Issue{kind: :research}} = running_entry, _session_id) do
+    finish_research(state, issue_id, running_entry, if(reason == :normal, do: :normal, else: :failed))
   end
 
   # A review pass ends at its head commit; the pull request is picked up again
@@ -801,7 +801,7 @@ defmodule SymphonyElixir.Orchestrator do
 
           state
           |> terminate_running_issue(issue_id, false)
-          |> finish_research(issue_id, running_entry)
+          |> finish_research(issue_id, running_entry, :failed)
 
         input_required_blocker?(running_entry) ->
           error = blocker_error(running_entry, "stalled for #{elapsed_ms}ms after Codex requested operator input")
@@ -1789,25 +1789,66 @@ defmodule SymphonyElixir.Orchestrator do
     %{state | autopilot: autopilot}
   end
 
-  defp finish_research(state, issue_id, running_entry) do
-    Logger.info("Research run finished: issue_identifier=#{Map.get(running_entry, :identifier)}")
+  defp finish_research(state, issue_id, running_entry, exit) do
+    research = running_entry.issue.research
+    autopilot = Config.settings!().autopilot
+    {outcome, summary} = task_outcome(exit, running_entry)
+    Logger.info("Research run finished: issue_identifier=#{Map.get(running_entry, :identifier)} outcome=#{outcome} #{summary}")
     cleanup_issue_workspace(running_entry.issue, running_entry)
 
+    event = if outcome in [:delivered, :unverified], do: "task_delivered", else: "task_short"
+    identifier = running_entry.identifier
+    details = %{issue_identifier: identifier, category: Operations.task_category(identifier), summary: summary}
+    Operations.event(state.operations, event, details)
+
     state
-    |> put_autopilot(Autopilot.record_research_finished(state.autopilot, running_entry.issue.research.channel, DateTime.utc_now()))
+    |> put_autopilot(Autopilot.record_research_finished(state.autopilot, research.channel, outcome, now(), autopilot))
     |> release_issue_claim(issue_id)
+  end
+
+  defp now, do: DateTime.utc_now()
+
+  # What a task run produced, checked against its declared minimums: issues and
+  # pull requests opened with its channel label since it started. A failed run
+  # delivers nothing; a failed check leaves the run unverified.
+  defp task_outcome(:failed, _running_entry), do: {:failed, "run failed"}
+
+  defp task_outcome(:normal, %{issue: %Issue{research: research} = issue} = running_entry) do
+    label = Enum.find(issue.labels, &String.contains?(&1, ":channel:"))
+    since = Map.get(running_entry, :started_at) || DateTime.utc_now()
+    min_prs = (research[:pull_requests] || %{min: 0}).min
+
+    case task_deliveries(label, since) do
+      {:ok, %{issues: issues, pull_requests: prs}} ->
+        summary = "#{issues} issues · #{prs} PRs"
+        if issues >= research.min_issues and prs >= min_prs, do: {:delivered, summary}, else: {:short, summary <> " (asked for #{research.min_issues} issues, #{min_prs} PRs)"}
+
+      {:error, reason} ->
+        {:unverified, "deliveries unchecked: #{inspect(reason)}"}
+    end
+  end
+
+  defp task_deliveries(label, since) do
+    cond do
+      fun = Application.get_env(:symphony_elixir, :task_deliveries_fun) -> fun.(label, since)
+      Config.settings!().tracker.kind == "github" -> GitHubClient.fetch_task_deliveries(label, since)
+      true -> {:error, :untracked}
+    end
   end
 
   # When the machine is idle and nothing is ready, one research channel runs at
   # a time so planners' tests, headed journeys, and measurements never overlap.
+  # Idle-only tasks start when nothing else runs or waits; `anytime` tasks
+  # start whenever a slot is free and no other task is running.
   defp maybe_dispatch_research(%State{} = state, issues) do
     config = Config.settings!()
+    idle = state.running == %{} and not Enum.any?(issues, &work_ready?(&1, state))
 
-    if config.autopilot.enabled and state.running == %{} and not Enum.any?(issues, &work_ready?(&1, state)) and
+    if config.autopilot.enabled and (idle or (available_slots(state) > 0 and not research_running?(state))) and
          Throttle.admit(state.throttle, :research) == :ok do
       open_issues = open_issue_count(issues, config)
 
-      case Autopilot.next_research(state.autopilot, config.autopilot, open_issues, DateTime.utc_now()) do
+      case Autopilot.next_research(state.autopilot, config.autopilot, open_issues, DateTime.utc_now(), idle: idle) do
         {autopilot, nil} -> put_autopilot(state, autopilot)
         {autopilot, item} -> state |> put_autopilot(autopilot) |> dispatch_issue(item)
       end
@@ -2010,7 +2051,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp autopilot_snapshot(state) do
     settings = Config.settings!().autopilot
-    finished_at = state.autopilot.research_finished_at
+    now = DateTime.utc_now()
+    tasks = Autopilot.task_statuses(state.autopilot, settings, now)
+    upcoming = tasks |> Enum.map(& &1.due_at) |> Enum.filter(&(DateTime.compare(&1, now) == :gt)) |> Enum.min(DateTime, fn -> nil end)
 
     %{
       enabled: settings.enabled,
@@ -2018,10 +2061,18 @@ defmodule SymphonyElixir.Orchestrator do
       open_issues: open_issue_count(state.polled_issues, Config.settings!()),
       max_open_issues: settings.max_open_issues,
       research_running: Enum.count(state.running, fn {_id, entry} -> research_entry?(entry) end),
-      research_pending: state.autopilot.research_pending,
-      research_finished_at: finished_at,
-      next_research_at: finished_at && DateTime.add(finished_at, settings.research_cooldown_ms, :millisecond)
+      # Tasks due now, waiting for their turn (idle tasks wait for an idle project).
+      research_pending: for(task <- tasks, DateTime.compare(task.due_at, now) != :gt, do: task.name),
+      research_finished_at: Autopilot.last_finished_at(state.autopilot),
+      next_research_at: upcoming,
+      tasks: tasks,
+      repo: repo_autopilot_status()
     }
+  end
+
+  defp repo_autopilot_status do
+    status = SymphonyElixir.RepoAutopilot.status(Project.current())
+    Map.put(status, :tasks_from_repo, Config.settings!().autopilot.channels |> Map.values() |> Enum.any?(&match?(%{"source" => "repo"}, &1)))
   end
 
   defp blocked_issue_state(%{issue: %Issue{state: state}}), do: state
@@ -2305,9 +2356,10 @@ defmodule SymphonyElixir.Orchestrator do
   defp research_wanted?(%State{} = state) do
     config = Config.settings!()
     open_issues = open_issue_count(state.polled_issues, config)
-    next = Autopilot.next_research(state.autopilot, config.autopilot, open_issues, DateTime.utc_now())
+    idle = state.running == %{}
+    next = Autopilot.next_research(state.autopilot, config.autopilot, open_issues, DateTime.utc_now(), idle: idle)
 
-    config.autopilot.enabled and state.running == %{} and Throttle.admit(state.throttle, :research) == :ok and
+    config.autopilot.enabled and not research_running?(state) and Throttle.admit(state.throttle, :research) == :ok and
       match?({_autopilot, %Issue{}}, next)
   end
 

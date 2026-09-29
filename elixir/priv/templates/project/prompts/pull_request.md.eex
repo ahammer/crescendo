@@ -25,6 +25,9 @@ You can push to the head branch: {{ issue.pull_request.can_push }}
 3. Review the diff for correctness, tests, readability, API design and scope. Run the checks the
    repository's CI runs, plus focused tests, taking the machine lease for heavy commands
    (`machine-lease run -- <command>`).
+   If the pull request changes `.crescendo/autopilot/` (this repository's autopilot tasks and
+   guidelines), also run `~/.local/lib/crescendo/bin/crescendo autopilot check .crescendo/autopilot`;
+   close the pull request with its output when the check fails.
 4. If changes are needed:
    - When you can push: commit focused fixes, validate, push to the head branch, reply to the threads
      you addressed, and **stop**. Crescendo reviews the new head once its CI settles.

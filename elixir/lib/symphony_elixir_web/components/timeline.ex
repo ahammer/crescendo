@@ -17,7 +17,8 @@ defmodule SymphonyElixirWeb.Timeline do
   @done_limit 60
   # Finished work worth a row; dispatches show as running, and turn or
   # retry bookkeeping would drown the rest.
-  @done_kinds ~w(completed failed stopped interrupted pr_merged pr_closed pr_opened issue_terminal retired blocked)
+  @done_kinds ~w(completed failed stopped interrupted pr_merged pr_closed pr_opened issue_terminal retired blocked task_delivered task_short)
+  @run_kinds ~w(completed failed stopped interrupted)
 
   attr(:payload, :map, required: true)
   attr(:now, :any, required: true)
@@ -197,6 +198,8 @@ defmodule SymphonyElixirWeb.Timeline do
   defp done_items(usage, now) do
     usage.activity
     |> Enum.filter(&(&1.kind in @done_kinds))
+    # A task run shows once, as what it delivered, rather than also as a run ending.
+    |> Enum.reject(&(&1.kind in @run_kinds and String.starts_with?(to_string(&1[:issue_identifier]), "research-")))
     |> Enum.take(@done_limit)
     |> Enum.map(fn event ->
       {id, url} = event_subject(event)
@@ -222,6 +225,7 @@ defmodule SymphonyElixirWeb.Timeline do
 
   # Pull request events carry the PR title as their summary; runs carry the item title.
   defp event_title(%{kind: "pr_" <> _} = event), do: event[:summary]
+  defp event_title(%{kind: "task_" <> _} = event), do: event[:summary]
   defp event_title(event), do: event[:title]
 
   defp event_category(event), do: event[:category] || Operations.task_category(event[:issue_identifier])
@@ -243,12 +247,14 @@ defmodule SymphonyElixirWeb.Timeline do
   defp event_label(%{kind: "retired"}), do: "Retired"
   defp event_label(%{kind: "blocked"}), do: "Blocked"
   defp event_label(%{kind: "completed"} = event), do: category_name(event_category(event)) <> " done"
+  defp event_label(%{kind: "task_delivered"} = event), do: category_name(event_category(event)) <> " delivered"
+  defp event_label(%{kind: "task_short"} = event), do: category_name(event_category(event)) <> " fell short"
   defp event_label(%{kind: "failed"} = event), do: category_name(event_category(event)) <> " failed"
   defp event_label(event), do: category_name(event_category(event)) <> " " <> event.kind
 
-  defp event_tone(kind) when kind in ["completed", "pr_merged", "issue_terminal"], do: "good"
+  defp event_tone(kind) when kind in ["completed", "pr_merged", "issue_terminal", "task_delivered"], do: "good"
   defp event_tone(kind) when kind in ["failed", "blocked", "retired"], do: "critical"
-  defp event_tone(kind) when kind in ["stopped", "interrupted", "pr_closed"], do: "warning"
+  defp event_tone(kind) when kind in ["stopped", "interrupted", "pr_closed", "task_short"], do: "warning"
   defp event_tone(_kind), do: "info"
 
   # Short state names keep the row readable; the full reason is the tooltip.

@@ -70,7 +70,9 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
       open_issues: total.(:open_issues),
       max_open_issues: total.(:max_open_issues),
       research_finished_at: nil,
-      next_research_at: autopilots |> Enum.map(fn {_id, autopilot} -> autopilot[:next_research_at] end) |> oldest()
+      next_research_at: autopilots |> Enum.map(fn {_id, autopilot} -> autopilot[:next_research_at] end) |> oldest(),
+      tasks: for({id, autopilot} <- autopilots, task <- Map.get(autopilot, :tasks) || [], do: Map.put(task, :project, id)),
+      repos: for({id, autopilot} <- autopilots, repo = autopilot[:repo], into: %{}, do: {id, repo})
     }
   end
 

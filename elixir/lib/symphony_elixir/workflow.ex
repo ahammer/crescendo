@@ -46,18 +46,100 @@ defmodule SymphonyElixir.Workflow do
   @doc """
   Loads a workflow file. `defaults` (service-wide settings) are merged under
   its front matter: maps merge key by key and the file's values win.
+
+  `overlay` is the local mirror of the repository's `.crescendo/autopilot/`
+  folder (see `SymphonyElixir.RepoAutopilot`). When it holds tasks, they
+  replace `autopilot.channels` (less `autopilot.disabled_tasks`), unless
+  `autopilot.repo_tasks` is false, and its `guidelines.md` joins every
+  prompt. Everything the service owns (routes, budget, trust) stays local.
   """
-  @spec load(Path.t(), map()) :: {:ok, loaded_workflow()} | {:error, term()}
-  def load(path, defaults \\ %{}) when is_binary(path) and is_map(defaults) do
+  @spec load(Path.t(), map(), Path.t() | nil) :: {:ok, loaded_workflow()} | {:error, term()}
+  def load(path, defaults \\ %{}, overlay \\ nil) when is_binary(path) and is_map(defaults) do
     case File.read(path) do
       {:ok, content} ->
-        with {:ok, workflow} <- parse(content) do
-          load_prompt_files(%{workflow | config: deep_merge(defaults, workflow.config)}, Path.dirname(Path.expand(path)))
+        with {:ok, workflow} <- parse(content),
+             config = deep_merge(defaults, workflow.config),
+             {:ok, config, overlay_paths} <- apply_overlay(config, overlay),
+             {:ok, loaded} <- load_prompt_files(%{workflow | config: config}, Path.dirname(Path.expand(path))) do
+          {:ok, %{loaded | prompt_paths: overlay_paths ++ loaded.prompt_paths}}
         end
 
       {:error, reason} ->
         {:error, {:missing_workflow_file, path, reason}}
     end
+  end
+
+  @doc """
+  Reads a repository autopilot folder (or its mirror): its settings, its
+  guidelines file and one channel object per `tasks/<name>.md`, with the
+  task file as the channel's prompt.
+  """
+  @spec read_autopilot_folder(Path.t()) ::
+          {:ok, %{channels: map(), guidelines: Path.t() | nil, paths: [Path.t()]}} | {:error, term()}
+  def read_autopilot_folder(dir) do
+    settings_path = Path.join(dir, "autopilot.yml")
+
+    with {:ok, settings} <- read_folder_settings(settings_path),
+         {:ok, channels} <- read_tasks(Path.join(dir, "tasks"), Map.get(settings, "defaults") || %{}) do
+      guidelines = Path.join(dir, Map.get(settings, "guidelines") || "guidelines.md")
+      guidelines = if File.regular?(guidelines), do: guidelines, else: nil
+      paths = Enum.filter([settings_path], &File.regular?/1)
+      {:ok, %{channels: channels, guidelines: guidelines, paths: paths}}
+    end
+  end
+
+  defp apply_overlay(config, overlay) do
+    autopilot = Map.get(config, "autopilot") || %{}
+
+    if is_nil(overlay) or not File.dir?(overlay) or autopilot["repo_tasks"] == false do
+      {:ok, config, []}
+    else
+      case read_autopilot_folder(overlay) do
+        {:ok, folder} -> {:ok, Map.put(config, "autopilot", merge_folder(autopilot, folder)), folder.paths}
+        {:error, reason} -> {:error, {:repo_autopilot, reason}}
+      end
+    end
+  end
+
+  defp merge_folder(autopilot, folder) do
+    channels = Map.drop(folder.channels, List.wrap(autopilot["disabled_tasks"]))
+    autopilot = if channels == %{}, do: autopilot, else: Map.put(autopilot, "channels", channels)
+    if folder.guidelines, do: Map.put(autopilot, "guidelines", folder.guidelines), else: autopilot
+  end
+
+  defp read_folder_settings(path) do
+    case File.read(path) do
+      {:ok, yaml} ->
+        case front_matter_yaml_to_map(String.split(yaml, ~r/\R/)) do
+          {:ok, settings} -> {:ok, settings}
+          {:error, reason} -> {:error, {:invalid_autopilot_yml, reason}}
+        end
+
+      {:error, :enoent} ->
+        {:ok, %{}}
+
+      {:error, reason} ->
+        {:error, {:unreadable, path, reason}}
+    end
+  end
+
+  # Each task file is YAML front matter (schedule, deliveries, expectations)
+  # over its seed prompt; `defaults` from autopilot.yml fill what it omits.
+  defp read_tasks(dir, defaults) do
+    files = if File.dir?(dir), do: dir |> File.ls!() |> Enum.filter(&String.ends_with?(&1, ".md")) |> Enum.sort(), else: []
+
+    Enum.reduce_while(files, {:ok, %{}}, fn file, {:ok, acc} ->
+      path = Path.join(dir, file)
+
+      case File.read!(path) |> parse() do
+        {:ok, %{config: front}} ->
+          channel = Map.merge(%{"focus" => Path.rootname(file)}, defaults) |> Map.merge(front) |> Map.merge(%{"prompt" => path, "source" => "repo"})
+          {:cont, {:ok, Map.put(acc, Path.rootname(file), channel)}}
+
+        {:error, reason} ->
+          {:halt, {:error, {:invalid_task, file, reason}}}
+      end
+    end)
   end
 
   defp parse(content) do
@@ -91,27 +173,30 @@ defmodule SymphonyElixir.Workflow do
     # Unknown kinds are left for schema validation to reject.
     prompts =
       case config do
-        %{"autopilot" => %{} = autopilot} -> kind_prompts(autopilot) ++ channel_prompts(autopilot)
+        %{"autopilot" => %{} = autopilot} -> autopilot_prompts(autopilot)
         _ -> []
       end
 
     Enum.reduce_while(prompts, {:ok, workflow}, fn {kind, relative_path}, {:ok, acc} ->
       path = Path.expand(to_string(relative_path), base_dir)
 
-      case File.read(path) do
+      case read_prompt(path) do
         {:ok, template} ->
-          {:cont,
-           {:ok,
-            %{
-              acc
-              | prompt_templates: Map.put(acc.prompt_templates, to_string(kind), String.trim(template)),
-                prompt_paths: [path | acc.prompt_paths]
-            }}}
+          templates = Map.put(acc.prompt_templates, to_string(kind), template)
+          {:cont, {:ok, %{acc | prompt_templates: templates, prompt_paths: [path | acc.prompt_paths]}}}
 
         {:error, reason} ->
           {:halt, {:error, {:missing_prompt_file, path, reason}}}
       end
     end)
+  end
+
+  # A prompt file may carry front matter (repository task files do); the template is its body.
+  defp read_prompt(path) do
+    with {:ok, content} <- File.read(path) do
+      {_front, body} = split_front_matter(content)
+      {:ok, String.trim(if body == [], do: content, else: Enum.join(body, "\n"))}
+    end
   end
 
   @doc "Merges `override` into `base`: nested maps merge, anything else is replaced."
@@ -123,6 +208,8 @@ defmodule SymphonyElixir.Workflow do
     end)
   end
 
+  defp autopilot_prompts(autopilot), do: kind_prompts(autopilot) ++ channel_prompts(autopilot) ++ guideline_prompts(autopilot)
+
   defp kind_prompts(%{"prompts" => %{} = prompts}), do: prompts |> Map.take(["pull_request", "research"]) |> Enum.to_list()
   defp kind_prompts(_autopilot), do: []
 
@@ -130,6 +217,9 @@ defmodule SymphonyElixir.Workflow do
     do: for({name, %{"prompt" => path}} <- channels, is_binary(path) and String.trim(path) != "", do: {"research:#{name}", path})
 
   defp channel_prompts(_autopilot), do: []
+
+  defp guideline_prompts(%{"guidelines" => path}) when is_binary(path) and path != "", do: [{"guidelines", path}]
+  defp guideline_prompts(_autopilot), do: []
 
   defp split_front_matter(content) do
     lines = String.split(content, ~r/\R/, trim: false)

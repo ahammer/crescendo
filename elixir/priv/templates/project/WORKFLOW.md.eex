@@ -57,6 +57,8 @@ codex:
     type: dangerFullAccess
 autopilot:
   enabled: true
+  # A `.crescendo/autopilot/` folder in the repository replaces these channels with its own
+  # tasks and guidelines (see `crescendo autopilot check`); `repo_tasks: false` ignores it.
   channels:
     testing: >-
       Behavior the tests do not prove, found by running the suite: failing, flaky or slow tests,

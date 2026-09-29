@@ -92,6 +92,7 @@ crescendo project add ~/.config/crescendo/crescendo.yml nubu3d ahammer/Nubu3D [-
 crescendo labels sync ~/.config/crescendo/crescendo.yml [nubu3d]
 crescendo labels migrate ~/.config/crescendo/crescendo.yml metalrain --from symphony
 crescendo drain on|off ~/.config/crescendo/crescendo.yml
+crescendo autopilot check .crescendo/autopilot [--workflow ~/.config/crescendo/projects/<id>/WORKFLOW.md]
 ```
 
 - `project add` writes `projects/<id>/` (a `WORKFLOW.md`, a pull request review prompt and a research
@@ -108,6 +109,10 @@ crescendo drain on|off ~/.config/crescendo/crescendo.yml
   an error if GitHub cannot list items or add/remove a label.
 - `drain on` stops new runs; running work finishes. `drain off` releases it and reports an error if
   its flag cannot be removed.
+- `autopilot check` validates a repository's `.crescendo/autopilot/` folder: task front matter,
+  schedules, deliveries and prompt templates. It prints one line per task. With `--workflow` it
+  loads the folder exactly as the service would load it for that project, including task efforts
+  against its ladder. Agents and the pull request reviewer run it on changes to the folder.
 
 ## `crescendo.yml`
 
@@ -218,7 +223,64 @@ channels:
     min_issues: 2
     max_issues: 4
     route: {model: gpt-6.1-sol, effort: xhigh}
+    every: 1d          # schedule: 30m, 6h, 1d, 2w (default research_cooldown_ms)
+    when: idle         # idle: only when nothing else runs or waits; anytime: whenever a slot is free
 ```
+
+Each channel (task) runs on its own schedule; the most overdue due task goes first. After a run,
+Crescendo counts the issues and pull requests it opened with its `<prefix>:channel:<name>` label.
+A run that falls short of its minimums, or fails, is retried 30 minutes later behind other work.
+The last allowed attempt (`max_item_attempts`) ends the task until it is next due, so nothing is
+parked. The timeline shows each outcome as "delivered" or "fell short".
+
+## Per-repo autopilot (`.crescendo/autopilot/`)
+
+A repository can carry its own autopilot, which travels with its code:
+
+```
+.crescendo/autopilot/
+  autopilot.yml      # optional: defaults: {every, when, effort}; guidelines: guidelines.md
+  guidelines.md      # maintenance guidelines appended to EVERY agent prompt for this repo
+  tasks/<name>.md    # one task: YAML front matter + its seed prompt
+```
+
+```markdown
+---
+focus: User-facing docs that are accurate, clear and sell the project
+every: 1d
+when: idle
+effort: max                       # a rung of the project's local ladder; the model stays local
+delivers:
+  issues: {min: 0, max: 2}
+  pull_requests: {min: 0, max: 3, paths: ["README.md", "docs/**"]}
+expectations:
+  - Run the documented quick start from a clean clone
+---
+You are the marketing lead for {{ issue.title }} ...
+```
+
+- **Mirroring:** the service reads the folder from the repository's default branch every five
+  minutes (conditional requests, so an unchanged folder is free). It mirrors the folder into
+  `<state>/projects/<id>/repo-autopilot/` and reloads the project when anything changes. The
+  folder is read the same way as `WORKFLOW.md` prompt files.
+- **Precedence:** when the folder has tasks, they **replace** the project's local
+  `autopilot.channels`. Local config keeps what the service owns: the model and effort ladder,
+  routes, budget, trust, tracker and `enabled`. Set `autopilot.repo_tasks: false` to ignore the
+  folder, or `autopilot.disabled_tasks: [name]` to skip single tasks. Repositories without the
+  folder keep their local channels.
+- **Prompts:** the task body is the prompt, with the same variables as research prompts. Crescendo
+  appends:
+  - a `## Deliverables` section (counts, label, allowed pull request paths, expectations);
+  - `## Repository guidelines` from `guidelines.md`, which reaches issue, review and task prompts
+    alike.
+
+  A pull request carrying a task's label is reviewed against that task's `paths`; the reviewer
+  closes it as out of scope if it touches anything else.
+- **Invalid folder:** an invalid folder keeps the last good configuration, and the error is logged.
+  The dashboard's Autopilot card marks each project's tasks as `repo` or `local`, and flags a
+  failed repository read.
+- **Who can change it:** agents may change the folder through normal reviewed pull requests. The
+  reviewer runs `crescendo autopilot check` on them.
 
 ### Marketing dept
 

@@ -22,7 +22,7 @@ defmodule SymphonyElixir.WorkflowStore do
 
     # `fixed_path` and `defaults` are set for service projects; the legacy
     # store follows `Workflow.workflow_file_path/0` and has no defaults.
-    defstruct [:path, :stamp, :workflow, :settings, :fixed_path, defaults: %{}]
+    defstruct [:path, :stamp, :workflow, :settings, :fixed_path, :overlay, defaults: %{}]
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -57,7 +57,7 @@ defmodule SymphonyElixir.WorkflowStore do
     end
   end
 
-  defp load_legacy_file, do: load_state(Workflow.workflow_file_path(), %{})
+  defp load_legacy_file, do: load_state(Workflow.workflow_file_path(), %{}, nil)
 
   # Without a running store, the single-workflow runtime reads the file
   # directly; a project's store must be running, and under a service every
@@ -75,8 +75,9 @@ defmodule SymphonyElixir.WorkflowStore do
     :ok = Project.put(Keyword.get(opts, :project))
     fixed_path = Keyword.get(opts, :path)
     defaults = Keyword.get(opts, :defaults, %{})
+    overlay = Keyword.get(opts, :overlay)
 
-    case load_state(fixed_path || Workflow.workflow_file_path(), defaults) do
+    case load_state(fixed_path || Workflow.workflow_file_path(), defaults, overlay) do
       {:ok, state} ->
         schedule_poll()
         {:ok, %{state | fixed_path: fixed_path}}
@@ -142,7 +143,7 @@ defmodule SymphonyElixir.WorkflowStore do
   end
 
   defp reload_path(path, state) do
-    case load_state(path, state.defaults) do
+    case load_state(path, state.defaults, state.overlay) do
       {:ok, new_state} ->
         {:ok, %{new_state | fixed_path: state.fixed_path}}
 
@@ -153,7 +154,7 @@ defmodule SymphonyElixir.WorkflowStore do
   end
 
   defp reload_current_path(path, state) do
-    case current_stamp(path, state.workflow.prompt_paths) do
+    case current_stamp(path, state.workflow.prompt_paths, state.overlay) do
       {:ok, stamp} when stamp == state.stamp ->
         {:ok, state}
 
@@ -166,12 +167,13 @@ defmodule SymphonyElixir.WorkflowStore do
     end
   end
 
-  defp load_state(path, defaults) do
-    with {:ok, workflow} <- Workflow.load(path, defaults),
+  defp load_state(path, defaults, overlay) do
+    with {:ok, workflow} <- Workflow.load(path, defaults, overlay),
          {:ok, settings} <- Schema.parse(workflow.config),
          :ok <- Config.validate_settings(settings),
-         {:ok, stamp} <- current_stamp(path, workflow.prompt_paths) do
-      {:ok, %State{path: path, stamp: stamp, workflow: workflow, settings: settings, defaults: defaults}}
+         {:ok, stamp} <- current_stamp(path, workflow.prompt_paths, overlay) do
+      state = %State{path: path, stamp: stamp, workflow: workflow, settings: settings}
+      {:ok, %{state | defaults: defaults, overlay: overlay}}
     else
       {:error, reason} ->
         {:error, reason}
@@ -179,14 +181,27 @@ defmodule SymphonyElixir.WorkflowStore do
   end
 
   # Prompt files referenced from WORKFLOW.md are part of the stamp so edits to
-  # them hot-reload like WORKFLOW.md itself.
-  defp current_stamp(path, prompt_paths) when is_binary(path) do
-    Enum.reduce_while([path | prompt_paths], {:ok, []}, fn file, {:ok, acc} ->
+  # them hot-reload like WORKFLOW.md itself. The repository autopilot mirror
+  # adds its manifest (rewritten on every change, absent without a folder), so
+  # a task added, changed or removed upstream reloads the project too.
+  defp current_stamp(path, prompt_paths, overlay) when is_binary(path) do
+    Enum.reduce_while([path | prompt_paths], {:ok, [overlay_stamp(overlay)]}, fn file, {:ok, acc} ->
       case file_stamp(file) do
         {:ok, stamp} -> {:cont, {:ok, [stamp | acc]}}
+        # A prompt file that disappeared (a task removed upstream) is a change to reload, not an error.
+        {:error, :enoent} when file != path -> {:cont, {:ok, [:missing | acc]}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
+
+  defp overlay_stamp(nil), do: nil
+
+  defp overlay_stamp(overlay) do
+    case File.read(Path.join(overlay, ".manifest")) do
+      {:ok, content} -> :erlang.phash2(content)
+      {:error, _reason} -> File.dir?(overlay)
+    end
   end
 
   defp file_stamp(path) do

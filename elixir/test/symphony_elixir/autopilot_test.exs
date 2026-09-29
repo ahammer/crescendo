@@ -15,7 +15,7 @@ defmodule SymphonyElixir.AutopilotTest do
     max_item_attempts: 3
   }
 
-  @empty %{pr_handled: %{}, research_finished_at: nil, research_pending: [], item_attempts: %{}}
+  @empty %{pr_handled: %{}, tasks: %{}, item_attempts: %{}}
 
   defmodule CiClient do
     def fetch_commit_ci_state(sha) do
@@ -125,33 +125,82 @@ defmodule SymphonyElixir.AutopilotTest do
   end
 
   describe "research policy" do
-    test "research runs as sequential rounds over every channel, then cools down" do
+    test "each task runs on its own schedule, the most overdue first" do
       now = ~U[2026-09-25 12:00:00Z]
 
-      assert {@empty, nil} = Autopilot.next_research(@empty, %{@settings | enabled: false}, 0, now)
-      assert {@empty, nil} = Autopilot.next_research(@empty, @settings, 3, now)
+      settings = %{
+        @settings
+        | channels: %{"testing" => "Tests", "cleanup" => "Cleanup", "docs" => %{"focus" => "Docs", "every" => "1d", "when" => "anytime", "delivers" => %{"issues" => %{"min" => 0}}}}
+      }
 
-      # A fresh round covers every channel in name order, one at a time.
-      assert {state, %Issue{id: "research:cleanup"}} = Autopilot.next_research(@empty, @settings, 0, now)
-      assert state.research_pending == ["cleanup", "testing"]
-      assert {^state, %Issue{id: "research:cleanup"}} = Autopilot.next_research(state, @settings, 0, now)
+      assert {@empty, nil} = Autopilot.next_research(@empty, %{settings | enabled: false}, 0, now)
 
-      state = Autopilot.record_research_finished(state, "cleanup", now)
-      assert state.research_pending == ["testing"]
-      assert state.research_finished_at == nil
+      # Never-run tasks are due at once, in name order; a full backlog holds only tasks that must file issues.
+      assert {@empty, %Issue{id: "research:cleanup"}} = Autopilot.next_research(@empty, settings, 0, now)
+      assert {_, %Issue{id: "research:docs"}} = Autopilot.next_research(@empty, settings, 3, now)
 
-      # An unfinished round continues without waiting for the cooldown, but still respects the backlog.
-      assert {_, %Issue{id: "research:testing"}} = Autopilot.next_research(state, @settings, 2, now)
-      assert {_, nil} = Autopilot.next_research(state, @settings, 3, now)
+      # A busy project starts only `anytime` tasks, and never one already running.
+      assert {_, %Issue{id: "research:docs"}} = Autopilot.next_research(@empty, settings, 0, now, idle: false)
+      assert {_, nil} = Autopilot.next_research(@empty, settings, 0, now, idle: false, running: ["docs"])
 
-      state = Autopilot.record_research_finished(state, "testing", now)
-      assert state == %{@empty | research_finished_at: now}
-      assert {_, nil} = Autopilot.next_research(state, @settings, 0, DateTime.add(now, 59, :second))
-      assert {_, %Issue{id: "research:cleanup"}} = Autopilot.next_research(state, @settings, 0, DateTime.add(now, 60, :second))
+      # A delivered run waits its interval (the default cooldown, or the task's `every`).
+      state = Autopilot.record_research_finished(@empty, "cleanup", :delivered, now, settings)
+      state = Autopilot.record_research_finished(state, "docs", :unverified, now, settings)
+      assert %{finished_at: ^now, attempts: 0, last: :delivered} = state.tasks["cleanup"]
+      assert {_, %Issue{id: "research:testing"}} = Autopilot.next_research(state, settings, 0, now)
+      state = Autopilot.record_research_finished(state, "testing", :delivered, DateTime.add(now, 10, :second), settings)
+      assert {_, nil} = Autopilot.next_research(state, settings, 0, DateTime.add(now, 59, :second))
+      assert {_, %Issue{id: "research:cleanup"}} = Autopilot.next_research(state, settings, 0, DateTime.add(now, 60, :second))
+      # The most overdue goes first.
+      assert {_, %Issue{id: "research:cleanup"}} = Autopilot.next_research(state, settings, 0, DateTime.add(now, 3_600, :second))
+      assert {_, nil} = Autopilot.next_research(state, settings, 0, DateTime.add(now, 3_600, :second), idle: false)
+      assert {_, %Issue{id: "research:docs"}} = Autopilot.next_research(state, settings, 0, DateTime.add(now, 86_400, :second), idle: false)
+      assert Autopilot.last_finished_at(state) == DateTime.add(now, 10, :second)
+      assert Autopilot.last_finished_at(@empty) == nil
 
-      # Channels removed from config drop out of a pending round.
-      stale = %{@empty | research_pending: ["removed", "testing"]}
-      assert {%{research_pending: ["testing"]}, %Issue{id: "research:testing"}} = Autopilot.next_research(stale, @settings, 0, now)
+      # A short or failed run retries 30 minutes later; the last allowed attempt ends it until next due.
+      state = Autopilot.record_research_finished(state, "cleanup", :short, now, settings)
+      assert %{attempts: 1, last: :short, retry_at: retry_at} = state.tasks["cleanup"]
+      assert DateTime.compare(retry_at, DateTime.add(now, 1_800, :second)) == :eq
+      others = [running: ["testing", "docs"]]
+      assert {_, nil} = Autopilot.next_research(state, settings, 0, DateTime.add(now, 1_799, :second), others)
+      assert {_, %Issue{id: "research:cleanup"}} = Autopilot.next_research(state, settings, 0, DateTime.add(now, 1_800, :second), others)
+      state = Autopilot.record_research_finished(state, "cleanup", :failed, now, settings)
+      assert %{attempts: 2, last: :failed} = state.tasks["cleanup"]
+      state = Autopilot.record_research_finished(state, "cleanup", :short, now, settings)
+      assert %{attempts: 0, last: :gave_up, finished_at: ^now, retry_at: nil} = state.tasks["cleanup"]
+
+      assert [cleanup, docs, _testing] = Autopilot.task_statuses(state, settings, now)
+      assert %{name: "cleanup", source: "local", when: "idle", every_ms: 60_000, last: :gave_up} = cleanup
+      assert %{name: "docs", when: "anytime", every_ms: 86_400_000} = docs
+    end
+
+    test "schedules parse from short durations" do
+      assert Enum.map(["30m", "6h", " 1d ", "2w", 90_000], &Autopilot.duration_ms/1) == [1_800_000, 21_600_000, 86_400_000, 1_209_600_000, 90_000]
+      assert Enum.map(["0h", "1y", "", nil, -5], &Autopilot.duration_ms/1) == [nil, nil, nil, nil, nil]
+    end
+
+    test "a task's deliveries, expectations and effort shape its research item" do
+      settings =
+        @settings
+        |> Map.put(:research_route, %{"model" => "gpt-6.1-sol", "effort" => "max"})
+        |> Map.put(:channels, %{
+          "marketing" => %{
+            "focus" => "Docs",
+            "effort" => "high",
+            "source" => "repo",
+            "expectations" => ["Run the quick start"],
+            "delivers" => %{"issues" => %{"min" => 0, "max" => 2}, "pull_requests" => %{"min" => 1, "paths" => ["README.md"]}}
+          },
+          "qa" => %{"focus" => "QA", "effort" => "high"}
+        })
+
+      assert [%Issue{research: marketing}, %Issue{research: qa}] = Autopilot.research_items(settings)
+      assert %{min_issues: 0, max_issues: 2, pull_requests: %{min: 1, max: nil, paths: ["README.md"]}} = marketing
+      assert %{expectations: ["Run the quick start"], source: "repo"} = marketing
+      assert marketing.route == %{"model" => "gpt-6.1-sol", "effort" => "high"}
+      assert qa.route == %{"model" => "gpt-6.1-sol", "effort" => "high"}
+      assert Autopilot.research_items(%{settings | research_route: nil}) |> hd() |> Map.get(:research) |> Map.get(:route) == nil
     end
 
     test "research items are synthetic, per channel, and never tracker backed" do
@@ -252,15 +301,15 @@ defmodule SymphonyElixir.AutopilotTest do
       # A channel may have no quota at all.
       assert %{min_issues: 0, max_issues: 3} = marketing.research
       assert qa.labels == ["crescendo:research", "crescendo:channel:qa"]
-      assert qa.research == %{channel: "qa", focus: "Journeys", min_issues: 2, max_issues: 4, route: %{"model" => "gpt-6-sol", "effort" => "xhigh"}}
+      assert %{channel: "qa", focus: "Journeys", min_issues: 2, max_issues: 4, route: %{"model" => "gpt-6-sol", "effort" => "xhigh"}} = qa.research
       assert docs.research.route == nil
-      assert PromptBuilder.build_prompt(qa) == "QA Journeys (2-4)"
-      assert PromptBuilder.build_prompt(docs) == "Shared docs"
+      assert "QA Journeys (2-4)\n\n## Deliverables\n\n- Issues: at least 2 and at most 4, each labelled `crescendo:channel:qa`." <> _ = PromptBuilder.build_prompt(qa)
+      assert "Shared docs\n\n## Deliverables" <> _ = PromptBuilder.build_prompt(docs)
 
       # A channel's prompt file hot-reloads like the others.
       File.write!(Path.join(prompts_dir, "qa.md"), "QA v2")
       assert :ok = WorkflowStore.force_reload()
-      assert PromptBuilder.build_prompt(qa) == "QA v2"
+      assert "QA v2\n\n## Deliverables" <> _ = PromptBuilder.build_prompt(qa)
 
       # Without a shared research prompt every channel must bring its own.
       write_workflow_file!(Workflow.workflow_file_path(),
@@ -400,8 +449,7 @@ defmodule SymphonyElixir.AutopilotTest do
 
         saved = %{
           pr_handled: %{"7" => %{runs: 1, head_sha: "sha"}},
-          research_finished_at: ~U[2026-09-25 00:00:00Z],
-          research_pending: ["testing"],
+          tasks: %{"testing" => %{finished_at: ~U[2026-09-25 00:00:00Z], attempts: 0, retry_at: nil, last: :delivered}},
           item_attempts: %{"9" => 2}
         }
 
@@ -444,7 +492,7 @@ defmodule SymphonyElixir.AutopilotTest do
 
       :sys.replace_state(pid, fn state ->
         handled = %{"2" => %{runs: 1, head_sha: "sha-2", handled_at_ms: System.system_time(:millisecond)}}
-        %{state | autopilot: %{state.autopilot | pr_handled: handled, research_finished_at: DateTime.utc_now()}}
+        %{state | autopilot: %{state.autopilot | pr_handled: handled, tasks: cooled_tasks()}}
       end)
 
       send(pid, :run_poll_cycle)
@@ -498,7 +546,7 @@ defmodule SymphonyElixir.AutopilotTest do
           state
           | running: %{"2" => entry},
             claimed: MapSet.new(["2"]),
-            autopilot: %{state.autopilot | research_finished_at: DateTime.utc_now()}
+            autopilot: %{state.autopilot | tasks: cooled_tasks()}
         }
       end)
 
@@ -519,16 +567,26 @@ defmodule SymphonyElixir.AutopilotTest do
       assert Map.has_key?(:sys.get_state(pid).running, "2")
     end
 
-    test "research runs one channel at a time and has the machine to itself" do
+    test "research runs one task at a time, checks its deliveries, and has the machine to itself" do
       write_autopilot_workflow!()
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+      parent = self()
+
+      Application.put_env(:symphony_elixir, :task_deliveries_fun, fn label, since ->
+        send(parent, {:deliveries, label, since})
+        Application.get_env(:symphony_elixir, :task_deliveries_result, {:ok, %{issues: 1, pull_requests: 0}})
+      end)
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :task_deliveries_fun)
+        Application.delete_env(:symphony_elixir, :task_deliveries_result)
+      end)
 
       {pid, name} = start_orchestrator!()
       send(pid, :run_poll_cycle)
-      state = :sys.get_state(pid)
-
-      assert Map.keys(state.running) == ["research:cleanup"]
-      assert state.autopilot.research_pending == ["cleanup", "testing"]
+      assert Map.keys(:sys.get_state(pid).running) == ["research:cleanup"]
+      autopilot = Orchestrator.snapshot(name, 5_000).autopilot
+      assert %{research_pending: ["cleanup", "testing"], tasks: [%{name: "cleanup"}, %{name: "testing"}]} = autopilot
 
       # Reconciliation must not treat research runs as missing tracker issues, and
       # work that becomes ready waits for the running planner.
@@ -536,32 +594,50 @@ defmodule SymphonyElixir.AutopilotTest do
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
       send(pid, :run_poll_cycle)
       assert Map.keys(:sys.get_state(pid).running) == ["research:cleanup"]
-      assert Orchestrator.snapshot(name, 5_000).autopilot.research_pending == ["cleanup", "testing"]
 
+      # Delivered: counted with the task's label since the run started.
       finish_running_research(pid, "research:cleanup")
       state = :sys.get_state(pid)
+      assert_received {:deliveries, "symphony:channel:cleanup", %DateTime{}}
       refute MapSet.member?(state.claimed, "research:cleanup")
-      refute Map.has_key?(state.retry_attempts, "research:cleanup")
-      assert state.autopilot.research_pending == ["testing"]
-      assert state.autopilot.research_finished_at == nil
+      assert %{last: :delivered, attempts: 0} = state.autopilot.tasks["cleanup"]
 
-      # Ready work outranks the rest of the round.
+      # Ready work outranks the next task.
       send(pid, :run_poll_cycle)
       assert Map.keys(:sys.get_state(pid).running) == ["1"]
 
-      # Once idle again, the round resumes with the next channel, then cools down.
+      # Once idle again the next task runs; falling short schedules a retry.
       :sys.replace_state(pid, fn state -> %{state | running: %{}, claimed: MapSet.new()} end)
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
       send(pid, :run_poll_cycle)
       assert Map.keys(:sys.get_state(pid).running) == ["research:testing"]
-
+      Application.put_env(:symphony_elixir, :task_deliveries_result, {:ok, %{issues: 0, pull_requests: 0}})
       finish_running_research(pid, "research:testing")
-      state = :sys.get_state(pid)
-      assert state.autopilot.research_pending == []
-      assert %DateTime{} = state.autopilot.research_finished_at
+      assert %{last: :short, attempts: 1, retry_at: %DateTime{}} = :sys.get_state(pid).autopilot.tasks["testing"]
 
       send(pid, :run_poll_cycle)
       assert :sys.get_state(pid).running == %{}
+
+      # Deliveries that cannot be read leave the run unverified, not failed.
+      :sys.replace_state(pid, fn state -> %{state | autopilot: %{state.autopilot | tasks: Map.delete(state.autopilot.tasks, "cleanup")}} end)
+      send(pid, :run_poll_cycle)
+      Application.put_env(:symphony_elixir, :task_deliveries_result, {:error, :boom})
+      finish_running_research(pid, "research:cleanup")
+      assert %{last: :unverified} = :sys.get_state(pid).autopilot.tasks["cleanup"]
+    end
+
+    test "an anytime task starts while other work runs, and a failed run is retried" do
+      write_autopilot_workflow!(autopilot: %{channels: %{"deps" => %{"focus" => "Dependencies", "when" => "anytime", "every" => "7d"}}})
+      issue = %Issue{id: "1", identifier: "GH-1", title: "Work", state: "open", dispatchable: true, labels: []}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      {pid, _name} = start_orchestrator!()
+      send(pid, :run_poll_cycle)
+      assert Map.keys(:sys.get_state(pid).running) |> Enum.sort() == ["1", "research:deps"]
+
+      %{ref: ref} = :sys.get_state(pid).running["research:deps"]
+      send(pid, {:DOWN, ref, :process, self(), :boom})
+      assert %{last: :failed, attempts: 1} = :sys.get_state(pid).autopilot.tasks["deps"]
     end
 
     test "draft pull requests wait with an explicit reason, and stopped runs close their record" do
@@ -606,7 +682,7 @@ defmodule SymphonyElixir.AutopilotTest do
       issue = %Issue{id: "9", identifier: "GH-9", title: "Nine", state: "open", url: nil, labels: []}
 
       :sys.replace_state(pid, fn state ->
-        %{state | running: %{"9" => running_entry(issue, ref)}, claimed: MapSet.new(["9"]), autopilot: %{state.autopilot | research_finished_at: DateTime.utc_now()}}
+        %{state | running: %{"9" => running_entry(issue, ref)}, claimed: MapSet.new(["9"]), autopilot: %{state.autopilot | tasks: cooled_tasks()}}
       end)
 
       send(pid, {:worker_model_route, "9", %{"model" => "gpt-6-sol", "effort" => "high", "label" => "default"}})
@@ -674,7 +750,7 @@ defmodule SymphonyElixir.AutopilotTest do
 
       :sys.replace_state(pid, fn state ->
         entry = Map.put(running_entry(issue, ref), :retry_attempt, 1)
-        %{state | running: %{"3" => entry}, claimed: MapSet.new(["3"]), autopilot: %{state.autopilot | research_finished_at: DateTime.utc_now()}}
+        %{state | running: %{"3" => entry}, claimed: MapSet.new(["3"]), autopilot: %{state.autopilot | tasks: cooled_tasks()}}
       end)
 
       send(pid, {:DOWN, ref, :process, self(), :boom})
@@ -692,7 +768,7 @@ defmodule SymphonyElixir.AutopilotTest do
 
       :sys.replace_state(pid, fn state ->
         handled = %{"8" => %{runs: 1, head_sha: "sha-8"}}
-        %{state | autopilot: %{state.autopilot | pr_handled: handled, research_finished_at: DateTime.utc_now()}}
+        %{state | autopilot: %{state.autopilot | pr_handled: handled, tasks: cooled_tasks()}}
       end)
 
       send(pid, :run_poll_cycle)
@@ -727,14 +803,14 @@ defmodule SymphonyElixir.AutopilotTest do
 
   defp cool_down_research(pid) do
     :sys.replace_state(pid, fn state ->
-      %{state | autopilot: Map.put(state.autopilot, :research_finished_at, DateTime.utc_now())}
+      %{state | autopilot: Map.put(state.autopilot, :tasks, cooled_tasks())}
     end)
   end
 
   defp finish_running_research(pid, id) do
     %{ref: ref, pid: worker} = :sys.get_state(pid).running[id]
     Process.exit(worker, :kill)
-    send(pid, {:DOWN, ref, :process, worker, :boom})
+    send(pid, {:DOWN, ref, :process, worker, :normal})
   end
 
   defp running_entry(issue, ref) do
@@ -750,6 +826,13 @@ defmodule SymphonyElixir.AutopilotTest do
       codex_total_tokens: 0,
       started_at: DateTime.utc_now()
     }
+  end
+
+  # Both test channels just finished, so no research starts in the tests that
+  # watch other work.
+  defp cooled_tasks do
+    now = DateTime.utc_now()
+    Map.new(["cleanup", "testing"], &{&1, %{finished_at: now, attempts: 0, retry_at: nil, last: :delivered}})
   end
 
   defp write_autopilot_workflow!(overrides \\ []) do

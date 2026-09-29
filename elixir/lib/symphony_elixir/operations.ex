@@ -303,24 +303,20 @@ defmodule SymphonyElixir.Operations do
     safe_write(fn -> :dets.insert(table, {:pull_inventory, pulls, observed_at}) end)
   end
 
-  @empty_autopilot %{pr_handled: %{}, research_finished_at: nil, research_pending: [], item_attempts: %{}}
+  @empty_autopilot %{pr_handled: %{}, tasks: %{}, item_attempts: %{}}
 
   @doc """
   Autopilot memory that must survive restarts: the head commit and run count
-  per pull request, the channels left in the current research round, and when
-  the last round finished.
+  per pull request, each autopilot task's last finish, attempts and retry
+  time, and each item's failed attempts. State saved before per-task
+  schedules starts every task fresh.
   """
-  @spec autopilot_state(handle()) :: %{
-          pr_handled: map(),
-          research_finished_at: DateTime.t() | nil,
-          research_pending: [String.t()],
-          item_attempts: map()
-        }
+  @spec autopilot_state(handle()) :: %{pr_handled: map(), tasks: map(), item_attempts: map()}
   def autopilot_state(nil), do: @empty_autopilot
 
   def autopilot_state(table) do
     case :dets.lookup(table, :autopilot) do
-      [{:autopilot, %{} = state}] -> Map.merge(@empty_autopilot, state)
+      [{:autopilot, %{} = state}] -> Map.merge(@empty_autopilot, Map.take(state, Map.keys(@empty_autopilot)))
       _ -> @empty_autopilot
     end
   rescue

@@ -970,6 +970,8 @@ defmodule SymphonyElixir.ExtensionsTest do
       %{kind: "pr_merged", at: at.(10), pr_number: 41, pr_url: "https://github.com/acme/app/pull/41", summary: "Tidy the README"},
       %{kind: "completed", at: at.(20), issue_identifier: "PR-41", category: "review", seconds: 300, usd_micro: 250_000},
       %{kind: "completed", at: at.(30), issue_identifier: "research-marketing", seconds: 600, usd_micro: 0},
+      %{kind: "task_delivered", at: at.(31), issue_identifier: "research-marketing", category: "marketing", summary: "0 issues · 2 PRs"},
+      %{kind: "task_short", at: at.(51), issue_identifier: "research-qa", summary: "0 issues · 0 PRs (asked for 3 issues, 0 PRs)"},
       %{kind: "failed", at: at.(40), issue_identifier: "GH-7", title: "Broken build", category: "delivery"},
       %{kind: "stopped", at: at.(50), issue_identifier: "research-qa"},
       %{kind: "interrupted", at: at.(55), issue_identifier: "GH-8"},
@@ -1019,9 +1021,33 @@ defmodule SymphonyElixir.ExtensionsTest do
     [running] = static_snapshot().running
     running = Map.put(running, :route, %{model: "gpt-6.1-sol", effort: "high", label: "default", tier: 2})
 
+    later = fn seconds -> DateTime.add(DateTime.utc_now(), seconds, :second) end
+    base = %{source: "repo", when: "idle", every_ms: 86_400_000, due_at: later.(-60), attempts: 0, last: nil, finished_at: nil}
+    task = fn name, overrides -> base |> Map.put(:name, name) |> Map.merge(overrides) end
+
+    autopilot = %{
+      enabled: true,
+      channels: ["deps", "docs", "qa", "ux"],
+      research_pending: ["docs"],
+      research_running: 0,
+      open_issues: 2,
+      max_open_issues: 10,
+      next_research_at: later.(3_600),
+      repo: %{state: :synced, error: nil},
+      tasks: [
+        task.("deps", %{when: "anytime", every_ms: 604_800_000, due_at: later.(10_800), last: :delivered}) |> Map.put(:finished_at, later.(-600)),
+        task.("docs", %{}),
+        task.("qa", %{when: "anytime", every_ms: 3_600_000, due_at: DateTime.to_iso8601(later.(1_800))}) |> Map.merge(%{attempts: 1, last: :short}),
+        task.("ux", %{every_ms: 5_400_000, due_at: "not a time"}),
+        task.("HTTP", %{})
+      ]
+    }
+
+    researching = %{running | identifier: "research-ux", issue_id: "research:ux"}
+
     snapshot =
       static_snapshot()
-      |> Map.merge(%{operations: usage, upcoming: upcoming, pull_requests: pulls, running: [running]})
+      |> Map.merge(%{operations: usage, upcoming: upcoming, pull_requests: pulls, running: [running, researching], autopilot: autopilot})
 
     {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
@@ -1041,10 +1067,11 @@ defmodule SymphonyElixir.ExtensionsTest do
           "Review done",
           "5m 0s",
           "$0.250",
-          "Marketing done",
+          "Marketing delivered",
+          "0 issues · 2 PRs",
+          "Research fell short",
           "Delivery failed",
           "Broken build",
-          "Research stopped",
           "Delivery interrupted",
           "PR opened",
           "Issue closed",
@@ -1065,6 +1092,21 @@ defmodule SymphonyElixir.ExtensionsTest do
       assert html =~ text
     end
 
+    # Autopilot tasks show where they come from and when each runs next.
+    for text <- [
+          "Autopilot",
+          ~s(class="research-channel step-running"),
+          ~s(class="task-source source-repo"),
+          "due · when idle",
+          "retry 2 in 29m",
+          "in 2h 59m",
+          "every 7d · anytime · repo · last delivered",
+          "every 1h",
+          "every 90m"
+        ] do
+      assert html =~ text
+    end
+
     # Dispatches show as running work, not as finished rows.
     refute html =~ "GH-3"
 
@@ -1073,6 +1115,16 @@ defmodule SymphonyElixir.ExtensionsTest do
     :sys.replace_state(Process.whereis(orchestrator_name), &Keyword.put(&1, :snapshot, %{snapshot | operations: usage}))
     {:ok, _view, html} = live(build_conn(), "/")
     assert html =~ "Delivery · gpt-7"
+
+    # A failed repository read is flagged; local tasks say so.
+    failed = %{autopilot | repo: %{state: :error, error: ":timeout"}, tasks: [task.("docs", %{source: "local"})]}
+    :sys.replace_state(Process.whereis(orchestrator_name), &Keyword.put(&1, :snapshot, %{snapshot | autopilot: failed}))
+    {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ "source-repo-error"
+    failed = %{failed | repo: %{state: :synced}}
+    :sys.replace_state(Process.whereis(orchestrator_name), &Keyword.put(&1, :snapshot, %{snapshot | autopilot: failed}))
+    {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ "source-local"
   end
 
   test "artifact route serves stored run images and nothing else" do

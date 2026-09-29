@@ -322,21 +322,17 @@ defmodule SymphonyElixirWeb.DashboardLive do
     ~H"""
     <section class="panel" aria-labelledby="autopilot-title">
       <header class="section-head"><h2 id="autopilot-title">Autopilot</h2></header>
-      <ul :if={research_rows(@payload) != []} class="research-rows" aria-label="Research rounds by project">
-        <li :for={{project, channels} <- research_rows(@payload)} class="research-row">
-          <span class="research-project"><%= project %></span>
-          <span :for={{channel, status} <- channels} class={"research-channel step-#{status}"} title={"#{channel}: #{channel_status_label(status) || "idle"}"}>
-            <span class="step-dot" aria-hidden="true"></span><%= channel %>
-          </span>
+      <ul class="research-rows" aria-label="Autopilot tasks by project">
+        <li :for={{project, source, tasks} <- task_groups(@payload)} class="research-row">
+          <span :if={project} class="research-project"><%= project %></span>
+          <span class={"task-source source-#{source}"} title={source_title(source)}><%= source %></span>
+          <span
+            :for={task <- tasks}
+            class={"research-channel step-#{task_state(task, @payload, @now)}"}
+            title={task_title(task, @now)}
+          ><span class="step-dot" aria-hidden="true"></span><%= task.name %> <span class="task-when"><%= task_when(task, @payload, @now) %></span></span>
         </li>
       </ul>
-      <ol :if={research_rows(@payload) == []} class="stepper" aria-label="Research round">
-        <li :for={channel <- Map.get(@payload.autopilot, :channels, [])} class={"step step-#{channel_status(@payload, channel)}"}>
-          <span class="step-dot" aria-hidden="true"></span>
-          <span class="step-name"><%= channel %></span>
-          <span :if={channel_status_label(channel_status(@payload, channel))} class="step-state"><%= channel_status_label(channel_status(@payload, channel)) %></span>
-        </li>
-      </ol>
       <p class="panel-copy"><%= research_summary(@payload.autopilot, @now) %></p>
       <Charts.meter
         :if={Map.get(@payload.autopilot, :max_open_issues)}
@@ -573,56 +569,71 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp share(_part, total) when total in [0, nil], do: "—"
   defp share(part, total), do: "#{format_int(part)} · #{round(part * 100 / total)}%"
 
-  defp channel_status(payload, channel) do
-    running? = Enum.any?(payload.running, &(&1.issue_identifier == "research-#{channel}"))
-    pending = Map.get(payload.autopilot, :research_pending, [])
+  # Tasks grouped per project (one group without a service), each group
+  # marked by where its tasks come from: the repository folder or local config.
+  defp task_groups(payload) do
+    autopilot = payload.autopilot
+    repos = Map.get(autopilot, :repos) || %{}
 
+    autopilot
+    |> Map.get(:tasks, [])
+    |> Enum.group_by(& &1[:project])
+    |> Enum.sort_by(fn {project, _tasks} -> to_string(project) end)
+    |> Enum.map(fn {project, tasks} -> {project, task_source(tasks, Map.get(repos, project) || autopilot[:repo]), Enum.sort_by(tasks, & &1.name)} end)
+  end
+
+  defp task_source(tasks, repo) do
     cond do
-      running? -> "running"
-      channel in pending -> "pending"
-      pending != [] -> "done"
+      match?(%{state: :error}, repo) -> "repo-error"
+      Enum.any?(tasks, &(&1.source == "repo")) -> "repo"
+      true -> "local"
+    end
+  end
+
+  defp source_title("repo"), do: "Tasks from the repository's .crescendo/autopilot/ folder"
+  defp source_title("repo-error"), do: "Reading the repository's .crescendo/autopilot/ folder failed; the last copy is in use"
+  defp source_title(_source), do: "Tasks from the local project config"
+
+  defp task_running?(task, payload) do
+    Enum.any?(payload.running, &(&1.issue_identifier == "research-" <> task.name and &1[:project] == task[:project]))
+  end
+
+  defp task_state(task, payload, now) do
+    cond do
+      task_running?(task, payload) -> "running"
+      task.attempts > 0 -> "retry"
+      DateTime.compare(task_due(task), now) != :gt -> "pending"
       true -> "idle"
     end
   end
 
-  # Under a service each project runs its own rounds (channels are named
-  # `project/channel`): one compact row per project, statuses from its own round.
-  defp research_rows(payload) do
-    pending = Map.get(payload.autopilot, :research_pending, [])
-    running = for %{issue_identifier: "research-" <> channel} = entry <- payload.running, do: "#{entry[:project]}/#{channel}"
-
-    payload.autopilot
-    |> Map.get(:channels, [])
-    |> Enum.filter(&String.contains?(&1, "/"))
-    |> Enum.map(&List.to_tuple(String.split(&1, "/", parts: 2)))
-    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
-    |> Enum.sort()
-    |> Enum.map(fn {project, channels} ->
-      in_round? = Enum.any?(pending, &String.starts_with?(&1, project <> "/"))
-      {project, Enum.map(channels, &{&1, research_status("#{project}/#{&1}", running, pending, in_round?)})}
-    end)
-  end
-
-  defp research_status(name, running, pending, in_round?) do
+  defp task_when(task, payload, now) do
     cond do
-      name in running -> "running"
-      name in pending -> "pending"
-      in_round? -> "done"
-      true -> "idle"
+      task_running?(task, payload) -> "running"
+      task.attempts > 0 -> "retry #{task.attempts + 1} #{until(task_due(task), now)}"
+      DateTime.compare(task_due(task), now) != :gt -> if(task.when == "idle", do: "due · when idle", else: "due")
+      true -> until(task_due(task), now)
     end
   end
 
-  defp channel_status_label("running"), do: "running"
-  defp channel_status_label("pending"), do: "queued"
-  defp channel_status_label("done"), do: "done"
-  defp channel_status_label(_status), do: nil
+  defp task_title(task, now) do
+    last = if task.last, do: " · last #{task.last}#{if task.finished_at, do: " #{ago(task.finished_at, now)}"}", else: ""
+    "#{task.name}: every #{format_every(task.every_ms)} · #{task.when} · #{task.source}#{last}"
+  end
+
+  defp task_due(%{due_at: %DateTime{} = due_at}), do: due_at
+  defp task_due(%{due_at: due_at}), do: parse_time(due_at) || ~U[1970-01-01 00:00:00Z]
+
+  defp format_every(ms) when rem(ms, 86_400_000) == 0, do: "#{div(ms, 86_400_000)}d"
+  defp format_every(ms) when rem(ms, 3_600_000) == 0, do: "#{div(ms, 3_600_000)}h"
+  defp format_every(ms), do: "#{div(ms, 60_000)}m"
 
   defp research_summary(autopilot, now) do
     cond do
       Map.get(autopilot, :research_running, 0) > 0 -> "Research is planning new work."
-      Map.get(autopilot, :research_pending, []) != [] -> "Round in progress; resumes when the queue is idle."
-      next = Map.get(autopilot, :next_research_at) -> "Next research round #{until(next, now)}, once the queue is empty."
-      true -> "Research starts when the queue is empty."
+      Map.get(autopilot, :research_pending, []) != [] -> "Tasks are due; idle tasks start when the queue is empty."
+      next = Map.get(autopilot, :next_research_at) -> "Next task #{until(next, now)}."
+      true -> "Tasks start when they are due."
     end
   end
 

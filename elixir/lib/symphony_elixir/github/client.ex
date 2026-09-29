@@ -137,6 +137,52 @@ defmodule SymphonyElixir.GitHub.Client do
     end
   end
 
+  @doc """
+  Reads a file or directory listing from the repository's default branch
+  (the contents API). A missing path answers `{:ok, :not_found}`.
+  """
+  @spec fetch_contents(String.t(), keyword()) :: {:ok, term()} | {:error, term()}
+  def fetch_contents(path, opts \\ []) when is_binary(path) do
+    tracker_settings = Keyword.get_lazy(opts, :tracker_settings, fn -> Config.settings!().tracker end)
+    request_fun = Keyword.get(opts, :request_fun, &perform_request/5)
+    encoded = path |> String.split("/") |> Enum.map_join("/", &URI.encode(&1, fn char -> URI.char_unreserved?(char) end))
+
+    with {:ok, settings} <- settings(tracker_settings) do
+      request_with_settings("GET", "/repos/#{encoded_repo(settings.repo)}/contents/#{encoded}", %{}, nil, settings, request_fun, true)
+    end
+  end
+
+  @doc """
+  Counts the issues and pull requests carrying `label` that were opened at or
+  after `since`: what an autopilot task run delivered.
+  """
+  @spec fetch_task_deliveries(String.t(), DateTime.t(), keyword()) ::
+          {:ok, %{issues: non_neg_integer(), pull_requests: non_neg_integer()}} | {:error, term()}
+  def fetch_task_deliveries(label, %DateTime{} = since, opts \\ []) do
+    tracker_settings = Keyword.get_lazy(opts, :tracker_settings, fn -> Config.settings!().tracker end)
+    request_fun = Keyword.get(opts, :request_fun, &perform_request/5)
+    params = %{"labels" => label, "state" => "all", "since" => DateTime.to_iso8601(since), "per_page" => @page_size}
+
+    with {:ok, settings} <- settings(tracker_settings),
+         {:ok, items} when is_list(items) <- request_with_settings("GET", "/repos/#{encoded_repo(settings.repo)}/issues", params, nil, settings, request_fun, false) do
+      opened = Enum.filter(items, &opened_since?(&1, since))
+      {prs, issues} = Enum.split_with(opened, &Map.has_key?(&1, "pull_request"))
+      {:ok, %{issues: length(issues), pull_requests: length(prs)}}
+    else
+      {:ok, _payload} -> {:error, :github_unknown_payload}
+      error -> error
+    end
+  end
+
+  defp opened_since?(%{"created_at" => created_at}, since) do
+    case DateTime.from_iso8601(to_string(created_at)) do
+      {:ok, at, _offset} -> DateTime.compare(at, since) != :lt
+      _ -> false
+    end
+  end
+
+  defp opened_since?(_item, _since), do: false
+
   @spec fetch_open_pull_requests() :: {:ok, [map()]} | {:error, term()}
   def fetch_open_pull_requests do
     fetch_open_pull_requests_for_test(Config.settings!().tracker, &perform_request/5)

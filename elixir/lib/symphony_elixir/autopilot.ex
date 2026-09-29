@@ -1,7 +1,8 @@
 defmodule SymphonyElixir.Autopilot do
   @moduledoc """
   Pure policy for autopilot work: when a pull request deserves another review
-  pass, and when the idle queue should be re-hydrated by research runs.
+  pass, and when each autopilot task (a research channel: local, or from the
+  repository's `.crescendo/autopilot/`) is due to run again.
 
   The orchestrator owns the state (persisted through `Operations`) and applies
   these decisions; this module never talks to the tracker.
@@ -11,8 +12,7 @@ defmodule SymphonyElixir.Autopilot do
 
   @type state :: %{
           pr_handled: %{optional(String.t()) => map()},
-          research_finished_at: DateTime.t() | nil,
-          research_pending: [String.t()],
+          tasks: %{optional(String.t()) => map()},
           item_attempts: %{optional(String.t()) => pos_integer()}
         }
 
@@ -137,47 +137,102 @@ defmodule SymphonyElixir.Autopilot do
   defp item_attempts(state), do: Map.get(state, :item_attempts, %{})
 
   @doc """
-  Picks the next research channel to run, if any. Research runs as rounds:
-  a round covers every configured channel one at a time, so planners never
-  share the machine. An unfinished round continues without waiting for the
-  cooldown; a new round starts once the cooldown since the last round has
-  elapsed. Either way the open issue backlog must be below its cap. The caller
-  checks that the machine is otherwise idle.
+  Picks the next autopilot task (research channel) to run, if any. Each task
+  has its own schedule: it is due when it never ran, when `every` has passed
+  since it last finished, or when a retry of a short run falls due. Tasks
+  with `when: idle` only start when the project has nothing else to do
+  (`idle: true`); `when: anytime` tasks start whenever a slot is free. The
+  most overdue task goes first. Tasks that ask for issues wait while the open
+  issue backlog is at its cap; `running` names tasks already in flight.
   """
-  @spec next_research(state(), map(), non_neg_integer(), DateTime.t()) :: {state(), Issue.t() | nil}
-  def next_research(state, autopilot_settings, open_issue_count, now) do
-    channels = autopilot_settings.channels |> Map.keys() |> Enum.sort()
-    pending = Enum.filter(Map.get(state, :research_pending, []), &(&1 in channels))
+  @spec next_research(state(), map(), non_neg_integer(), DateTime.t(), keyword()) :: {state(), Issue.t() | nil}
+  def next_research(state, autopilot_settings, open_issue_count, now, opts \\ []) do
+    idle = Keyword.get(opts, :idle, true)
+    running = Keyword.get(opts, :running, [])
+    capped = open_issue_count >= autopilot_settings.max_open_issues
 
-    cond do
-      not autopilot_settings.enabled or open_issue_count >= autopilot_settings.max_open_issues ->
-        {state, nil}
+    next =
+      if autopilot_settings.enabled do
+        autopilot_settings
+        |> research_items()
+        |> Enum.filter(&startable?(&1.research, idle, running, capped))
+        |> Enum.map(&{&1, due_at(state, &1.research, now)})
+        |> Enum.filter(fn {_item, due_at} -> DateTime.compare(due_at, now) != :gt end)
+        |> Enum.min_by(&overdue_order/1, fn -> nil end)
+      end
 
-      pending != [] ->
-        {%{state | research_pending: pending}, research_item(autopilot_settings, hd(pending))}
-
-      cooled_down?(state.research_finished_at, autopilot_settings.research_cooldown_ms, now) ->
-        {%{state | research_pending: channels}, research_item(autopilot_settings, hd(channels))}
-
-      true ->
-        {state, nil}
-    end
+    {state, next && elem(next, 0)}
   end
+
+  defp startable?(research, idle, running, capped) do
+    research.channel not in running and (idle or research.when == "anytime") and not (capped and research.min_issues > 0)
+  end
+
+  defp overdue_order({item, due_at}), do: {DateTime.to_unix(due_at, :microsecond), item.research.channel}
+
+  @retry_ms 30 * 60 * 1000
 
   @doc """
-  Ends one channel's research run, whatever its outcome. The cooldown starts
-  when the round's last channel finishes.
+  Ends one task run. A delivered run (or one whose deliveries could not be
+  checked) starts the task's interval. A short or failed run is retried
+  30 minutes later, behind other work; its last allowed attempt
+  ends the task until it is next due. Nothing waits for an operator.
   """
-  @spec record_research_finished(state(), String.t(), DateTime.t()) :: state()
-  def record_research_finished(state, channel, now) do
-    case List.delete(Map.get(state, :research_pending, []), channel) do
-      [] -> %{state | research_pending: [], research_finished_at: now}
-      pending -> %{state | research_pending: pending}
+  @spec record_research_finished(state(), String.t(), atom(), DateTime.t(), map()) :: state()
+  def record_research_finished(state, channel, outcome, now, autopilot_settings) do
+    task = state |> tasks() |> Map.get(channel, %{attempts: 0})
+    attempts = Map.get(task, :attempts, 0) + if(outcome in [:short, :failed], do: 1, else: 0)
+
+    task =
+      cond do
+        outcome in [:delivered, :unverified] -> %{done(now) | last: outcome}
+        attempts >= autopilot_settings.max_item_attempts -> %{done(now) | last: :gave_up}
+        true -> retry(task, attempts, outcome, now)
+      end
+
+    Map.put(state, :tasks, Map.put(tasks(state), channel, task))
+  end
+
+  defp done(now), do: %{finished_at: now, attempts: 0, retry_at: nil, last: nil}
+
+  defp retry(task, attempts, outcome, now) do
+    Map.merge(%{finished_at: nil}, task) |> Map.merge(%{attempts: attempts, retry_at: DateTime.add(now, @retry_ms, :millisecond), last: outcome})
+  end
+
+  @doc "When each configured task is next due, for the dashboard and health checks."
+  @spec task_statuses(state(), map(), DateTime.t()) :: [map()]
+  def task_statuses(state, autopilot_settings, now) do
+    for %Issue{research: research} <- research_items(autopilot_settings) do
+      task = Map.get(tasks(state), research.channel, %{})
+
+      %{
+        name: research.channel,
+        source: research.source,
+        when: research.when,
+        every_ms: research.every_ms,
+        due_at: due_at(state, research, now),
+        attempts: Map.get(task, :attempts, 0),
+        last: Map.get(task, :last),
+        finished_at: Map.get(task, :finished_at)
+      }
     end
   end
 
-  defp cooled_down?(nil, _cooldown_ms, _now), do: true
-  defp cooled_down?(finished_at, cooldown_ms, now), do: DateTime.diff(now, finished_at, :millisecond) >= cooldown_ms
+  @doc "When the last task run finished, if any."
+  @spec last_finished_at(state()) :: DateTime.t() | nil
+  def last_finished_at(state) do
+    state |> tasks() |> Map.values() |> Enum.map(&Map.get(&1, :finished_at)) |> Enum.reject(&is_nil/1) |> Enum.max(DateTime, fn -> nil end)
+  end
+
+  defp tasks(state), do: Map.get(state, :tasks, %{})
+
+  defp due_at(state, research, _now) do
+    case Map.get(tasks(state), research.channel, %{}) do
+      %{retry_at: %DateTime{} = retry_at} -> retry_at
+      %{finished_at: %DateTime{} = finished_at} -> DateTime.add(finished_at, research.every_ms, :millisecond)
+      _ -> ~U[1970-01-01 00:00:00Z]
+    end
+  end
 
   @doc "One synthetic research item per configured channel, in name order."
   @spec research_items(map()) :: [Issue.t()]
@@ -188,11 +243,13 @@ defmodule SymphonyElixir.Autopilot do
     |> Enum.map(&research_item(autopilot_settings, &1))
   end
 
-  # A channel is its focus text or an object that may also set its own issue
-  # counts and route; its own prompt file is chosen by the prompt builder.
+  # A channel is its focus text or an object that may also set its own
+  # schedule, deliveries, expectations and route; its own prompt is chosen by
+  # the prompt builder.
   defp research_item(autopilot_settings, channel) do
     spec = channel_spec(Map.fetch!(autopilot_settings.channels, channel))
     prefix = Map.get(autopilot_settings, :label_prefix, "symphony")
+    {min_issues, max_issues} = issue_counts(spec, autopilot_settings)
 
     %Issue{
       id: "research:#{channel}",
@@ -205,13 +262,46 @@ defmodule SymphonyElixir.Autopilot do
       research: %{
         channel: channel,
         focus: spec["focus"],
-        min_issues: spec["min_issues"] || autopilot_settings.min_issues_per_channel,
-        max_issues: spec["max_issues"] || autopilot_settings.max_issues_per_channel,
-        route: spec["route"]
+        min_issues: min_issues,
+        max_issues: max_issues,
+        pull_requests: pull_requests(get_in(spec, ["delivers", "pull_requests"])),
+        expectations: Map.get(spec, "expectations") || [],
+        route: spec["route"] || effort_route(autopilot_settings, spec["effort"]),
+        every_ms: duration_ms(spec["every"]) || autopilot_settings.research_cooldown_ms,
+        when: Map.get(spec, "when") || "idle",
+        source: Map.get(spec, "source") || "local"
       }
     }
   end
 
+  # `delivers.issues` (repository tasks) or `min_issues`/`max_issues` (local channels).
+  defp issue_counts(spec, settings) do
+    issues = get_in(spec, ["delivers", "issues"]) || %{}
+    min = issues["min"] || spec["min_issues"] || settings.min_issues_per_channel
+    {min, issues["max"] || spec["max_issues"] || settings.max_issues_per_channel}
+  end
+
+  defp pull_requests(nil), do: nil
+  defp pull_requests(pulls), do: %{min: pulls["min"] || 0, max: pulls["max"], paths: pulls["paths"] || []}
+
+  # An effort names a rung of the research model's ladder; the model stays the service's.
+  defp effort_route(_autopilot_settings, nil), do: nil
+  defp effort_route(%{research_route: %{"model" => model}}, effort), do: %{"model" => model, "effort" => effort}
+  defp effort_route(_autopilot_settings, _effort), do: nil
+
   defp channel_spec(focus) when is_binary(focus), do: %{"focus" => focus}
   defp channel_spec(%{} = spec), do: spec
+
+  @doc "Parses a schedule interval such as `30m`, `6h`, `1d` or `2w` (or milliseconds) to milliseconds."
+  @spec duration_ms(term()) :: pos_integer() | nil
+  def duration_ms(ms) when is_integer(ms) and ms > 0, do: ms
+
+  def duration_ms(text) when is_binary(text) do
+    case Regex.run(~r/^\s*(\d+)\s*(m|h|d|w)\s*$/, text) do
+      [_all, count, unit] when count != "0" -> String.to_integer(count) * Map.fetch!(%{"m" => 60_000, "h" => 3_600_000, "d" => 86_400_000, "w" => 604_800_000}, unit)
+      _ -> nil
+    end
+  end
+
+  def duration_ms(_value), do: nil
 end

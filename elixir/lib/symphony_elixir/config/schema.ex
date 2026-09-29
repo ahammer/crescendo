@@ -429,14 +429,21 @@ defmodule SymphonyElixir.Config.Schema do
       field(:trusted_associations, {:array, :string}, default: ["OWNER", "MEMBER", "COLLABORATOR"])
       field(:trusted_authors, {:array, :string}, default: [])
       field(:prompts, :map, default: %{})
+      # A repository's `.crescendo/autopilot/` folder: whether its tasks replace
+      # the channels above, which of its tasks to skip, and (set by the loader)
+      # its guidelines file.
+      field(:repo_tasks, :boolean, default: true)
+      field(:disabled_tasks, {:array, :string}, default: [])
+      field(:guidelines, :string)
       # Derived from `labels.prefix`; not configured here.
       field(:label_prefix, :string, default: "symphony")
     end
 
     @prompt_kinds ["pull_request", "research"]
     @channel_name ~r/^[a-z0-9][a-z0-9-]*$/
-    @channel_keys ["focus", "prompt", "min_issues", "max_issues", "route"]
-    @channel_error "names must be lowercase letters, digits, or dashes and map to focus text or {focus, prompt, min_issues, max_issues, route}"
+    @channel_keys ["focus", "prompt", "min_issues", "max_issues", "route", "effort", "every", "when", "expectations", "delivers", "source"]
+    @channel_error "names must be lowercase letters, digits, or dashes and map to focus text or " <>
+                     "{focus, prompt, min_issues, max_issues, route, effort, every, when, expectations, delivers}"
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
@@ -458,7 +465,10 @@ defmodule SymphonyElixir.Config.Schema do
           :blocked_label,
           :trusted_associations,
           :trusted_authors,
-          :prompts
+          :prompts,
+          :repo_tasks,
+          :disabled_tasks,
+          :guidelines
         ],
         empty_values: []
       )
@@ -505,14 +515,47 @@ defmodule SymphonyElixir.Config.Schema do
 
     defp valid_channel?(%{"focus" => focus} = spec) when is_binary(focus) do
       Map.keys(spec) -- @channel_keys == [] and
-        (is_nil(spec["prompt"]) or (is_binary(spec["prompt"]) and String.trim(spec["prompt"]) != "")) and
-        optional_count?(spec["min_issues"], 0) and optional_count?(spec["max_issues"], 1) and
-        (is_nil(spec["route"]) or SymphonyElixir.ModelRouting.validate_route(spec["route"]) == :ok)
+        Enum.all?([&valid_prompt?/1, &valid_counts?/1, &valid_route?/1, &valid_schedule?/1, &valid_task_fields?/1], & &1.(spec))
     end
 
     defp valid_channel?(_spec), do: false
 
     defp optional_count?(count, least), do: is_nil(count) or (is_integer(count) and count >= least)
+
+    defp valid_prompt?(spec), do: is_nil(spec["prompt"]) or (is_binary(spec["prompt"]) and String.trim(spec["prompt"]) != "")
+    defp valid_counts?(spec), do: optional_count?(spec["min_issues"], 0) and optional_count?(spec["max_issues"], 1)
+    defp valid_route?(spec), do: is_nil(spec["route"]) or SymphonyElixir.ModelRouting.validate_route(spec["route"]) == :ok
+
+    defp valid_task_fields?(spec) do
+      valid_delivers?(spec["delivers"]) and string_list?(spec["expectations"]) and
+        (is_nil(spec["effort"]) or is_binary(spec["effort"])) and spec["source"] in [nil, "local", "repo"]
+    end
+
+    defp string_list?(nil), do: true
+    defp string_list?(values), do: is_list(values) and Enum.all?(values, &(is_binary(&1) and &1 != ""))
+
+    defp valid_schedule?(spec) do
+      (is_nil(spec["every"]) or SymphonyElixir.Autopilot.duration_ms(spec["every"]) != nil) and spec["when"] in [nil, "idle", "anytime"]
+    end
+
+    # `delivers` lists what a task run must produce: issues and pull requests
+    # (counts, and for pull requests the paths they may touch).
+    defp valid_delivers?(nil), do: true
+
+    defp valid_delivers?(%{} = delivers) do
+      Map.keys(delivers) -- ["issues", "pull_requests"] == [] and Enum.all?(Map.values(delivers), &valid_delivery?/1)
+    end
+
+    defp valid_delivers?(_delivers), do: false
+
+    defp valid_delivery?(%{} = delivery) do
+      Map.keys(delivery) -- ["min", "max", "paths"] == [] and delivery_range?(delivery) and string_list?(delivery["paths"])
+    end
+
+    defp valid_delivery?(_delivery), do: false
+
+    defp delivery_range?(%{"min" => min, "max" => max}), do: optional_count?(min, 0) and optional_count?(max, 1) and (min || 0) <= (max || min || 0)
+    defp delivery_range?(delivery), do: optional_count?(delivery["min"], 0) and optional_count?(delivery["max"], 1)
 
     defp validate_channel_ranges(%{valid?: false} = changeset), do: changeset
 
@@ -525,6 +568,7 @@ defmodule SymphonyElixir.Config.Schema do
       end
     end
 
+    defp inverted_range?({_name, %{"delivers" => %{"issues" => %{}}}}, _defaults), do: false
     defp inverted_range?({_name, %{} = spec}, {min, max}), do: (spec["min_issues"] || min) > (spec["max_issues"] || max)
     defp inverted_range?(_channel, _defaults), do: false
 

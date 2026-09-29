@@ -7,6 +7,7 @@ defmodule SymphonyElixir.Commands do
       crescendo labels sync <crescendo.yml> [<project>]
       crescendo labels migrate <crescendo.yml> <project> --from <old-prefix>
       crescendo drain on|off <crescendo.yml>
+      crescendo autopilot check <.crescendo/autopilot> [--workflow <WORKFLOW.md>]
 
   `project add` writes `projects/<id>/` from the built-in templates (never
   overwriting) and prints the line to add under `projects:`. `labels sync`
@@ -15,7 +16,9 @@ defmodule SymphonyElixir.Commands do
   `<old-prefix>:` label to its twin under the project's prefix (run
   `labels sync` first); the old labels stay for history.
   `drain on` holds all new dispatch (running work finishes); `drain off`
-  releases it.
+  releases it. `autopilot check` validates a repository's autopilot folder
+  (task schedules, deliveries and prompt templates) and prints its tasks;
+  with `--workflow` it also checks task efforts against that project's ladder.
   """
 
   alias SymphonyElixir.{Config.Schema, Service, Workflow}
@@ -35,6 +38,8 @@ defmodule SymphonyElixir.Commands do
   def run(["labels", "sync", path | projects], gh), do: labels_sync(path, projects, gh)
   def run(["labels", "migrate", path, project, "--from", old], gh), do: labels_migrate(path, project, old, gh)
   def run(["drain", mode, path], _gh) when mode in ["on", "off"], do: drain(mode, path)
+  def run(["autopilot", "check", dir | rest], _gh), do: autopilot_check(dir, rest)
+  def run(["autopilot" | _rest], _gh), do: {:error, usage()}
   def run(["project" | _rest], _gh), do: {:error, usage()}
   def run(["labels" | _rest], _gh), do: {:error, usage()}
   def run(["drain" | _rest], _gh), do: {:error, usage()}
@@ -48,8 +53,74 @@ defmodule SymphonyElixir.Commands do
       crescendo labels sync <crescendo.yml> [<project>...]
       crescendo labels migrate <crescendo.yml> <project> --from <old-prefix>
       crescendo drain on|off <crescendo.yml>
+      crescendo autopilot check <.crescendo/autopilot> [--workflow <WORKFLOW.md>]
     """
   end
+
+  defp autopilot_check(dir, args) do
+    case OptionParser.parse(args, strict: [workflow: :string]) do
+      {opts, [], []} -> check_folder(Path.expand(dir), opts[:workflow])
+      _ -> {:error, usage()}
+    end
+  end
+
+  defp check_folder(dir, workflow) do
+    with true <- File.dir?(dir) || {:error, "#{dir} is not a directory"},
+         {:ok, folder} <- Workflow.read_autopilot_folder(dir) |> check_error(),
+         true <- folder.channels != %{} || {:error, "#{dir} has no tasks/*.md"},
+         {:ok, settings} <- checked_settings(folder, dir, workflow),
+         :ok <- check_templates(folder) do
+      for item <- SymphonyElixir.Autopilot.research_items(settings.autopilot), do: IO.puts(task_line(item.research))
+      IO.puts("guidelines: #{if folder.guidelines, do: Path.relative_to(folder.guidelines, dir), else: "none"}")
+      :ok
+    end
+  end
+
+  # With a project workflow the folder loads exactly as the service would load
+  # it; without one only the folder itself is checked.
+  defp checked_settings(folder, _dir, nil) do
+    config = %{"tracker" => %{"kind" => "memory"}, "autopilot" => %{"enabled" => true, "channels" => folder.channels, "prompts" => %{"pull_request" => "x"}}}
+    Schema.parse(config) |> check_error()
+  end
+
+  defp checked_settings(_folder, dir, workflow) do
+    with {:ok, loaded} <- Workflow.load(Path.expand(workflow), %{}, dir) |> check_error(),
+         {:ok, settings} <- Schema.parse(loaded.config) |> check_error(),
+         :ok <- SymphonyElixir.Config.validate_settings(settings) |> check_error() do
+      {:ok, settings}
+    end
+  end
+
+  defp check_templates(folder) do
+    Enum.find_value(folder.channels, :ok, fn {name, %{"prompt" => path}} ->
+      {_front, body} = path |> File.read!() |> String.split(~r/\R/) |> front_matter_split()
+
+      case Solid.parse(Enum.join(body, "\n")) do
+        {:ok, _template} -> nil
+        {:error, error} -> {:error, "task #{name}: prompt template does not parse: #{inspect(error)}"}
+      end
+    end)
+  end
+
+  defp front_matter_split(["---" | tail]) do
+    case Enum.split_while(tail, &(&1 != "---")) do
+      {front, ["---" | body]} -> {front, body}
+      {front, []} -> {front, []}
+    end
+  end
+
+  defp front_matter_split(lines), do: {[], lines}
+
+  defp task_line(research) do
+    pulls = research.pull_requests
+    effort = (research.route || %{})["effort"] || "default"
+    prs = if pulls, do: " · PRs #{pulls.min}..#{pulls.max || "∞"}#{if pulls.paths != [], do: " in #{Enum.join(pulls.paths, ",")}"}", else: ""
+
+    "#{research.channel}: every #{div(research.every_ms, 60_000)}m · #{research.when} · effort #{effort} · issues #{research.min_issues}..#{research.max_issues}#{prs}"
+  end
+
+  defp check_error({:error, reason}), do: {:error, "invalid autopilot folder: #{inspect(reason)}"}
+  defp check_error(ok), do: ok
 
   defp with_service_dir([path | rest], fun), do: fun.(Path.dirname(Path.expand(path)), rest)
   defp with_service_dir([], _fun), do: {:error, usage()}

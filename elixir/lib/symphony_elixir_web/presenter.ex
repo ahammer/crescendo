@@ -613,7 +613,7 @@ defmodule SymphonyElixirWeb.Presenter do
   defp research_check(%{enabled: true} = autopilot) do
     cond do
       Map.get(autopilot, :research_running, 0) > 0 -> check("Research", "healthy", "Planning new work")
-      (pending = Map.get(autopilot, :research_pending, [])) != [] -> check("Research", "healthy", "Round pending: #{Enum.join(pending, ", ")}")
+      (pending = Map.get(autopilot, :research_pending, [])) != [] -> check("Research", "healthy", "Due: #{Enum.join(pending, ", ")}")
       true -> check("Research", "healthy", "Starts when the queue is empty")
     end
   end

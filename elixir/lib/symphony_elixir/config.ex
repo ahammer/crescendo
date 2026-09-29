@@ -126,8 +126,33 @@ defmodule SymphonyElixir.Config do
       settings.autopilot.enabled and not autopilot_prompts?(settings.autopilot) ->
         {:error, {:invalid_workflow_config, "autopilot requires prompts.pull_request and prompts.research"}}
 
+      message = task_effort_error(settings) ->
+        {:error, {:invalid_workflow_config, message}}
+
       true ->
         Tracker.validate_config(settings.tracker)
+    end
+  end
+
+  # A task's `effort` picks a rung of the ladder for the research model, so
+  # the model stays the service's choice.
+  defp task_effort_error(settings) do
+    efforts = for {_name, %{"effort" => effort}} <- settings.autopilot.channels, do: effort
+    model = (settings.autopilot.research_route || %{})["model"]
+
+    cond do
+      efforts == [] -> nil
+      is_nil(model) -> "autopilot task efforts need autopilot.research_route"
+      true -> unknown_effort(efforts, model, ladder_efforts(settings, model))
+    end
+  end
+
+  defp ladder_efforts(settings, model), do: for(%{"model" => ^model, "effort" => effort} <- (settings.codex.routing || %{})["ladder"] || [], do: effort)
+
+  defp unknown_effort(efforts, model, rungs) do
+    case Enum.find(efforts, &(&1 not in rungs)) do
+      nil -> nil
+      bad -> "autopilot task effort #{bad} is not a #{model} rung of codex.routing.ladder"
     end
   end
 

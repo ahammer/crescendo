@@ -337,18 +337,21 @@ codex:
    `final_attempt` so the reviewer merges or closes the pull request itself.
 2. **Issues next.** Issues labeled `symphony` are implemented. The worker opens a pull request that
    closes the issue, then labels the issue `symphony:in-review`, which hands it to step 1.
-3. **Research when idle.** When nothing is ready and no agent is running, a research round runs each
-   `autopilot.channels` entry in turn, one at a time with the machine to itself. Each run
+3. **Research on schedule.** Each `autopilot.channels` entry (task) runs when it is due, one at a
+   time with the machine to itself: `idle` tasks when nothing is ready and no agent is running,
+   `anytime` tasks whenever a slot is free. Each run
    (`prompts/research.md`; default channels `cleanup`, `optimization`, `testing`) builds, tests,
    benchmarks, and exercises the product headed, then files between `min_issues_per_channel` and
    `max_issues_per_channel` evidence-backed `symphony` issues. `autopilot.research_route` runs
    research on a stronger model than the default issue route, and `autopilot.review_route` fixes
-   the model for pull request reviews. Research pauses while
-   `max_open_issues` are open and for `research_cooldown_ms` after a round's last channel ends.
+   the model for pull request reviews. Tasks that file issues
+   pause while `max_open_issues` are open; `research_cooldown_ms` is the default interval.
    A channel is its focus text or an object that can also carry its own prompt file, issue
    counts and route: `qa: {focus: "...", prompt: prompts/research/qa.md, min_issues: 2,
    max_issues: 4, route: {model: gpt-6.1-sol, effort: xhigh}}`. A channel's `min_issues` may be
-   `0` when finding nothing is a valid outcome. The shared research prompt is
+   `0` when finding nothing is a valid outcome. Channels also take `every` and `when` (their own schedule),
+   `effort`, `expectations` and `delivers`, and a repository's `.crescendo/autopilot/` folder can
+   replace them with its own tasks and guidelines (see `docs/crescendo.md`). The shared research prompt is
    optional when every channel names its own.
 
 Nothing is parked waiting for an operator. A worker that hits a blocker records it and adds

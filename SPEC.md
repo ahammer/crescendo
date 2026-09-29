@@ -2379,8 +2379,19 @@ Extension config (`autopilot` object):
 
 - `enabled` (boolean, default `false`).
 - `channels` (map `name -> focus text`, or `name -> {focus, prompt, min_issues, max_issues,
-  route}`), default `cleanup`, `optimization`, `testing`. Names are lowercase letters, digits, or
-  dashes. A channel object's `min_issues` MAY be `0` for a channel whose findings are optional.
+  route, effort, every, when, expectations, delivers}`), default `cleanup`, `optimization`,
+  `testing`. Names are lowercase letters, digits, or dashes.
+  - A channel object's `min_issues` MAY be `0` for a channel whose findings are optional.
+  - `every` is the channel's own interval (`30m`, `6h`, `1d`, `2w`; default
+    `research_cooldown_ms`).
+  - `when` is `idle` (default) or `anytime`.
+  - `effort` names a rung of `codex.routing.ladder` for the `research_route` model.
+  - `expectations` is a list of text the prompt must meet.
+  - `delivers` is `{issues: {min, max}, pull_requests: {min, max, paths}}`; `delivers.issues`
+    replaces `min_issues`/`max_issues`.
+- `repo_tasks` (boolean, default `true`) and `disabled_tasks` (list): whether a repository's
+  `.crescendo/autopilot/` tasks replace `channels`, and which of them to skip. The folder's
+  `guidelines.md` is appended to every prompt.
 - `min_issues_per_channel` (positive integer, default `1`) and `max_issues_per_channel` (positive
   integer, default `3`): the issue range each research run is asked to file; min must not exceed max.
 - `research_route` (object `{model, effort}`, OPTIONAL): model route for research runs, overriding
@@ -2389,8 +2400,8 @@ Extension config (`autopilot` object):
   overriding label routing and escalation.
 - `max_open_issues` (positive integer, default `10`): research pauses while at least this many open
   issues carry every `tracker.required_labels` label.
-- `research_cooldown_ms` (non-negative integer, default `1800000`): minimum time between the end of
-  the last research run and the next research round.
+- `research_cooldown_ms` (non-negative integer, default `1800000`): the default interval between a
+  channel's runs, for channels without `every`.
 - `max_pr_runs` (positive integer, default `5`): review runs per pull request; a pull request that
   reaches it without merging is retired (commented and closed).
 - `pr_recheck_ms` (non-negative integer, default `3600000`): after a review run ends without a new
@@ -2432,16 +2443,23 @@ Work items carry a `kind`:
   cooldown. Abnormal exits retry with backoff under `agent.max_attempts`. The run that reaches
   `max_pr_runs` renders with `final_attempt` so the reviewer merges or closes the pull request
   itself.
-- Research runs in rounds covering every channel, one channel at a time. A research run starts only
-  when no agent is running and no tracker item is ready, and while it runs nothing else dispatches
-  (including retries), so planners' tests, headed journeys, and measurements have the machine to
-  themselves. A new round needs the cooldown to have elapsed; an unfinished round resumes with its
-  next channel once the machine is idle again. Both need the backlog below `max_open_issues`.
-- Research runs never retry; any exit ends that channel, cleans its workspace, and the cooldown
-  starts when the round's last channel ends.
-- Handled heads and when they were handled, per-PR run counts, the channels left in the current
-  round, and the last round's finish time persist across restarts. A handled head persisted without
-  a time is due for recheck.
+- Each channel (task) runs on its own schedule, one research run at a time.
+  - A channel is due when it never ran, when `every` has passed since it last finished, or when
+    its retry falls due. The most overdue due channel starts first.
+  - An `idle` channel starts only when no agent is running and no tracker item is ready. An
+    `anytime` channel starts whenever a slot is free.
+  - While a research run is active nothing else dispatches (including retries), so planners'
+    tests, headed journeys and measurements have the machine to themselves.
+  - Channels that must file issues (`min_issues > 0`) wait while the backlog is at
+    `max_open_issues`.
+- When a research run ends, the implementation counts the issues and pull requests opened with the
+  channel's label since the run started, and cleans the workspace.
+  - Meeting the minimums (or counts that cannot be read) finishes the channel until it is next due.
+  - Falling short, or a failed run, is a failed attempt, retried 30 minutes later.
+  - The attempt that reaches `max_item_attempts` finishes the channel until it is next due.
+- Handled heads and when they were handled, per-PR run counts, and each channel's last finish,
+  attempts and retry time persist across restarts. A handled head persisted without a time is due
+  for recheck.
 
 ### B.3 Attempts and Retirement
 
