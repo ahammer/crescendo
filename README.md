@@ -31,7 +31,14 @@ All configuration is local: [docs/crescendo.md](docs/crescendo.md) covers the se
 cd elixir
 mise trust && mise install
 mise exec -- mix setup && mise exec -- mix build
-mise exec -- ./bin/crescendo ~/.config/crescendo/crescendo.yml \
+```
+
+Create the service file and its first project using the
+[first-service walkthrough](docs/crescendo.md#first-service) before launching:
+
+```bash
+CRESCENDO_DIR="${CRESCENDO_DIR:-$HOME/.config/crescendo}"
+mise exec -- ./bin/crescendo "$CRESCENDO_DIR/crescendo.yml" --logs-root "$CRESCENDO_DIR/logs" \
   --i-understand-that-this-will-be-running-without-the-usual-guardrails
 ```
 

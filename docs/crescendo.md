@@ -21,16 +21,47 @@ the JSON API are read-only: nothing reachable over HTTP changes state.
   drain                                # present while new dispatch is held for a deploy
 ```
 
-Start the service with the service file instead of a `WORKFLOW.md`:
+## First service
+
+From `elixir/`, choose a configuration directory and a GitHub repository you can access. Replace
+`your-org/your-repo` with its `owner/name`; the generated workflow uses that repository and its
+default `main` branch (pass `--branch` to `project add` if yours differs).
 
 ```bash
-./bin/crescendo ~/.config/crescendo/crescendo.yml --logs-root ~/.local/state/crescendo \
+CRESCENDO_DIR="${CRESCENDO_DIR:-$HOME/.config/crescendo}"
+REPO=your-org/your-repo
+mkdir -p "$CRESCENDO_DIR"
+mise exec -- ./bin/crescendo project add "$CRESCENDO_DIR/crescendo.yml" demo "$REPO"
+cat > "$CRESCENDO_DIR/crescendo.yml" <<'YAML'
+server: {host: 127.0.0.1, port: 4280}
+paths: {state: state}
+pool: {slots: 1}
+projects:
+  demo: {weight: 1}
+YAML
+```
+
+`project add` creates `projects/demo/WORKFLOW.md` and two prompt files, then prints the entry to
+put under `projects:`. It does not create or update `crescendo.yml`; the `cat` command creates it.
+The relative `state` path keeps state under `$CRESCENDO_DIR/state`. Change the loopback port if
+4280 is already in use.
+
+The generated GitHub workflow needs a `GITHUB_TOKEN` with permission to read and write issues,
+pull requests and contents, and to merge. Authenticate `gh` on this host and ensure SSH can clone
+the repository in the generated `after_create` hook. Create its required labels before launching:
+
+```bash
+gh auth status
+export GITHUB_TOKEN="$(gh auth token)"
+mise exec -- ./bin/crescendo labels sync "$CRESCENDO_DIR/crescendo.yml" demo
+mise exec -- ./bin/crescendo "$CRESCENDO_DIR/crescendo.yml" --logs-root "$CRESCENDO_DIR/logs" \
   --i-understand-that-this-will-be-running-without-the-usual-guardrails
 ```
 
-Project workflows and their prompt files hot-reload as before. Adding, removing or reweighting a
-project, or changing the service file, needs a service restart. A project whose workflow cannot
-load is reported on the dashboard (its filter pill is marked) and the other projects still run.
+Start the service with the service file instead of a `WORKFLOW.md`. Project workflows and their
+prompt files hot-reload as before. Adding, removing or reweighting a project, or changing the
+service file, needs a service restart. A project whose workflow cannot load is reported on the
+dashboard (its filter pill is marked) and the other projects still run.
 
 ## Install and deploy
 
