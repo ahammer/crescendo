@@ -36,7 +36,7 @@ mise exec -- ./bin/crescendo ~/.config/crescendo/crescendo.yml \
 ```
 
 A single `WORKFLOW.md` still runs one project on its own, as Symphony does:
-`./bin/crescendo path/to/WORKFLOW.md`.
+`./bin/crescendo path/to/WORKFLOW.md --i-understand-that-this-will-be-running-without-the-usual-guardrails`.
 
 ## About Symphony
 
