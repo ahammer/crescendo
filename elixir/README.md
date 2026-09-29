@@ -253,9 +253,9 @@ codex:
 - If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
 - If a later reload fails, Symphony keeps running with the last known good workflow and logs the
   reload error until the file is fixed.
-- `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
-  `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`, plus run images at
-  `/artifacts/<run_id>/<name>`.
+- `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and read-only JSON
+  API at `/`, `/api/v1/state`, and `/api/v1/<issue_identifier>`, plus run images at
+  `/artifacts/<run_id>/<name>`. Use `GET /api/v1/state` to observe state; issue polling is automatic.
 - `observability.daily_budget_usd` (default `50`) is the estimated daily worker spend at which the
   dashboard raises its usage alert when no enforced `throttle.daily_budget_usd` is set.
 
