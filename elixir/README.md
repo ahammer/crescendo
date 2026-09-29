@@ -197,8 +197,8 @@ Notes:
     (never below the item's own or the default start; with none allowed the run waits).
   - Quota older than `quota_stale_ms` (default two hours) or never seen counts as unknown;
     `on_unknown_quota: restrict` (default) still avoids models then but never pauses. A stale
-    reading below a pause threshold still holds, so while the quota is stale the service reads it
-    straight from `codex app-server` every five minutes and resumes as soon as the window resets.
+    reading below a pause threshold still holds, so while the quota is stale or paused the service
+    reads it straight from `codex app-server` every five minutes and resumes once the window resets.
   - Waiting on a slot or the throttle is never a failed attempt: a held retry keeps its attempt
     number and checks again every 30 seconds.
 - `pricing` overrides or adds model prices for spend estimates and the budget:

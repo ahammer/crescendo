@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.QuotaProbeTest do
   use ExUnit.Case
 
-  alias SymphonyElixir.{Governor, QuotaProbe, Service}
+  alias SymphonyElixir.{Governor, Quota, QuotaProbe, Service}
 
   setup do
     root = Path.join(System.tmp_dir!(), "symphony-quota-probe-#{System.unique_integer([:positive])}")
@@ -48,5 +48,28 @@ defmodule SymphonyElixir.QuotaProbeTest do
     # A fresh reading is not probed again.
     send(Process.whereis(Governor), :probe_quota)
     assert %{quota: %{}} = Governor.snapshot()
+  end
+
+  test "a fresh reading that pauses work is probed again, so a reset resumes it", %{root: root} do
+    previous = Application.get_env(:symphony_elixir, :quota_probe_command)
+    Application.put_env(:symphony_elixir, :quota_probe_command, fake_server(root, @limits))
+    on_exit(fn -> Application.put_env(:symphony_elixir, :quota_probe_command, previous) end)
+
+    raw = %{
+      "paths" => %{"state" => "state"},
+      "throttle" => %{"backoff" => [%{"window" => "weekly", "remaining_below_percent" => 3, "pause" => true}]},
+      "projects" => %{"a" => %{}}
+    }
+
+    {:ok, service} = Service.parse(raw, Path.join(root, "crescendo.yml"))
+    spent = Quota.normalize(%{"primary" => %{"usedPercent" => 99, "windowDurationMins" => 10_080}}, DateTime.utc_now())
+    File.mkdir_p!(Path.join(root, "state"))
+    File.write!(Path.join([root, "state", "quota.term"]), :erlang.term_to_binary(spent))
+    start_supervised!({Governor, service})
+
+    assert Enum.find_value(1..100, fn _ ->
+             Process.sleep(20)
+             Governor.snapshot().throttle.paused == nil
+           end)
   end
 end

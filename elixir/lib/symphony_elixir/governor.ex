@@ -17,10 +17,10 @@ defmodule SymphonyElixir.Governor do
   two minutes pass), so the first slots go by weight to the projects with
   waiting work rather than to whichever orchestrator started fastest.
 
-  Runs keep the quota current. When it goes stale (no run reported it
-  within `quota_stale_ms`, as while paused on a spent window) the Governor
-  reads it with `QuotaProbe` every few minutes, so an early reset resumes
-  work instead of waiting for the reset time last seen.
+  Runs keep the quota current. While it is stale (no run reported it within
+  `quota_stale_ms`) or a quota rule pauses new runs, the Governor reads it
+  with `QuotaProbe` every five minutes, so an early reset resumes work
+  instead of waiting for the reset time last seen.
   """
 
   use GenServer
@@ -160,7 +160,8 @@ defmodule SymphonyElixir.Governor do
   end
 
   def handle_info(:probe_quota, state) do
-    if stale?(state.quota, state.service.throttle.quota_stale_ms) do
+    # Paused, no run reports the quota, so a reset shows only through the probe.
+    if stale?(state.quota, state.service.throttle.quota_stale_ms) or throttle(state, DateTime.utc_now()).paused do
       Task.start(&probe/0)
     end
 
