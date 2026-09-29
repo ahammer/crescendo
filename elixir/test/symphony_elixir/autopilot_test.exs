@@ -234,7 +234,8 @@ defmodule SymphonyElixir.AutopilotTest do
           enabled: true,
           channels: %{
             "qa" => %{focus: "Journeys", prompt: "prompts/qa.md", min_issues: 2, max_issues: 4, route: qa_route},
-            "docs" => "Docs drift"
+            "docs" => "Docs drift",
+            "marketing" => %{focus: "Sell it", min_issues: 0}
           },
           prompts: %{pull_request: "prompts/pr.md", research: "prompts/shared.md"}
         }
@@ -247,7 +248,9 @@ defmodule SymphonyElixir.AutopilotTest do
       assert "crescendo:blocked" in settings.tracker.excluded_labels
       assert %{"label_prefix" => "crescendo:model:", "size_label_prefix" => "crescendo:size:"} = settings.codex.routing
 
-      [docs, qa] = Autopilot.research_items(settings.autopilot)
+      [docs, marketing, qa] = Autopilot.research_items(settings.autopilot)
+      # A channel may have no quota at all.
+      assert %{min_issues: 0, max_issues: 3} = marketing.research
       assert qa.labels == ["crescendo:research", "crescendo:channel:qa"]
       assert qa.research == %{channel: "qa", focus: "Journeys", min_issues: 2, max_issues: 4, route: %{"model" => "gpt-6-sol", "effort" => "xhigh"}}
       assert docs.research.route == nil
@@ -295,7 +298,8 @@ defmodule SymphonyElixir.AutopilotTest do
         {%{channels: %{"qa" => %{max_issues: 2}}}, "autopilot.channels"},
         {%{channels: %{"qa" => %{focus: "x", extra: 1}}}, "autopilot.channels"},
         {%{channels: %{"qa" => %{focus: "x", prompt: " "}}}, "autopilot.channels"},
-        {%{channels: %{"qa" => %{focus: "x", min_issues: 0}}}, "autopilot.channels"},
+        {%{channels: %{"qa" => %{focus: "x", min_issues: -1}}}, "autopilot.channels"},
+        {%{channels: %{"qa" => %{focus: "x", max_issues: 0}}}, "autopilot.channels"},
         {%{channels: %{"qa" => %{focus: "x", route: %{model: "m"}}}}, "autopilot.channels"},
         {%{channels: %{"qa" => 7}}, "autopilot.channels"},
         {%{channels: %{"qa" => %{focus: "x", min_issues: 5}}}, "qa min_issues must not exceed max_issues"},
@@ -373,7 +377,7 @@ defmodule SymphonyElixir.AutopilotTest do
 
         [research | _] = Autopilot.research_items(settings.autopilot)
         assert PromptBuilder.build_prompt(research) =~ "File **at least 3 and at most 5** issues"
-        assert settings.autopilot.research_route == %{"model" => "gpt-6-astra", "effort" => "high"}
+        assert settings.autopilot.research_route == %{"model" => "gpt-6.1-sol", "effort" => "max"}
       after
         {repo, token} = previous
         restore_env("GITHUB_REPO", repo)

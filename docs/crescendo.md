@@ -118,9 +118,8 @@ pool: {slots: 3}
 throttle:
   daily_budget_usd: 200
   backoff:
-    - {window: weekly, remaining_below_percent: 40, avoid: [gpt-6-astra]}
     - {window: weekly, remaining_below_percent: 3, pause: true}
-pricing: {as_of: "2026-10-01", models: {gpt-6-sol: {input: 1.0, cached_input: 0.1, output: 5.0}}}
+pricing: {as_of: "2026-10-01", models: {gpt-6.1-sol: {input: 1.0, cached_input: 0.1, output: 5.0}}}
 defaults:
   codex:
     routing: {...}          # anything a project's front matter may hold
@@ -218,8 +217,16 @@ channels:
     prompt: prompts/research/qa.md     # this channel's own prompt (else prompts.research)
     min_issues: 2
     max_issues: 4
-    route: {model: gpt-6-sol, effort: xhigh}
+    route: {model: gpt-6.1-sol, effort: xhigh}
 ```
+
+### Marketing dept
+
+Projects written by `project add` get a `marketing` channel with its own prompt
+(`prompts/marketing.md`) and `min_issues: 0`. Instead of filing issues it reviews the user-facing
+documentation (README, guides, examples, descriptions) against the current code, and opens
+documentation-only pull requests that make it clearer, current and more persuasive. The reviewer
+autopilot merges or closes them like any other pull request. "Nothing to change" is a valid outcome.
 
 ## What runs see
 

@@ -168,20 +168,20 @@ Notes:
 - `agent.max_attempts` optionally caps failure retries. Once exceeded, the issue is blocked until
   its state or labels change. Unset means retry indefinitely with backoff.
 - `codex.routing` optionally selects a model and reasoning effort from explicit issue labels.
-  Example: `routing: {label_prefix: "symphony:model:", default: {model: "gpt-6-sol", effort: "medium"}, labels: {"symphony:model:astra": {model: "gpt-6-astra", effort: "high"}}}`.
+  Example: `routing: {label_prefix: "symphony:model:", default: {model: "gpt-6.1-sol", effort: "medium"}, labels: {"symphony:model:astra": {model: "gpt-6.1-sol", effort: "xhigh"}}}`.
   With no matching route label, `default` applies. Unknown or conflicting labels under the
   prefix stop the run. Priority does not affect routing. A run keeps its selected route across
   continuation turns; a label change takes effect on a new run. Without `routing`, existing
   Codex command and account defaults continue to apply.
   Add `ladder` (routes from cheapest to strongest) and `escalation` (steps climbed per item
   attempt) to escalate retries: with
-  `ladder: [{model: gpt-6-sol, effort: medium}, {model: gpt-6-sol, effort: xhigh}, {model: gpt-6-astra, effort: medium}, {model: gpt-6-astra, effort: max}]`
-  and `escalation: [0, 1, 3]`, attempts 1, 2 and 3 run on sol medium, sol xhigh and astra max.
+  `ladder` set to `gpt-6.1-sol` at efforts `low`, `medium`, `high`, `xhigh` and `max`, a `medium`
+  default and `escalation: [0, 1, 2]`, attempts 1, 2 and 3 run at medium, high and xhigh.
   The default and every label route must be ladder steps; a label sets the starting step.
   `sizes` maps size names to starting routes picked by `size_label_prefix` labels (for example
-  `sizes: {tiny: {model: gpt-6-luna, effort: max}, small: {model: gpt-6-luna, effort: max}}` with
+  `sizes: {tiny: {model: gpt-6.1-sol, effort: low}, small: {model: gpt-6.1-sol, effort: low}}` with
   a `symphony:size:small` label). A model label wins over a size; a size keeps the `default` route
-  label. `effort_floor` (for example `{gpt-6-luna: max}`) is the lowest effort a model may be
+  label. `effort_floor` (for example `{gpt-6.1-sol: low}`) is the lowest effort a model may be
   configured at, checked for every route including research, review and channel routes.
 - `labels.prefix` (default `symphony`) names the labels Symphony reads or applies itself unless
   set explicitly: `<prefix>:model:` and `<prefix>:size:` routing labels, `<prefix>:blocked`, and
@@ -192,15 +192,15 @@ Notes:
     `over_budget_allow` classes start (default `[pull_request, final_attempt, continuation]`;
     the others are `issue` and `research`), so open work keeps closing while nothing new begins.
   - `backoff` rules act on a Codex quota window (`weekly`, `daily`, `5h`, ...):
-    `{window: weekly, remaining_below_percent: 40, avoid: [gpt-6-astra]}` swaps Astra for the
-    strongest allowed ladder step (never below the item's own or the default start; with none
-    allowed the run waits), and `pause: true` holds every new run until the window resets.
+    `{window: weekly, remaining_below_percent: 3, pause: true}` holds every new run until the
+    window resets. `avoid: [<model>]` instead swaps a model for the strongest allowed ladder step
+    (never below the item's own or the default start; with none allowed the run waits).
   - Quota older than `quota_stale_ms` (default two hours) or never seen counts as unknown;
     `on_unknown_quota: restrict` (default) still avoids models then but never pauses.
   - Waiting on a slot or the throttle is never a failed attempt: a held retry keeps its attempt
     number and checks again every 30 seconds.
 - `pricing` overrides or adds model prices for spend estimates and the budget:
-  `{as_of: "2026-10-01", models: {gpt-6-sol: {input: 1.0, cached_input: 0.1, output: 5.0}}}` in
+  `{as_of: "2026-10-01", models: {gpt-6.1-sol: {input: 1.0, cached_input: 0.1, output: 5.0}}}` in
   USD per million tokens. Unlisted models keep the built-in prices.
 - Every Codex run's environment carries `SYMPHONY_WORK_ITEM` (the work item identifier, such as
   `GH-12`) and, with routing, `SYMPHONY_SELECTED_MODEL_LABEL`. Commands the agent runs inherit
@@ -345,7 +345,8 @@ codex:
    `max_open_issues` are open and for `research_cooldown_ms` after a round's last channel ends.
    A channel is its focus text or an object that can also carry its own prompt file, issue
    counts and route: `qa: {focus: "...", prompt: prompts/research/qa.md, min_issues: 2,
-   max_issues: 4, route: {model: gpt-6-sol, effort: xhigh}}`. The shared research prompt is
+   max_issues: 4, route: {model: gpt-6.1-sol, effort: xhigh}}`. A channel's `min_issues` may be
+   `0` when finding nothing is a valid outcome. The shared research prompt is
    optional when every channel names its own.
 
 Nothing is parked waiting for an operator. A worker that hits a blocker records it and adds

@@ -2378,8 +2378,9 @@ repository without a human filing work. It is implemented only for the GitHub Is
 Extension config (`autopilot` object):
 
 - `enabled` (boolean, default `false`).
-- `channels` (map `name -> focus text`), default `cleanup`, `optimization`, `testing`. Names are
-  lowercase letters, digits, or dashes.
+- `channels` (map `name -> focus text`, or `name -> {focus, prompt, min_issues, max_issues,
+  route}`), default `cleanup`, `optimization`, `testing`. Names are lowercase letters, digits, or
+  dashes. A channel object's `min_issues` MAY be `0` for a channel whose findings are optional.
 - `min_issues_per_channel` (positive integer, default `1`) and `max_issues_per_channel` (positive
   integer, default `3`): the issue range each research run is asked to file; min must not exceed max.
 - `research_route` (object `{model, effort}`, OPTIONAL): model route for research runs, overriding

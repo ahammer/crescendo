@@ -506,11 +506,13 @@ defmodule SymphonyElixir.Config.Schema do
     defp valid_channel?(%{"focus" => focus} = spec) when is_binary(focus) do
       Map.keys(spec) -- @channel_keys == [] and
         (is_nil(spec["prompt"]) or (is_binary(spec["prompt"]) and String.trim(spec["prompt"]) != "")) and
-        Enum.all?([spec["min_issues"], spec["max_issues"]], &(is_nil(&1) or (is_integer(&1) and &1 > 0))) and
+        optional_count?(spec["min_issues"], 0) and optional_count?(spec["max_issues"], 1) and
         (is_nil(spec["route"]) or SymphonyElixir.ModelRouting.validate_route(spec["route"]) == :ok)
     end
 
     defp valid_channel?(_spec), do: false
+
+    defp optional_count?(count, least), do: is_nil(count) or (is_integer(count) and count >= least)
 
     defp validate_channel_ranges(%{valid?: false} = changeset), do: changeset
 

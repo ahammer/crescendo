@@ -9,6 +9,8 @@ defmodule SymphonyElixir.Operations do
   # Standard, short-context API prices in micro-USD per million tokens
   # (input, cached input, output); `pricing.models` overrides or adds models.
   @rates %{
+    # Placeholder at Sol 6.0's prices until `pricing.models` sets the real ones.
+    "gpt-6.1-sol" => {1_000_000, 100_000, 5_000_000},
     "gpt-6-astra" => {5_000_000, 500_000, 25_000_000},
     "gpt-6-sol" => {1_000_000, 100_000, 5_000_000},
     "gpt-6-luna" => {50_000, 5_000, 250_000},

@@ -32,7 +32,11 @@ defmodule SymphonyElixir.CommandsTest do
     assert settings.autopilot.trusted_authors == ["ahammer"]
     assert settings.codex.command == "mise exec java@21 gradle@8 -- codex --config shell_environment_policy.inherit=all app-server"
     assert settings.codex.routing["label_prefix"] == "crescendo:model:"
-    assert Map.keys(settings.autopilot.channels) == ["cleanup", "docs", "qa", "testing"]
+    assert Map.keys(settings.autopilot.channels) == ["cleanup", "docs", "marketing", "qa", "testing"]
+    assert %{"prompt" => "prompts/marketing.md", "min_issues" => 0} = settings.autopilot.channels["marketing"]
+    assert workflow.prompt_templates["research:marketing"] =~ "`crescendo:channel:marketing`"
+    assert settings.autopilot.research_route == %{"model" => "gpt-6.1-sol", "effort" => "max"}
+    assert settings.codex.routing["default"] == %{"model" => "gpt-6.1-sol", "effort" => "medium"}
     assert workflow.prompt =~ "`ahammer/BabelFit`"
     assert workflow.prompt_templates["research"] =~ "`crescendo:channel:{{ issue.research.channel }}`"
     assert workflow.prompt_templates["pull_request"] =~ "`crescendo:hold`"

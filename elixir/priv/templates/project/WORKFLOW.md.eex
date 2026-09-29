@@ -34,23 +34,23 @@ codex:
   # so the agent and everything it runs have them on PATH.
   command: <%= @codex_command %>
   routing:
-    # Cheapest to strongest; failed attempts climb (sol medium, sol xhigh, astra max).
-    # luna max only starts issues sized tiny or small.
+    # One model; the ladder is its reasoning effort. Failed attempts climb one step:
+    # issues run medium, high, xhigh; issues sized tiny or small run low, medium, high.
     ladder:
-      - {model: "gpt-6-luna", effort: "max"}
-      - {model: "gpt-6-sol", effort: "medium"}
-      - {model: "gpt-6-sol", effort: "xhigh"}
-      - {model: "gpt-6-astra", effort: "medium"}
-      - {model: "gpt-6-astra", effort: "max"}
-    escalation: [0, 1, 3]
-    default: {model: "gpt-6-sol", effort: "medium"}
+      - {model: "gpt-6.1-sol", effort: "low"}
+      - {model: "gpt-6.1-sol", effort: "medium"}
+      - {model: "gpt-6.1-sol", effort: "high"}
+      - {model: "gpt-6.1-sol", effort: "xhigh"}
+      - {model: "gpt-6.1-sol", effort: "max"}
+    escalation: [0, 1, 2]
+    default: {model: "gpt-6.1-sol", effort: "medium"}
     sizes:
-      tiny: {model: "gpt-6-luna", effort: "max"}
-      small: {model: "gpt-6-luna", effort: "max"}
-    effort_floor: {gpt-6-luna: max}
+      tiny: {model: "gpt-6.1-sol", effort: "low"}
+      small: {model: "gpt-6.1-sol", effort: "low"}
+    # Model labels only choose a starting effort.
     labels:
-      "<%= @prefix %>:model:sol": {model: "gpt-6-sol", effort: "medium"}
-      "<%= @prefix %>:model:astra": {model: "gpt-6-astra", effort: "medium"}
+      "<%= @prefix %>:model:sol": {model: "gpt-6.1-sol", effort: "medium"}
+      "<%= @prefix %>:model:astra": {model: "gpt-6.1-sol", effort: "xhigh"}
   approval_policy: never
   thread_sandbox: danger-full-access
   turn_sandbox_policy:
@@ -71,11 +71,19 @@ autopilot:
     docs: >-
       Documentation that is missing, wrong or stale: setup steps that fail when followed,
       undocumented public APIs, and examples that do not build.
+    # The marketing dept edits user-facing docs itself and opens pull requests; it has no quota.
+    marketing:
+      focus: >-
+        User-facing documentation that sells the project and stays true to it: READMEs, guides,
+        examples and descriptions that are professional, clear, current with recent work, and
+        make a newcomer want to try it.
+      prompt: prompts/marketing.md
+      min_issues: 0
   # Every research run files at least three evidence-backed issues.
   min_issues_per_channel: 3
   max_issues_per_channel: 5
-  research_route: {model: gpt-6-astra, effort: max}
-  review_route: {model: gpt-6-astra, effort: medium}
+  research_route: {model: gpt-6.1-sol, effort: max}
+  review_route: {model: gpt-6.1-sol, effort: max}
   max_open_issues: 10
   research_cooldown_ms: 1800000
   max_pr_runs: 5

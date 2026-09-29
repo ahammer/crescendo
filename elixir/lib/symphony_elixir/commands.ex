@@ -21,7 +21,7 @@ defmodule SymphonyElixir.Commands do
   alias SymphonyElixir.{Config.Schema, Service, Workflow}
 
   @templates Path.expand("../../priv/templates/project", __DIR__)
-  @template_files ["WORKFLOW.md.eex", "prompts/pull_request.md.eex", "prompts/research.md.eex"]
+  @template_files ["WORKFLOW.md.eex", "prompts/pull_request.md.eex", "prompts/research.md.eex", "prompts/marketing.md.eex"]
   for file <- @template_files, do: @external_resource(Path.join(@templates, file))
   @template_sources Map.new(@template_files, &{&1, File.read!(Path.join(@templates, &1))})
   @codex "codex --config shell_environment_policy.inherit=all app-server"

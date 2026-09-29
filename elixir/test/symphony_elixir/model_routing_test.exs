@@ -248,6 +248,30 @@ defmodule SymphonyElixir.ModelRoutingTest do
     assert {:ok, nil} = ModelRouting.select_for_run(nil, %{}, unsized, 1, avoid)
   end
 
+  test "a single model's effort ladder: issues climb medium, high, xhigh; sized issues low, medium, high" do
+    sol = fn effort -> %{"model" => "gpt-6.1-sol", "effort" => effort} end
+
+    routing = %{
+      "label_prefix" => "crescendo:model:",
+      "size_label_prefix" => "crescendo:size:",
+      "ladder" => Enum.map(~w(low medium high xhigh max), sol),
+      "escalation" => [0, 1, 2],
+      "default" => sol.("medium"),
+      "sizes" => %{"small" => sol.("low")},
+      "labels" => %{"crescendo:model:astra" => sol.("xhigh")}
+    }
+
+    assert :ok = ModelRouting.validate(routing)
+
+    efforts = fn labels ->
+      for n <- 1..3, do: elem(ModelRouting.select_for_run(routing, %{}, %Issue{kind: :issue, labels: labels}, n), 1)["effort"]
+    end
+
+    assert efforts.([]) == ["medium", "high", "xhigh"]
+    assert efforts.(["crescendo:size:small"]) == ["low", "medium", "high"]
+    assert efforts.(["crescendo:model:astra"]) == ["xhigh", "max", "max"]
+  end
+
   test "a research channel's own route wins over the fixed research route" do
     research = %Issue{kind: :research, research: %{channel: "testing", route: @sol_xhigh}}
 
