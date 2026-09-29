@@ -34,6 +34,12 @@ defmodule SymphonyElixir.DashboardComponentsTest do
     assert C.route_model(%{model: nil}) == "pending"
   end
 
+  test "visible labels filter the configured namespace before taking eight" do
+    labels = ["crescendo", "crescendo:ready", "crescendoish", "symphony:ready"] ++ Enum.map(1..9, &"user-#{&1}")
+    assert C.visible_labels(%{labels: labels}, "crescendo") == ["crescendoish", "symphony:ready"] ++ Enum.map(1..6, &"user-#{&1}")
+    assert C.visible_labels(%{}, "crescendo") == []
+  end
+
   test "money, tokens and counts read compactly" do
     assert C.format_money(1_234_567) == "$1.23"
     assert C.format_money(420_000) == "$0.420"

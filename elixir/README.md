@@ -186,7 +186,8 @@ Notes:
 - `labels.prefix` (default `symphony`) names the labels Symphony reads or applies itself unless
   set explicitly: `<prefix>:model:` and `<prefix>:size:` routing labels, `<prefix>:blocked`, and
   the `<prefix>:research` and `<prefix>:channel:<name>` labels on research runs. Tracker
-  `required_labels` and `excluded_labels` stay explicit.
+  `required_labels` and `excluded_labels` stay explicit. The agent inspector hides labels in the
+  selected project's prefix namespace before showing up to eight work labels.
 - `throttle` limits what starts, never what is running:
   - `daily_budget_usd` enforces a daily (UTC) estimated spend. Over it, only the
     `over_budget_allow` classes start (default `[pull_request, final_attempt, continuation]`;
