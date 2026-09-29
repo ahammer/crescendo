@@ -84,8 +84,9 @@ defmodule SymphonyElixir.Commands do
   end
 
   defp checked_settings(_folder, dir, workflow) do
+    # The tracker (and its credentials) are the service's concern, not the folder's.
     with {:ok, loaded} <- Workflow.load(Path.expand(workflow), %{}, dir) |> check_error(),
-         {:ok, settings} <- Schema.parse(loaded.config) |> check_error(),
+         {:ok, settings} <- loaded.config |> Map.put("tracker", %{"kind" => "memory"}) |> Schema.parse() |> check_error(),
          :ok <- SymphonyElixir.Config.validate_settings(settings) |> check_error() do
       {:ok, settings}
     end
@@ -116,8 +117,12 @@ defmodule SymphonyElixir.Commands do
     effort = (research.route || %{})["effort"] || "default"
     prs = if pulls, do: " · PRs #{pulls.min}..#{pulls.max || "∞"}#{if pulls.paths != [], do: " in #{Enum.join(pulls.paths, ",")}"}", else: ""
 
-    "#{research.channel}: every #{div(research.every_ms, 60_000)}m · #{research.when} · effort #{effort} · issues #{research.min_issues}..#{research.max_issues}#{prs}"
+    "#{research.channel}: every #{every(research.every_ms)} · #{research.when} · effort #{effort} · issues #{research.min_issues}..#{research.max_issues}#{prs}"
   end
+
+  defp every(ms) when rem(ms, 86_400_000) == 0, do: "#{div(ms, 86_400_000)}d"
+  defp every(ms) when rem(ms, 3_600_000) == 0, do: "#{div(ms, 3_600_000)}h"
+  defp every(ms), do: "#{div(ms, 60_000)}m"
 
   defp check_error({:error, reason}), do: {:error, "invalid autopilot folder: #{inspect(reason)}"}
   defp check_error(ok), do: ok
