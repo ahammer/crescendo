@@ -714,6 +714,28 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute html =~ ~s(<li class="label-chip">symphony:ready</li>)
   end
 
+  test "agent inspector JSON link follows its project when present" do
+    orchestrator_name = Module.concat(__MODULE__, :ProjectInspectorOrchestrator)
+    [base] = static_snapshot().running
+
+    project_agent = Map.merge(base, %{identifier: "GH-1", project: "beta"})
+    single_agent = Map.merge(base, %{identifier: "GH-2"})
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: %{static_snapshot() | running: [project_agent, single_agent]}
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, project_html} = live(build_conn(), "/agents/beta/GH-1")
+    assert project_html =~ ~s(href="/api/v1/beta/GH-1")
+
+    {:ok, _view, single_html} = live(build_conn(), "/agents/GH-2")
+    assert single_html =~ ~s(href="/api/v1/GH-2")
+  end
+
   test "dashboard HUD cards summarise each agent and open its inspector" do
     orchestrator_name = Module.concat(__MODULE__, :WorkspaceOrchestrator)
     at = DateTime.utc_now()

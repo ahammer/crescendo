@@ -213,7 +213,7 @@ defmodule SymphonyElixirWeb.AgentLive do
               <dt>Session</dt>
               <dd class="fact-actions">
                 <.copy_button :if={@agent.session_id} value={@agent.session_id} />
-                <a class="issue-link" href={"/api/v1/#{@agent.issue_identifier}"}>JSON</a>
+                <a class="issue-link" href={if @agent[:project], do: "/api/v1/#{@agent.project}/#{@agent.issue_identifier}", else: "/api/v1/#{@agent.issue_identifier}"}>JSON</a>
               </dd>
             </div>
           </dl>
