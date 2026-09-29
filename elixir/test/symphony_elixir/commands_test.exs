@@ -26,6 +26,7 @@ defmodule SymphonyElixir.CommandsTest do
     assert {:ok, settings} = Schema.parse(workflow.config)
 
     assert settings.tracker.provider["repo"] == "ahammer/BabelFit"
+    assert settings.labels.prefix == "crescendo"
     assert settings.tracker.required_labels == ["crescendo:ready"]
     assert settings.autopilot.blocked_label == "crescendo:blocked"
     assert settings.autopilot.trusted_authors == ["ahammer"]
@@ -46,14 +47,25 @@ defmodule SymphonyElixir.CommandsTest do
     end)
 
     {:ok, workflow} = Workflow.load(Path.join([root, "projects", "dartboard", "WORKFLOW.md"]))
+    assert {:ok, settings} = Schema.parse(workflow.config)
     assert workflow.config["hooks"]["after_create"] =~ "git checkout master"
     assert workflow.config["labels"] == %{"prefix" => "board"}
+    assert settings.labels.prefix == "board"
     assert workflow.config["codex"]["command"] == "codex --config shell_environment_policy.inherit=all app-server"
 
     assert {:error, "project ids are" <> _} = Commands.run(["project", "add", service, "Bad", "a/b"], &no_gh/1)
     assert {:error, "the repository must be owner/name"} = Commands.run(["project", "add", service, "ok", "nope"], &no_gh/1)
     assert {:error, "Usage:" <> _} = Commands.run(["project", "add", service, "only-id"], &no_gh/1)
     assert {:error, "Usage:" <> _} = Commands.run(["project", "add"], &no_gh/1)
+  end
+
+  test "project add rejects invalid label prefixes before writing files", %{root: root, service: service} do
+    assert {:error, message} =
+             Commands.run(["project", "add", service, "demo", "ahammer/crescendo", "--prefix", "bad: label"], &no_gh/1)
+
+    assert message =~ "invalid --prefix value"
+    assert message =~ "lowercase letters, digits, or dashes"
+    refute File.exists?(Path.join([root, "projects", "demo"]))
   end
 
   test "labels sync creates the labels a project's workflow uses that its repository lacks", %{service: service} do
