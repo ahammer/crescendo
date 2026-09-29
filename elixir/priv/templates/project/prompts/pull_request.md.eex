@@ -27,7 +27,7 @@ You can push to the head branch: {{ issue.pull_request.can_push }}
    (`machine-lease run -- <command>`).
    If the pull request changes `.crescendo/autopilot/` (this repository's autopilot tasks and
    guidelines), also run `~/.local/lib/crescendo/bin/crescendo autopilot check .crescendo/autopilot`;
-   close the pull request with its output when the check fails.
+   close the pull request with its output when the check reports errors. If the command cannot run (not found, or it prints only a usage line), that is a tooling problem, not a failed check: validate the folder by reading it against `docs/crescendo.md` in the crescendo repository and review it normally.
 4. If changes are needed:
    - When you can push: commit focused fixes, validate, push to the head branch, reply to the threads
      you addressed, and **stop**. Crescendo reviews the new head once its CI settles.
