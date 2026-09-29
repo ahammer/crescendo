@@ -139,4 +139,36 @@ defmodule SymphonyElixir.OperationsTest do
     assert %{samples: [], median_run_seconds: %{}} = Operations.snapshot(nil)
     :ok = Operations.close(table)
   end
+
+  test "a finished run records its task: model, category, time and cost" do
+    path = Path.join(System.tmp_dir!(), "symphony-operations-tasks-#{System.unique_integer([:positive])}.dets")
+    on_exit(fn -> File.rm(path) end)
+    {:ok, table} = Operations.open(path, :symphony_operations_tasks_test)
+
+    :ok = Operations.start_run(table, "run-1", %{issue_identifier: "GH-1", summary: "Dispatched"})
+    :ok = Operations.usage(table, "run-1", "gpt-6.1-sol", %{input_tokens: 1_000_000, output_tokens: 0, total_tokens: 1_000_000})
+    :ok = Operations.finish_run(table, "run-1", "completed", %{issue_identifier: "GH-1", title: "Fix it", model: "gpt-6.1-sol"})
+    # A run without a start record (or a model) still counts, untimed.
+    :ok = Operations.finish_run(table, "run-2", "failed", %{issue_identifier: "PR-2"})
+    # Tasks older than two weeks are dropped when the next one lands.
+    :ok = :dets.insert(table, {{:task, "old"}, %{at_s: 0, model: "gpt-6-sol", category: "delivery", seconds: 1, usd_micro: 1, outcome: "completed"}})
+    :ok = Operations.finish_run(table, "run-3", "completed", %{issue_identifier: "research-marketing", model: "gpt-6.1-sol"})
+
+    snapshot = Operations.snapshot(table)
+
+    assert snapshot.by_task == [
+             %{model: "gpt-6.1-sol", category: "delivery", runs: 1, usd_micro: 1_000_000, timed: 1, seconds: 0},
+             %{model: "gpt-6.1-sol", category: "marketing", runs: 1, usd_micro: 0, timed: 0, seconds: 0},
+             %{model: "unknown", category: "review", runs: 1, usd_micro: 0, timed: 0, seconds: 0}
+           ]
+
+    assert %{kind: "completed", title: "Fix it", category: "delivery", seconds: 0, usd_micro: 1_000_000} =
+             Enum.find(snapshot.activity, &(&1[:issue_identifier] == "GH-1" and &1.kind == "completed"))
+
+    assert Enum.map(["PR-9", "research-qa", "research-marketing", "GH-3", nil], &Operations.task_category/1) ==
+             ["review", "research", "marketing", "delivery", "delivery"]
+
+    assert Operations.snapshot(nil).by_task == []
+    :ok = Operations.close(table)
+  end
 end

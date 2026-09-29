@@ -35,7 +35,7 @@ defmodule SymphonyElixirWeb.RedactionTest do
       pull_requests: %{items: [%{project: "nubu3d", number: 7, title: "Secret PR", head_ref: "feat/secret", author: "a", url: "u"}]},
       usage: %{
         activity: [
-          %{project: "nubu3d", kind: "pr_opened", summary: "Secret PR"},
+          %{project: "nubu3d", kind: "pr_opened", summary: "Secret PR", title: "Secret issue"},
           %{project: "metalrain", kind: "dispatch", summary: "s"}
         ]
       }
@@ -59,7 +59,7 @@ defmodule SymphonyElixirWeb.RedactionTest do
     assert [%{title: "Private work", number: 7, url: "u"} = pull] = scrubbed.pull_requests.items
     refute Map.has_key?(pull, :head_ref)
     assert [%{kind: "pr_opened"} = event, %{summary: "s"}] = scrubbed.usage.activity
-    refute Map.has_key?(event, :summary)
+    refute Map.has_key?(event, :summary) or Map.has_key?(event, :title)
   end
 
   test "nothing to redact, or an error payload, passes through; single items keep only their status" do

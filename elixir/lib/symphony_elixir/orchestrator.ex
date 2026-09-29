@@ -327,6 +327,7 @@ defmodule SymphonyElixir.Orchestrator do
         Operations.finish_run(state.operations, Map.get(running_entry, :run_id), if(reason == :normal, do: "completed", else: "failed"), %{
           issue_identifier: running_entry.identifier,
           issue_url: running_entry.issue.url,
+          title: running_entry.issue.title,
           model: Map.get(running_entry, :model),
           summary: if(reason == :normal, do: "Worker finished", else: "Worker failed")
         })
@@ -1001,6 +1002,7 @@ defmodule SymphonyElixir.Orchestrator do
     Operations.finish_run(state.operations, Map.get(running_entry, :run_id), "stopped", %{
       issue_identifier: Map.get(running_entry, :identifier),
       issue_url: Map.get(Map.get(running_entry, :issue) || %{}, :url),
+      title: Map.get(Map.get(running_entry, :issue) || %{}, :title),
       model: Map.get(running_entry, :model),
       summary: summary
     })

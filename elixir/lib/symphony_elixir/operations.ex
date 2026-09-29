@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Operations do
 
   @table :symphony_operations
   @event_limit 2_000
+  @task_days 14
   @price_date "2026-09-24"
   # Standard, short-context API prices in micro-USD per million tokens
   # (input, cached input, output); `pricing.models` overrides or adds models.
@@ -62,7 +63,7 @@ defmodule SymphonyElixir.Operations do
 
   def start_run(table, id, details) do
     safe_write(fn ->
-      :ok = :dets.insert(table, {{:run, id}, Map.put(details, :status, "running")})
+      :ok = :dets.insert(table, {{:run, id}, Map.merge(details, %{status: "running", started_s: System.os_time(:second)})})
       event(table, "dispatch", details)
     end)
   end
@@ -75,11 +76,36 @@ defmodule SymphonyElixir.Operations do
     safe_write(fn -> do_finish_run(table, id, kind, details) end)
   end
 
+  # A finished run leaves a task record (model, category, time and cost) for
+  # the per-task averages, and its finish event carries the same figures.
   defp do_finish_run(table, id, kind, details) do
+    now = System.os_time(:second)
+
+    started =
+      case :dets.lookup(table, {:run, id}) do
+        [{_key, %{started_s: started}}] -> started
+        _ -> nil
+      end
+
+    cost = run_usage(table, id)
+    category = task_category(details[:issue_identifier])
+    seconds = if started, do: max(now - started, 0)
+    model = details[:model] || "unknown"
+    task = %{at_s: now, model: model, category: category, seconds: seconds, usd_micro: cost.usd_micro, outcome: kind}
+
     :ok = :dets.delete(table, {:run, id})
-    event(table, kind, details)
+    :ok = :dets.insert(table, {{:task, id}, task})
+    :dets.select_delete(table, [{{{:task, :_}, %{at_s: :"$1"}}, [{:<, :"$1", now - @task_days * 86_400}], [true]}])
+    event(table, kind, Map.merge(details, %{category: category, seconds: seconds, usd_micro: cost.usd_micro}))
     sync(table)
   end
+
+  @doc "The kind of task a work item identifier names: review, research, marketing or delivery."
+  @spec task_category(String.t() | nil) :: String.t()
+  def task_category("PR-" <> _), do: "review"
+  def task_category("research-marketing"), do: "marketing"
+  def task_category("research" <> _), do: "research"
+  def task_category(_identifier), do: "delivery"
 
   @spec usage(handle(), String.t() | nil, String.t() | nil, map()) :: :ok
   def usage(table, run_id, model, delta), do: usage(table, run_id, model, delta, nil, @rates)
@@ -331,7 +357,7 @@ defmodule SymphonyElixir.Operations do
         _ -> 1
       end
 
-    entry = details |> Map.take([:issue_identifier, :issue_url, :pr_number, :pr_url, :summary, :model])
+    entry = details |> Map.take([:issue_identifier, :issue_url, :pr_number, :pr_url, :summary, :model, :title, :category, :seconds, :usd_micro])
     entry = Map.merge(entry, %{kind: kind, at: DateTime.utc_now() |> DateTime.to_iso8601()})
     :ok = :dets.insert(table, [{:sequence, sequence}, {{:event, sequence}, entry}])
     if sequence > @event_limit, do: :dets.delete(table, {:event, sequence - @event_limit})
@@ -349,7 +375,8 @@ defmodule SymphonyElixir.Operations do
       activity: [],
       daily: daily_series(%{}, []),
       samples: [],
-      median_run_seconds: %{}
+      median_run_seconds: %{},
+      by_task: []
     }
   end
 
@@ -371,6 +398,9 @@ defmodule SymphonyElixir.Operations do
     {recorded, daily, by_model, model_runs, events, spend, samples} =
       :dets.foldl(
         fn
+          {{:task, _run}, task}, {all, day, models, runs, events, spend, samples} ->
+            {all, day, models, runs, events, spend, [{:task, task} | samples]}
+
           {{:usage, run, date, model}, value}, {all, day, models, runs, events, spend, samples} ->
             models = Map.update(models, model, Map.take(value, Map.keys(empty_usage())), &add_usage(&1, value))
             runs = Map.update(runs, model, MapSet.new([run]), &MapSet.put(&1, run))
@@ -392,6 +422,8 @@ defmodule SymphonyElixir.Operations do
       )
 
     ordered_events = events |> Enum.sort_by(fn {sequence, _} -> sequence end) |> Enum.map(&elem(&1, 1))
+    # Task records ride in the samples accumulator, tagged `:task` (sample buckets are integers).
+    {tasks, samples} = Enum.split_with(samples, &match?({:task, _}, &1))
 
     %{
       status: "ok",
@@ -402,8 +434,29 @@ defmodule SymphonyElixir.Operations do
       activity: ordered_events |> Enum.reverse() |> Enum.take(100),
       daily: daily_series(spend, ordered_events),
       samples: recent_samples(samples),
-      median_run_seconds: median_run_seconds(ordered_events)
+      median_run_seconds: median_run_seconds(ordered_events),
+      by_task: by_task(Enum.map(tasks, &elem(&1, 1)))
     }
+  end
+
+  # Totals per model and task category over the retained two weeks of tasks;
+  # `timed` counts the runs whose duration is known, for the average time.
+  defp by_task(tasks) do
+    tasks
+    |> Enum.group_by(&{&1.model, &1.category})
+    |> Enum.map(fn {{model, category}, group} ->
+      timed = for %{seconds: seconds} when is_integer(seconds) <- group, do: seconds
+
+      %{
+        model: model,
+        category: category,
+        runs: length(group),
+        usd_micro: group |> Enum.map(& &1.usd_micro) |> Enum.sum(),
+        timed: length(timed),
+        seconds: Enum.sum(timed)
+      }
+    end)
+    |> Enum.sort_by(&{&1.model, &1.category})
   end
 
   # The last twelve hours of five-minute samples, oldest first.

@@ -37,7 +37,7 @@ defmodule SymphonyElixirWeb.Redaction do
       |> update_in([:upcoming, :ready], &scrub.(&1, fn item -> %{item | title: @hidden} end))
       |> update_in([:upcoming, :waiting], &scrub.(&1, fn item -> %{item | title: @hidden} end))
       |> update_in([:pull_requests, :items], &scrub.(&1, fn pull -> pull(pull) end))
-      |> update_in([:usage, :activity], &scrub.(&1, fn event -> Map.delete(event, :summary) end))
+      |> update_in([:usage, :activity], &scrub.(&1, fn event -> Map.drop(event, [:summary, :title]) end))
     end
   end
 

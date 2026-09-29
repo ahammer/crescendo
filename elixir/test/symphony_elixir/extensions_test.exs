@@ -357,7 +357,8 @@ defmodule SymphonyElixir.ExtensionsTest do
                "activity" => [],
                "daily" => state_payload["usage"]["daily"],
                "samples" => [],
-               "median_run_seconds" => %{}
+               "median_run_seconds" => %{},
+               "by_task" => []
              },
              "usage_error" => nil,
              "upcoming" => %{"ready" => [], "waiting" => [], "observed_at" => nil, "error" => nil, "available_slots" => nil},
@@ -808,10 +809,11 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute html =~ "Compare results"
 
     # Phones switch sections with tabs; the choice is only a class.
-    view |> element(~s(button[phx-value-id="activity"])) |> render_click()
-    assert has_element?(view, ~s(button.section-tab.is-active[phx-value-id="activity"]))
-    assert has_element?(view, ~s(section.sec.is-active[aria-labelledby="activity-title"]))
-    refute has_element?(view, ~s(section.sec.is-active[aria-labelledby="queue-title"]))
+    assert has_element?(view, ~s(aside.timeline.is-active))
+    view |> element(~s(button[phx-value-id="stats"])) |> render_click()
+    assert has_element?(view, ~s(button.section-tab.is-active[phx-value-id="stats"]))
+    assert has_element?(view, "div.charts.is-active")
+    refute has_element?(view, ~s(aside.timeline.is-active))
 
     {:ok, view, html} = live(build_conn(), "/agents/GH-1")
 
@@ -953,6 +955,105 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert [%{eta_seconds: 600}, %{eta_seconds: 600}, %{eta_seconds: 600}] = payload.upcoming.ready
     assert payload.header.budget_usd_micro == 10_000_000
     assert payload.header.max_agents == 2
+  end
+
+  test "dashboard timeline strings next, running and finished work with icons; models show per-task averages" do
+    orchestrator_name = Module.concat(__MODULE__, :TimelineOrchestrator)
+    usage = SymphonyElixir.Operations.snapshot(nil)
+    at = fn seconds_ago -> DateTime.utc_now() |> DateTime.add(-seconds_ago, :second) |> DateTime.to_iso8601() end
+
+    activity = [
+      %{kind: "pr_merged", at: at.(10), pr_number: 41, pr_url: "https://github.com/acme/app/pull/41", summary: "Tidy the README"},
+      %{kind: "completed", at: at.(20), issue_identifier: "PR-41", category: "review", seconds: 300, usd_micro: 250_000},
+      %{kind: "completed", at: at.(30), issue_identifier: "research-marketing", seconds: 600, usd_micro: 0},
+      %{kind: "failed", at: at.(40), issue_identifier: "GH-7", title: "Broken build", category: "delivery"},
+      %{kind: "stopped", at: at.(50), issue_identifier: "research-qa"},
+      %{kind: "interrupted", at: at.(55), issue_identifier: "GH-8"},
+      %{kind: "pr_closed", at: at.(60), pr_number: 40, summary: "Old idea"},
+      %{kind: "pr_opened", at: at.(70), pr_number: 42, summary: "New docs"},
+      %{kind: "issue_terminal", at: at.(80), issue_identifier: "GH-6", summary: "closed"},
+      %{kind: "retired", at: at.(90), issue_identifier: "GH-5"},
+      %{kind: "blocked", at: at.(100), issue_identifier: "GH-4"},
+      %{kind: "dispatch", at: at.(110), issue_identifier: "GH-3"},
+      %{kind: "completed", at: at.(120)}
+    ]
+
+    by_task = [
+      %{model: "gpt-6.1-sol", category: "delivery", runs: 4, usd_micro: 2_000_000, timed: 4, seconds: 2_400},
+      %{model: "gpt-6.1-sol", category: "review", runs: 2, usd_micro: 500_000, timed: 0, seconds: 0}
+    ]
+
+    usage = %{usage | status: "ok", activity: activity, median_run_seconds: %{"research" => 5_400}} |> Map.put(:by_task, by_task)
+
+    ready =
+      for n <- 1..9,
+          do: %{issue_identifier: "GH-#{100 + n}", title: "Queued #{n}", issue_url: nil, priority: 2, reason: nil, blocked_by: []}
+
+    ready = [%{issue_identifier: "research-qa", title: "QA sweep", issue_url: nil, eta_seconds: 5_400} | ready]
+
+    waiting =
+      for {reason, n} <- Enum.with_index(["retry scheduled", "draft", "continuation pending", "awaiting maintainer label", "excluded by hold", "other"]),
+          do: %{issue_identifier: "GH-#{200 + n}", title: "Held #{n}", issue_url: nil, reason: reason, blocked_by: []}
+
+    upcoming = %{ready: ready, waiting: waiting, observed_at: DateTime.utc_now(), error: nil, available_slots: 0}
+
+    pulls = %{
+      items: [%{number: 41, url: "https://github.com/acme/app/pull/41", title: "Tidy", draft: false}, %{number: 43, url: nil, title: "No link", draft: true}],
+      observed_at: DateTime.utc_now(),
+      error: nil,
+      enabled: true
+    }
+
+    [running] = static_snapshot().running
+    running = Map.put(running, :route, %{model: "gpt-6.1-sol", effort: "high", label: "default", tier: 2})
+
+    snapshot =
+      static_snapshot()
+      |> Map.merge(%{operations: usage, upcoming: upcoming, pull_requests: pulls, running: [running]})
+
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/")
+
+    # Up next: the retry and the first five ready items, the soonest nearest "Now".
+    assert html =~ "+5 more queued"
+    assert html =~ ~r/Queued 4.*Queued 1.*~\dh \d+m.*QA sweep.*Retry 2.*MT-RETRY.*6 waiting.*>Now<.*MT-HTTP.*high/s
+    refute html =~ "Queued 5"
+
+    for label <- ["Retrying", "Draft", "Continuing", "Untrusted", "Excluded", "Waiting"], do: assert(html =~ label)
+
+    for text <- [
+          "Merged",
+          "Tidy the README",
+          "Review done",
+          "5m 0s",
+          "$0.250",
+          "Marketing done",
+          "Delivery failed",
+          "Broken build",
+          "Research stopped",
+          "Delivery interrupted",
+          "PR opened",
+          "Issue closed",
+          "Retired",
+          "Blocked",
+          ~s(href="https://github.com/acme/app/pulls"),
+          "Per task · 14 days",
+          "$0.500",
+          "10m 0s"
+        ] do
+      assert html =~ text
+    end
+
+    # Dispatches show as running work, not as finished rows.
+    refute html =~ "GH-3"
+
+    # Several models name the model on each per-task row.
+    usage = Map.put(usage, :by_task, [hd(by_task), %{hd(by_task) | model: "gpt-7"}])
+    :sys.replace_state(Process.whereis(orchestrator_name), &Keyword.put(&1, :snapshot, %{snapshot | operations: usage}))
+    {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ "Delivery · gpt-7"
   end
 
   test "artifact route serves stored run images and nothing else" do

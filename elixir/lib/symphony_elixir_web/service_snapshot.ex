@@ -120,6 +120,7 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
       daily: daily(all),
       samples: samples(all),
       median_run_seconds: medians(all),
+      by_task: by_task(all),
       by_project: Enum.map(ops, fn {id, operations} -> project_spend(id, operations) end)
     }
   end
@@ -130,6 +131,14 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
     |> Enum.group_by(& &1.model)
     |> Enum.map(fn {_model, rows} -> sum(rows) end)
     |> Enum.sort_by(& &1.model)
+  end
+
+  defp by_task(all) do
+    all
+    |> Enum.flat_map(&(&1[:by_task] || []))
+    |> Enum.group_by(&{&1.model, &1.category})
+    |> Enum.map(fn {_key, rows} -> sum(rows) end)
+    |> Enum.sort_by(&{&1.model, &1.category})
   end
 
   defp activity(ops) do
