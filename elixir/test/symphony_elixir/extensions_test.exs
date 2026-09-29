@@ -358,7 +358,8 @@ defmodule SymphonyElixir.ExtensionsTest do
                "daily" => state_payload["usage"]["daily"],
                "samples" => [],
                "median_run_seconds" => %{},
-               "by_task" => []
+               "by_task" => [],
+               "images" => []
              },
              "usage_error" => nil,
              "upcoming" => %{"ready" => [], "waiting" => [], "observed_at" => nil, "error" => nil, "available_slots" => nil},
@@ -814,6 +815,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert has_element?(view, ~s(button.section-tab.is-active[phx-value-id="stats"]))
     assert has_element?(view, "div.charts.is-active")
     refute has_element?(view, ~s(aside.timeline.is-active))
+    view |> element(~s(button[phx-value-id="pictures"])) |> render_click()
+    assert has_element?(view, "aside.pictures.is-active")
+    assert render(view) =~ "No pictures yet"
 
     {:ok, view, html} = live(build_conn(), "/agents/GH-1")
 
@@ -983,7 +987,15 @@ defmodule SymphonyElixir.ExtensionsTest do
       %{model: "gpt-6.1-sol", category: "review", runs: 2, usd_micro: 500_000, timed: 0, seconds: 0}
     ]
 
-    usage = %{usage | status: "ok", activity: activity, median_run_seconds: %{"research" => 5_400}} |> Map.put(:by_task, by_task)
+    img = fn n, id, title -> %{src: "/artifacts/0123456789abcdef01234567/#{n}.png", issue_identifier: id, title: title, at: at.(n * 10)} end
+
+    # Newest first: five from the running MT-HTTP (a hero, three thumbnails, one more), then another run's.
+    images = [img.(1, "MT-HTTP", nil), img.(2, "MT-HTTP", nil), img.(3, "MT-HTTP", nil), img.(4, "MT-HTTP", nil), img.(6, "MT-HTTP", nil), img.(5, "GH-9", "Fireplace shot")]
+    daily = List.update_at(usage.daily, -1, &%{&1 | completed: 6, failed: 1})
+
+    usage =
+      %{usage | status: "ok", activity: activity, daily: daily, median_run_seconds: %{"research" => 5_400}}
+      |> Map.merge(%{by_task: by_task, images: images})
 
     ready =
       for n <- 1..9,
@@ -1039,7 +1051,14 @@ defmodule SymphonyElixir.ExtensionsTest do
           "Retired",
           "Blocked",
           ~s(href="https://github.com/acme/app/pulls"),
-          "Per task · 14 days",
+          "Per task",
+          "Pictures",
+          "Live",
+          "+1",
+          ~s(src="/artifacts/0123456789abcdef01234567/5.png"),
+          "Fireplace shot",
+          "86%",
+          "$0.417",
           "$0.500",
           "10m 0s"
         ] do

@@ -18,7 +18,8 @@ defmodule SymphonyElixirWeb.ServiceSnapshotTest do
         daily: [day("2026-09-27", %{"gpt-6-sol" => 1_000_000}, completed: 1, merged: 1)],
         samples: [%{at: "2026-09-27T10:00:00Z", running: 1, ready: 2, spend_micro: 1_000_000}],
         median_run_seconds: %{"issue" => 600},
-        by_task: [%{model: "gpt-6.1-sol", category: "delivery", runs: 2, usd_micro: 400, timed: 2, seconds: 1_200}]
+        by_task: [%{model: "gpt-6.1-sol", category: "delivery", runs: 2, usd_micro: 400, timed: 2, seconds: 1_200}],
+        images: [%{src: "/artifacts/a/1.png", issue_identifier: "GH-1", at: "2026-09-27T10:00:00Z"}]
       },
       overrides
     )
@@ -151,6 +152,7 @@ defmodule SymphonyElixirWeb.ServiceSnapshotTest do
     assert today.spend_by_model == %{"gpt-6-sol" => 1_000_000}
     assert ops.samples == [%{at: "2026-09-27T10:00:00Z", running: 2, ready: 4, spend_micro: 2_000_000}]
     assert ops.median_run_seconds == %{"issue" => 800, "pull_request" => 300}
+    assert [%{project: "metalrain"}, %{project: "nubu3d"}] = Enum.sort_by(ops.images, & &1.project)
     assert ops.by_task == [%{model: "gpt-6.1-sol", category: "delivery", runs: 4, usd_micro: 800, timed: 4, seconds: 2_400}]
 
     assert ops.by_project == [

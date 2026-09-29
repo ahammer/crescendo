@@ -419,15 +419,21 @@ The observability UI now runs on a minimal Phoenix stack:
   warns when estimated worker usage for the UTC day reaches `observability.daily_budget_usd`
   (default $50); separate planner and independent reviewer calls are not included, and the
   warning does not stop dispatch.
-- The dashboard at `/` is built for phones first. Five header stats carry sparklines: agents,
-  queue, open pull requests, pull requests closed today (merged or closed without merging, over
-  14 days) and spend today (from a five-minute sample of queue counts and spend kept for 48 hours
-  in `operations.dets`). Below them are panels for system health and autopilot, 14-day runs, spend
-  (with each model's spend today and over 14 days) and model usage. Then come the work queue with
-  estimated start times, pull requests and recent activity. On a desktop window at least 1200px
-  wide and 900px tall the page fits the window, and these lists stretch to fill the height above
-  the agents; on phones the sections are tabs showing one at a time. Running agents sit in a strip
-  at the very bottom, horizontal on wide screens and stacked on phones. The strip keeps one slot per
+- The dashboard at `/` is built for phones first. Eight header stats carry sparklines: agents,
+  queue, open pull requests (with a link to each project's pull request list on GitHub), pull
+  requests closed today, runs done today, the 14-day success rate, the average task cost and time,
+  and spend today (from a five-minute sample of queue counts and spend kept for 48 hours in
+  `operations.dets`). Below them are the 14-day runs and spend charts (with each model's and
+  project's spend) and cards for system health, autopilot, model usage and per-task averages (cost
+  and time per delivery, review, research and marketing task over 14 days).
+  The work timeline runs the full height on the right: up next (retries and the ready queue with
+  estimated start times, soonest nearest the middle, waiting items folded away), now (running
+  agents) and done (finished runs, merges, closes and failures, newest first with their time and
+  cost), each step with its own icon. The picture timeline shows the images agents captured, one
+  card per run with the newest image large, as a full-height column on the left from 1600px and a
+  film strip under the stats on narrower desktops. A wide window at least 900px tall fits the page;
+  on phones Timeline, Pictures and Stats are tabs. Running agents sit in a strip under the cards,
+  horizontal on wide screens and stacked on phones. The strip keeps one slot per
   worker (up to four empty ones), so its size holds steady; each agent card shows the plan's
   progress, a plain-language line for the latest step, the last thing the agent said, its latest
   image, and its model, tokens, cost and changed lines, and free slots show the next ready item.
@@ -447,7 +453,8 @@ The observability UI now runs on a minimal Phoenix stack:
 - Images the agent viewed or generated, and images returned by tools such as screenshots, are
   copied into `artifacts/<run_id>/` beside the log file (PNG, JPEG, GIF or WebP only, up to 10 MB
   each and 40 per run) and served at `/artifacts/<run_id>/<n>.<ext>`. A run's images are deleted
-  24 hours after it was last active.
+  three days after it was last active. A private (`redact: true`) project's images never appear
+  on the dashboard.
 - The dashboard is read-only, but it shows raw agent output and images. Anyone who can reach it
   sees everything agents print or look at, so only expose it where that is acceptable.
 - Setting `SYMPHONY_NOTIFICATION_CAPTURE_DIR` records the raw app-server notifications that feed

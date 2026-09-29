@@ -5,12 +5,12 @@ defmodule SymphonyElixir.Artifacts do
 
   Each run gets `<root>/<run_id>/` holding `<n>.<ext>` files. Only files in this
   store are ever served, only real PNG, JPEG, GIF or WebP data is kept, and a
-  run's images are deleted a day after the run was last active.
+  run's images are deleted three days after the run was last active.
   """
 
   @max_bytes 10 * 1024 * 1024
   @max_per_run 40
-  @retention_seconds 24 * 60 * 60
+  @retention_seconds 3 * 24 * 60 * 60
   @run_id ~r/\A[0-9a-f]{24}\z/
   @name ~r/\A\d{1,3}\.(png|jpg|gif|webp)\z/
   @content_types %{"png" => "image/png", "jpg" => "image/jpeg", "gif" => "image/gif", "webp" => "image/webp"}
@@ -62,7 +62,7 @@ defmodule SymphonyElixir.Artifacts do
   @spec content_type(String.t()) :: String.t()
   def content_type(name), do: Map.get(@content_types, name |> Path.extname() |> String.trim_leading("."), "application/octet-stream")
 
-  @doc "Deletes stored images of runs that are not active and have been idle for a day."
+  @doc "Deletes stored images of runs that are not active and have been idle for three days."
   @spec sweep([String.t()], Path.t(), integer()) :: :ok
   def sweep(active_run_ids, root \\ root(), now \\ System.os_time(:second)) do
     active = MapSet.new(active_run_ids)

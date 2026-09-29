@@ -2135,12 +2135,31 @@ defmodule SymphonyElixir.Orchestrator do
 
     store_image =
       case {state.artifacts_root, Map.get(running_entry, :run_id)} do
-        {root, run_id} when is_binary(root) and is_binary(run_id) -> &Artifacts.store(run_id, &1, root)
-        _ -> nil
+        {root, run_id} when is_binary(root) and is_binary(run_id) ->
+          &store_image(state.operations, running_entry, run_id, &1, root)
+
+        _ ->
+          nil
       end
 
     transcript = Transcript.apply(Map.get(running_entry, :transcript) || Transcript.new(), update, store_image: store_image)
     Map.put(running_entry, :transcript, transcript)
+  end
+
+  # A stored image also lands in the picture timeline, tagged with its work item.
+  defp store_image(operations, running_entry, run_id, source, root) do
+    with {:ok, image} <- Artifacts.store(run_id, source, root) do
+      issue = Map.get(running_entry, :issue) || %{}
+
+      Operations.record_image(operations, %{
+        src: image.src,
+        issue_identifier: running_entry.identifier,
+        issue_url: Map.get(issue, :url),
+        title: Map.get(issue, :title)
+      })
+
+      {:ok, image}
+    end
   end
 
   @captured_methods ["item/started", "item/completed", "turn/plan/updated", "turn/diff/updated", "turn/completed", "error", "account/rateLimits/updated"]

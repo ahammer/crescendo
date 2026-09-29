@@ -6,6 +6,10 @@ defmodule SymphonyElixir.Operations do
   @table :symphony_operations
   @event_limit 2_000
   @task_days 14
+  # Images the dashboard's picture timeline lists: the newest few hundred,
+  # no older than the artifact store keeps their files.
+  @image_limit 400
+  @image_days 3
   @price_date "2026-09-24"
   # Standard, short-context API prices in micro-USD per million tokens
   # (input, cached input, output); `pricing.models` overrides or adds models.
@@ -262,6 +266,24 @@ defmodule SymphonyElixir.Operations do
     end)
   end
 
+  @doc "Records an image a run stored, for the dashboard's picture timeline."
+  @spec record_image(handle(), map()) :: :ok
+  def record_image(nil, _image), do: :ok
+
+  def record_image(table, image) do
+    safe_write(fn ->
+      sequence =
+        case :dets.lookup(table, :image_sequence) do
+          [{:image_sequence, value}] -> value + 1
+          _ -> 1
+        end
+
+      entry = image |> Map.take([:src, :issue_identifier, :issue_url, :title]) |> Map.put(:at, DateTime.utc_now() |> DateTime.to_iso8601())
+      :ok = :dets.insert(table, [{:image_sequence, sequence}, {{:image, sequence}, entry}])
+      :dets.delete(table, {:image, sequence - @image_limit})
+    end)
+  end
+
   @spec pull_inventory(handle()) :: {[map()], DateTime.t() | nil}
   def pull_inventory(nil), do: {[], nil}
 
@@ -376,7 +398,8 @@ defmodule SymphonyElixir.Operations do
       daily: daily_series(%{}, []),
       samples: [],
       median_run_seconds: %{},
-      by_task: []
+      by_task: [],
+      images: []
     }
   end
 
@@ -401,6 +424,9 @@ defmodule SymphonyElixir.Operations do
           {{:task, _run}, task}, {all, day, models, runs, events, spend, samples} ->
             {all, day, models, runs, events, spend, [{:task, task} | samples]}
 
+          {{:image, sequence}, image}, {all, day, models, runs, events, spend, samples} ->
+            {all, day, models, runs, events, spend, [{:image, sequence, image} | samples]}
+
           {{:usage, run, date, model}, value}, {all, day, models, runs, events, spend, samples} ->
             models = Map.update(models, model, Map.take(value, Map.keys(empty_usage())), &add_usage(&1, value))
             runs = Map.update(runs, model, MapSet.new([run]), &MapSet.put(&1, run))
@@ -422,8 +448,9 @@ defmodule SymphonyElixir.Operations do
       )
 
     ordered_events = events |> Enum.sort_by(fn {sequence, _} -> sequence end) |> Enum.map(&elem(&1, 1))
-    # Task records ride in the samples accumulator, tagged `:task` (sample buckets are integers).
+    # Task and image records ride in the samples accumulator, tagged (sample buckets are integers).
     {tasks, samples} = Enum.split_with(samples, &match?({:task, _}, &1))
+    {images, samples} = Enum.split_with(samples, &match?({:image, _, _}, &1))
 
     %{
       status: "ok",
@@ -435,8 +462,20 @@ defmodule SymphonyElixir.Operations do
       daily: daily_series(spend, ordered_events),
       samples: recent_samples(samples),
       median_run_seconds: median_run_seconds(ordered_events),
-      by_task: by_task(Enum.map(tasks, &elem(&1, 1)))
+      by_task: by_task(Enum.map(tasks, &elem(&1, 1))),
+      images: recent_images(images)
     }
+  end
+
+  # Newest first; ISO 8601 UTC times compare as strings.
+  defp recent_images(images) do
+    cutoff = DateTime.utc_now() |> DateTime.add(-@image_days * 86_400, :second) |> DateTime.to_iso8601()
+
+    images
+    |> Enum.sort_by(&elem(&1, 1), :desc)
+    |> Enum.map(&elem(&1, 2))
+    |> Enum.filter(&(to_string(&1[:at]) > cutoff))
+    |> Enum.take(120)
   end
 
   # Totals per model and task category over the retained two weeks of tasks;

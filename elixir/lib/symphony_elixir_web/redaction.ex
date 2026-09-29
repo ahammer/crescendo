@@ -6,7 +6,8 @@ defmodule SymphonyElixirWeb.Redaction do
   what they are and how they are doing: identifiers, links back to the
   tracker, kind, state, model, attempts, tokens and cost. Titles,
   descriptions, labels, messages, transcripts, plans, changed files,
-  images, branches, errors and run ids are dropped.
+  images (including the picture timeline's), branches, errors and run ids
+  are dropped.
   """
 
   @hidden "Private work"
@@ -38,8 +39,12 @@ defmodule SymphonyElixirWeb.Redaction do
       |> update_in([:upcoming, :waiting], &scrub.(&1, fn item -> %{item | title: @hidden} end))
       |> update_in([:pull_requests, :items], &scrub.(&1, fn pull -> pull(pull) end))
       |> update_in([:usage, :activity], &scrub.(&1, fn event -> Map.drop(event, [:summary, :title]) end))
+      |> update_in([:usage, :images], &drop_projects(&1, redacted))
     end
   end
+
+  # A private project's pictures would show its work, so they are dropped outright.
+  defp drop_projects(items, redacted), do: Enum.reject(items || [], &(&1[:project] in redacted))
 
   defp scrub(items, redacted, fun), do: Enum.map(items || [], &scrub_item(&1, redacted, fun))
 

@@ -59,13 +59,14 @@ defmodule SymphonyElixir.ArtifactsTest do
     assert :error = Artifacts.store(@run, {:base64, Base.encode64(@png), nil}, root)
   end
 
-  test "sweep removes runs idle for a day unless they are still active", %{root: root} do
+  test "sweep removes runs idle for three days unless they are still active", %{root: root} do
     [old, active, recent] = ["aaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbb", "cccccccccccccccccccccccc"]
     for run <- [old, active, recent], do: {:ok, _image} = Artifacts.store(run, {:base64, Base.encode64(@png), nil}, root)
     File.mkdir_p!(Path.join(root, "not-a-run"))
 
     now = System.os_time(:second)
-    for run <- [old, active], do: File.touch!(Path.join(root, run), now - 2 * 86_400)
+    for run <- [old, active], do: File.touch!(Path.join(root, run), now - 4 * 86_400)
+    File.touch!(Path.join(root, recent), now - 2 * 86_400)
 
     assert :ok = Artifacts.sweep([active], root, now)
     refute File.exists?(Path.join(root, old))

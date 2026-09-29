@@ -199,6 +199,7 @@ p {
 
 .brand {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   min-width: 0;
@@ -267,11 +268,6 @@ p {
   --spark: var(--violet);
 }
 
-/* Five stats on a phone: two per row, with spend across the last row. */
-.stats > .stat:last-child {
-  grid-column: 1 / -1;
-}
-
 .stat-label {
   color: var(--ink-2);
   font-size: 12px;
@@ -285,7 +281,7 @@ p {
 }
 
 .stat-value {
-  font-size: 22px;
+  font-size: 24px;
   font-weight: 700;
   line-height: 1.15;
   font-variant-numeric: tabular-nums;
@@ -307,7 +303,7 @@ p {
 
 .sparkline {
   display: block;
-  flex: 0 1 88px;
+  flex: 0 1 120px;
   min-width: 36px;
   height: 28px;
   overflow: visible;
@@ -335,8 +331,9 @@ p {
   vector-effect: non-scaling-stroke;
 }
 
-/* Page: stats and charts on top, the agent strip at the very bottom, and the
-   timeline between them on phones or beside them, full height, on desktops. */
+/* Page: stats and cards on top and the agent strip at the bottom of the main
+   column, with the picture timeline on the left and the work timeline on the
+   right on desktops. Phones stack everything and switch sections with tabs. */
 
 .dash {
   display: flex;
@@ -345,17 +342,12 @@ p {
   min-height: calc(100vh - 44px);
 }
 
-/* Below the two-column layout the main column's pieces join the page's flow,
-   so the timeline can sit between the charts and the agent strip. */
-.dash-main {
-  display: contents;
-}
-
-.dash .dock {
+.dash > .dock {
   order: 2;
 }
 
-.dash > .timeline {
+.dash > .timeline,
+.dash > .pictures {
   order: 1;
 }
 
@@ -2216,7 +2208,7 @@ p {
 
 .hbar-row {
   display: grid;
-  grid-template-columns: minmax(70px, 32%) minmax(40px, 1fr) auto;
+  grid-template-columns: minmax(86px, 38%) minmax(40px, 1fr) auto;
   align-items: center;
   gap: 8px;
 }
@@ -2359,18 +2351,13 @@ p {
     padding: 14px 20px 32px;
   }
 
-  .masthead {
-    grid-template-columns: minmax(240px, auto) minmax(0, 1fr);
-    align-items: center;
-    gap: 16px;
-  }
-
   .stats {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
   }
 
-  .stats > .stat:last-child {
-    grid-column: auto;
+  .stat {
+    padding: 12px 14px;
   }
 
   .section-tabs {
@@ -2381,10 +2368,37 @@ p {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .timeline,
-  .timeline.is-active {
+  .dash > .timeline {
     display: flex;
     max-height: 640px;
+  }
+
+  .panel-wide .run-stats {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+
+  /* The picture timeline runs sideways as a film strip until it gets a column. */
+  .dash > .pictures {
+    display: flex;
+    max-height: none;
+  }
+
+  .dash .pictures-list {
+    grid-auto-columns: 210px;
+    grid-auto-flow: column;
+    grid-template-columns: none;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-bottom: 6px;
+  }
+
+  .dash .pictures-list .shot-hero {
+    aspect-ratio: auto;
+    height: 118px;
+  }
+
+  .dash .pictures-list .shot-thumbs {
+    display: none;
   }
 
   .charts {
@@ -2454,48 +2468,117 @@ p {
   }
 }
 
-/* From 1200px the timeline becomes a full-height column on the right and the
-   charts share the main column's rows. */
+/* From 1200px the work timeline is a full-height column on the right, the
+   pictures run as a film strip under the stats, and the cards pair up. */
 
 @media (min-width: 1200px) {
   .dash {
     display: grid;
+    grid-template-areas:
+      "head timeline"
+      "pictures timeline"
+      "charts timeline"
+      "dock timeline";
     grid-template-columns: minmax(0, 1fr) minmax(340px, 400px);
+    grid-template-rows: auto auto auto auto;
     align-items: start;
   }
 
-  .dash-main {
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-    min-width: 0;
+  .dash > .masthead {
+    grid-area: head;
+  }
+
+  .dash > .charts {
+    grid-area: charts;
+  }
+
+  .dash > .pictures {
+    grid-area: pictures;
+  }
+
+  .dash > .dock {
+    grid-area: dock;
+  }
+
+  .dash > .error-card {
+    grid-column: 1 / -1;
   }
 
   .dash > .timeline,
   .dash > .timeline.is-active {
     position: sticky;
     top: 14px;
+    grid-area: timeline;
     height: calc(100vh - 28px);
     max-height: none;
   }
 
   .charts {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-content: start;
   }
 }
 
-/* A wide desktop has room for the four charts in one row beside the timeline. */
+/* From 1600px the pictures get their own full-height column on the left and
+   the cards sit four to a row, the two charts two columns wide each. */
 
-@media (min-width: 1700px) {
+@media (min-width: 1600px) {
+  .dash {
+    grid-template-areas:
+      "pictures head timeline"
+      "pictures charts timeline"
+      "pictures dock timeline";
+    grid-template-columns: minmax(250px, 300px) minmax(0, 1fr) minmax(340px, 400px);
+    grid-template-rows: auto auto auto;
+  }
+
+  .dash > .pictures,
+  .dash > .pictures.is-active {
+    position: sticky;
+    top: 14px;
+    height: calc(100vh - 28px);
+  }
+
+  .dash .pictures-list .shot-hero {
+    aspect-ratio: 16 / 10;
+    height: auto;
+  }
+
+  .dash .pictures-list .shot-thumbs {
+    display: grid;
+  }
+
+  .dash .pictures-list {
+    grid-auto-columns: auto;
+    grid-auto-flow: row;
+    grid-template-columns: minmax(0, 1fr);
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding-bottom: 0;
+  }
+
+  .stats {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+  }
+
+  .stat {
+    padding: 10px 12px;
+  }
+
   .charts {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
+
+  .charts > .panel-wide {
+    grid-column: span 2;
+  }
 }
 
-/* A desktop window tall enough holds the whole page: the agent strip sits at
-   the bottom of the main column and the timeline scrolls inside. */
+/* A wide desktop window tall enough holds the whole page: the cards take the
+   height between the stats and the agent strip, and every column scrolls
+   inside itself. Narrower desktops scroll the page, with the timeline pinned. */
 
-@media (min-width: 1200px) and (min-height: 900px) {
+@media (min-width: 1600px) and (min-height: 900px) {
   .app-shell {
     padding-bottom: 14px;
   }
@@ -2503,20 +2586,17 @@ p {
   .dash {
     height: calc(100vh - 28px);
     min-height: 0;
+    grid-template-rows: auto minmax(0, 1fr) auto;
   }
 
-  .dash-main {
+  .dash > .charts {
+    align-self: stretch;
     height: 100%;
     overflow-y: auto;
   }
 
-  .dash-main > * {
-    flex: none;
-  }
-
-  .dash-main > .dock {
+  .dash > .dock {
     position: static;
-    margin-top: auto;
   }
 }
 
@@ -2535,7 +2615,6 @@ p {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 8px;
 }
 
 .project-pill {
@@ -2910,6 +2989,11 @@ p {
   text-transform: uppercase;
 }
 
+.task-table thead th:not(:first-child),
+.task-table td {
+  padding-left: 10px;
+}
+
 .task-name {
   display: inline-flex;
   align-items: center;
@@ -2920,4 +3004,142 @@ p {
   width: 14px;
   height: 14px;
   color: var(--accent-ink);
+}
+
+/* Pictures: one card per run burst, the newest image large, the next few as
+   thumbnails; cards of running agents glow. */
+.pictures {
+  display: none;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 12px 10px 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.pictures.is-active {
+  display: flex;
+  max-height: 72vh;
+}
+
+.pictures-list {
+  display: grid;
+  flex: 1;
+  grid-template-columns: minmax(0, 1fr);
+  /* Cards clip their images, so rows must not shrink them to fit. */
+  grid-auto-rows: max-content;
+  align-content: start;
+  gap: 12px;
+  min-height: 0;
+  margin: 0;
+  padding: 0 4px 0 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.shot-card {
+  overflow: hidden;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  animation: tl-in 0.45s ease-out;
+}
+
+.shot-card.is-live {
+  border-color: rgba(47, 168, 255, 0.6);
+  box-shadow: var(--glow);
+}
+
+.shot-hero {
+  position: relative;
+  display: block;
+  aspect-ratio: 16 / 10;
+  background: var(--code);
+}
+
+.shot-hero img,
+.shot-thumbs img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.shot-hero:hover img,
+.shot-thumbs a:hover img {
+  filter: brightness(1.12);
+}
+
+.shot-live,
+.shot-count {
+  position: absolute;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.shot-live {
+  top: 8px;
+  left: 8px;
+  background: var(--accent);
+  box-shadow: 0 0 10px rgba(47, 168, 255, 0.6);
+  color: #fff;
+}
+
+.shot-count {
+  right: 8px;
+  bottom: 8px;
+  background: rgba(5, 10, 20, 0.72);
+  color: var(--ink);
+}
+
+.shot-thumbs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px;
+  margin-top: 2px;
+}
+
+.shot-thumbs a {
+  display: block;
+  aspect-ratio: 16 / 10;
+  background: var(--code);
+}
+
+.shot-meta {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px 10px;
+}
+
+.shot-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.shot-title {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  line-height: 1.35;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shot-card {
+    animation: none;
+  }
+}
+
+.spend-tables {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0 18px;
 }

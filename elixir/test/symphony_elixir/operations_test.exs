@@ -169,6 +169,15 @@ defmodule SymphonyElixir.OperationsTest do
              ["review", "research", "marketing", "delivery", "delivery"]
 
     assert Operations.snapshot(nil).by_task == []
+
+    # Stored images feed the picture timeline, newest first, within three days.
+    :ok = Operations.record_image(table, %{src: "/artifacts/a/1.png", issue_identifier: "GH-1", title: "Fix it", run_id: "dropped"})
+    :ok = Operations.record_image(table, %{src: "/artifacts/a/2.png", issue_identifier: "GH-1"})
+    :ok = :dets.insert(table, {{:image, 0}, %{src: "/artifacts/old/1.png", at: "2020-01-01T00:00:00Z"}})
+    assert [%{src: "/artifacts/a/2.png"}, %{src: "/artifacts/a/1.png", title: "Fix it"} = first] = Operations.snapshot(table).images
+    refute Map.has_key?(first, :run_id)
+    assert Operations.record_image(nil, %{}) == :ok
+    assert Operations.snapshot(nil).images == []
     :ok = Operations.close(table)
   end
 end

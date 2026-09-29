@@ -1688,7 +1688,7 @@ Implementations that show images in transcripts MAY serve them from a run artifa
   can name any other file.
 - The store SHOULD accept only known image formats identified by their content rather than a claimed
   type, SHOULD cap the size and number of images per run, and SHOULD delete a run's images after a
-  retention window (reference: 24 hours after the run was last active).
+  retention window (reference: three days after the run was last active).
 
 ## 14. Failure Model and Recovery Strategy
 

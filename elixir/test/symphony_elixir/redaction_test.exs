@@ -37,7 +37,8 @@ defmodule SymphonyElixirWeb.RedactionTest do
         activity: [
           %{project: "nubu3d", kind: "pr_opened", summary: "Secret PR", title: "Secret issue"},
           %{project: "metalrain", kind: "dispatch", summary: "s"}
-        ]
+        ],
+        images: [%{project: "nubu3d", src: "/artifacts/a/1.png"}, %{project: "metalrain", src: "/artifacts/b/1.png"}]
       }
     }
   end
@@ -60,6 +61,7 @@ defmodule SymphonyElixirWeb.RedactionTest do
     refute Map.has_key?(pull, :head_ref)
     assert [%{kind: "pr_opened"} = event, %{summary: "s"}] = scrubbed.usage.activity
     refute Map.has_key?(event, :summary) or Map.has_key?(event, :title)
+    assert [%{project: "metalrain"}] = scrubbed.usage.images
   end
 
   test "nothing to redact, or an error payload, passes through; single items keep only their status" do
