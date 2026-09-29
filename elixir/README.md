@@ -72,7 +72,8 @@ mise trust
 mise install
 mise exec -- mix setup
 mise exec -- mix build
-mise exec -- ./bin/crescendo ./WORKFLOW.md
+mise exec -- ./bin/crescendo ./WORKFLOW.md \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails
 ```
 
 ## Burrito releases
@@ -103,7 +104,8 @@ After downloading a published executable for your platform:
 
 ```bash
 chmod +x ./symphony-v0.0.1-macos_arm64
-./symphony-v0.0.1-macos_arm64 ./WORKFLOW.md
+./symphony-v0.0.1-macos_arm64 ./WORKFLOW.md \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails
 ```
 
 ## Configuration
@@ -111,10 +113,13 @@ chmod +x ./symphony-v0.0.1-macos_arm64
 Pass a custom workflow file path to `./bin/crescendo` when starting the service:
 
 ```bash
-./bin/crescendo /path/to/custom/WORKFLOW.md
+./bin/crescendo /path/to/custom/WORKFLOW.md \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails
 ```
 
 If no path is passed, Symphony defaults to `./WORKFLOW.md`.
+
+Starting the service requires `--i-understand-that-this-will-be-running-without-the-usual-guardrails`.
 
 Optional flags:
 
