@@ -16,12 +16,17 @@ defmodule SymphonyElixir.Governor do
   After a start no slot is granted until every project has checked in (or
   two minutes pass), so the first slots go by weight to the projects with
   waiting work rather than to whichever orchestrator started fastest.
+
+  Runs keep the quota current. When it goes stale (no run reported it
+  within `quota_stale_ms`, as while paused on a spent window) the Governor
+  reads it with `QuotaProbe` every few minutes, so an early reset resumes
+  work instead of waiting for the reset time last seen.
   """
 
   use GenServer
   require Logger
 
-  alias SymphonyElixir.{Project, Quota, Scheduling, Service, Throttle}
+  alias SymphonyElixir.{Project, Quota, QuotaProbe, Scheduling, Service, Throttle}
 
   @type policy :: %{
           required(:avoid) => map(),
@@ -60,6 +65,7 @@ defmodule SymphonyElixir.Governor do
 
   @impl true
   def init(service) do
+    schedule_probe(0)
     projects = for project <- Service.projects(service), do: {project.id, project.weight, project.cap, project.research_exclusive}
 
     {:ok,
@@ -153,7 +159,25 @@ defmodule SymphonyElixir.Governor do
     end
   end
 
+  def handle_info(:probe_quota, state) do
+    if stale?(state.quota, state.service.throttle.quota_stale_ms) do
+      Task.start(&probe/0)
+    end
+
+    schedule_probe(Application.get_env(:symphony_elixir, :quota_probe_ms, 300_000))
+    {:noreply, state}
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
+
+  defp probe do
+    with %{} = quota <- QuotaProbe.read(), do: report_quota(quota)
+  end
+
+  defp schedule_probe(delay_ms), do: Process.send_after(self(), :probe_quota, delay_ms)
+
+  defp stale?(%{observed_at: %DateTime{} = observed_at}, stale_ms), do: DateTime.diff(DateTime.utc_now(), observed_at, :millisecond) > stale_ms
+  defp stale?(_quota, _stale_ms), do: true
 
   defp grant(state, project, item, class) do
     case Scheduling.acquire(state.schedule, project, item, class, System.monotonic_time(:millisecond)) do

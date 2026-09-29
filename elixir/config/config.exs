@@ -19,5 +19,7 @@ if config_env() == :test do
   config :symphony_elixir,
     workflow_file_path: Path.expand("../test/fixtures/startup_workflow.md", __DIR__),
     # Tests grant slots at once; the warm-up has its own test.
-    governor_warm_up_ms: 0
+    governor_warm_up_ms: 0,
+    # The quota probe echoes its own requests back (no quota in them) instead of starting Codex.
+    quota_probe_command: "cat"
 end
