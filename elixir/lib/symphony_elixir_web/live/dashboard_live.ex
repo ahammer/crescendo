@@ -71,9 +71,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <.link
               :for={project <- @payload.projects}
               patch={filter_path(project.id, @show)}
-              class={["project-pill", @payload[:project] == project.id && "is-active", project.failure && "is-failed"]}
-              title={project.failure || "#{project.running} running · #{project.ready} ready"}
-            ><%= project.id %><span :if={project.running > 0} class="tab-count"><%= project.running %></span></.link>
+              class={["project-pill", @payload[:project] == project.id && "is-active", (project.failure || project.snapshot_status in ["timeout", "unavailable"]) && "is-failed"]}
+              title={project.failure || "Snapshot: #{project.snapshot_status} · #{project.running || "—"} running · #{project.ready || "—"} ready"}
+            ><%= project.id %><span :if={is_integer(project.running) and project.running > 0} class="tab-count"><%= project.running %></span></.link>
           </nav>
           <nav class="project-filter" aria-label="Timeline">
             <span class="filter-label">Show</span>
@@ -87,13 +87,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <div :if={!@payload[:error]} class="stats">
           <.stat
             label="Agents"
-            value={"#{@payload.counts.running}/#{@payload.header.max_agents || "—"}"}
-            detail={longest_detail(@payload.running, @now)}
+            value={"#{@payload.counts.running || "—"}/#{@payload.header.max_agents || "—"}"}
+            detail={if @payload[:snapshot_status] == "partial", do: "Snapshot incomplete", else: longest_detail(@payload.running, @now)}
             values={@payload.history.running}
             tone="green"
           />
-          <.stat label="Queue" value={@payload.counts.ready} detail={"#{@payload.counts.waiting} waiting"} values={@payload.history.ready} tone="blue" />
-          <.stat label="Open PRs" value={@payload.counts.open_prs} detail="on GitHub" values={@payload.history.open_prs} tone="cyan" links={pull_links(@payload)} />
+          <.stat label="Queue" value={@payload.counts.ready || "—"} detail={"#{@payload.counts.waiting || "—"} waiting"} values={@payload.history.ready} tone="blue" />
+          <.stat label="Open PRs" value={@payload.counts.open_prs || "—"} detail="on GitHub" values={@payload.history.open_prs} tone="cyan" links={pull_links(@payload)} />
           <.stat
             label="Merged today"
             value={today(@payload.usage, :merged) + today(@payload.usage, :closed)}
@@ -130,6 +130,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <p class="error-copy"><strong><%= @payload.error.code %>:</strong> <%= @payload.error.message %></p>
         </section>
       <% else %>
+        <section :if={@payload[:snapshot_status] == "partial"} class="error-card" role="status">
+          <h2 class="error-title">Snapshot incomplete</h2>
+          <p class="error-copy">Counts are unknown. Showing only observed project data.</p>
+          <p :for={error <- @payload.snapshot_errors} class="error-copy"><%= error.project %>: <%= error.status %></p>
+        </section>
         <nav class="section-tabs" role="tablist" aria-label="Sections">
           <button
             :for={{id, label} <- @sections}
@@ -155,7 +160,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <section class="dock" aria-labelledby="dock-title">
           <header class="dock-head">
             <h2 id="dock-title">Agents</h2>
-            <span class="count"><%= @payload.counts.running %>/<%= @payload.header.max_agents || "—" %> running</span>
+            <span class="count"><%= @payload.counts.running || "—" %>/<%= @payload.header.max_agents || "—" %> running</span>
             <.attention blocked={@payload.blocked} retrying={@payload.retrying} now={@now} />
           </header>
           <div class="dock-slots">
@@ -522,6 +527,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   # The strip always shows the worker slots (up to four empty ones) so its size
   # holds steady as agents start and finish; free slots preview the queue.
+  defp free_slots(%{snapshot_status: "partial"}), do: []
+
   defp free_slots(payload) do
     slots = max(min(payload.header.max_agents || 1, 4), length(payload.running))
     free = slots - length(payload.running)

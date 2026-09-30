@@ -7,9 +7,13 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
   """
 
   @doc "Merges `{project, snapshot}` pairs; `governor` is the Governor's snapshot, if any."
-  @spec merge([{String.t(), map()}], map() | nil) :: map()
-  def merge(snapshots, governor) do
+  @spec merge([{String.t(), map() | :timeout | :unavailable}], map() | nil) :: map()
+  def merge(results, governor) do
+    {snapshots, failed} = Enum.split_with(results, fn {_id, result} -> is_map(result) end)
+
     %{
+      snapshot_status: if(failed == [], do: "complete", else: "partial"),
+      snapshot_errors: Enum.map(failed, fn {id, status} -> %{project: id, status: to_string(status)} end),
       running: tagged(snapshots, :running),
       retrying: tagged(snapshots, :retrying),
       blocked: tagged(snapshots, :blocked),
