@@ -1451,7 +1451,8 @@ MUST retain its outcome. `projects[].snapshot_status` is `ok`, `timeout`, `unava
 rows with private-project redaction, sets all aggregate `counts` to `null`, and warns in health
 and the dashboard. Governor-held service slots remain a separate signal, not a queue estimate.
 A successful subsequent read clears the warning. Deployment drain and health validators MUST
-reject partial, filtered, or unknown project state before treating an observation as safe.
+reject partial, filtered, or unknown project state and unknown Governor-held slot counts before
+treating an observation as safe.
 
 ### 13.4 OPTIONAL Human-Readable Status Surface
 

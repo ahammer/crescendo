@@ -454,7 +454,8 @@ The observability UI now runs on a minimal Phoenix stack:
   to `null`, and show an incomplete warning and unknown counts instead of idle/free slots.
   Health warns on incompleteness; dispatch can still report Governor-held service slots without
   inventing running or queue counts. The next successful snapshot clears the warning.
-  Deployment validators reject partial, filtered, or unknown project observations.
+  Deployment validators reject partial, filtered, or unknown project observations and unknown
+  Governor-held slot counts.
 - An agent card opens the full-screen agent inspector at `/agents/<issue_identifier>`. It shows the
   agent's run as a chat, rebuilt from Codex app-server notifications: messages and reasoning
   (streamed as they are written), commands with exit code, duration and the last 60 lines or 8 KB of

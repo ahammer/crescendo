@@ -37,7 +37,7 @@ def validate(state, mode):
     if not count(counts.get("running")):
         raise ValueError("unknown running count")
     throttle = state.get("throttle")
-    busy = throttle.get("busy") if isinstance(throttle, dict) else 0
+    busy = throttle.get("busy") if isinstance(throttle, dict) else None
     if not count(busy):
         raise ValueError("unknown held slots")
     return max(len(running), busy)

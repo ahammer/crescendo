@@ -76,10 +76,12 @@ It never enables a unit or overwrites local configuration.
   1. It builds `releases/<sha>` and passes the full `make all` gate under the machine lease.
   2. It drains, so no new runs start and running ones finish (it waits up to two hours, then
      postpones). Unknown or partial snapshots keep the drain waiting; Governor-held slots also
-     prevent an empty observed running list from ending the drain.
+     prevent an empty observed running list from ending the drain. Unknown held-slot counts
+     keep the drain waiting too.
   3. It points `service.env` at the release and restarts the service.
   4. It waits for a complete, unfiltered state response with every project started, no project
-     failure, and every project snapshot `ok`; otherwise it rolls back.
+     failure, every project snapshot `ok`, and known Governor-held slot counts; otherwise it
+     rolls back.
 
   A release that fails its gate or health check is not tried again. Each outcome is appended to
   `<state>/deploys.jsonl`, and the five newest releases are kept.
