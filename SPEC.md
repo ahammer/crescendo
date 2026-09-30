@@ -1535,6 +1535,10 @@ Enablement (extension):
 - An implementation MAY give each running agent its own page (for example
   `/agents/<issue_identifier>`) for the transcript, keeping the dashboard itself to a summary per
   agent.
+- The agent inspector omits the configured `labels.prefix` and labels starting with `<prefix>:`
+  before showing up to eight work labels. It uses the inspected agent's project configuration, or
+  the single workflow's configuration, with `symphony` as the default prefix. An open inspector
+  retains its last resolved prefix if configuration becomes unavailable.
 - Transcripts expose raw agent output. When the dashboard is reachable beyond the operator's machine,
   anyone with its URL can read everything agents print or look at.
 

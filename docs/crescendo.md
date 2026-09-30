@@ -247,7 +247,10 @@ The `SYMPHONY_*` names are kept for tools that predate the service.
 ## Dashboard and API
 
 - `/` shows every project; `/?project=<id>` filters to one.
-- `/agents/<project>/<id>` is an agent's inspector.
+- `/agents/<project>/<id>` is an agent's inspector. It omits the project's configured `labels.prefix`
+  and every `<prefix>:` label before showing up to eight work labels. Single-workflow inspectors use
+  that workflow's prefix (default `symphony`); an open inspector keeps its last resolved prefix if
+  configuration becomes unavailable.
 - `GET /api/v1/state[?project=<id>]` is the merged state, with every item tagged by `project`.
 - `GET /api/v1/<project>/<id>` is one work item.
 
