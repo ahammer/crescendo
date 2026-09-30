@@ -14,20 +14,31 @@ defmodule SymphonyElixirWeb.DashboardLive do
   alias SymphonyElixirWeb.{Charts, Endpoint, Gallery, LiveRefresh, Presenter, Timeline, TranscriptComponents}
 
   @sections [{"timeline", "Timeline"}, {"pictures", "Pictures"}, {"stats", "Stats"}]
+  @shows [{nil, "All"}, {"delivery", "Delivery"}, {"review", "Reviews"}, {"autopilot", "Autopilot"}, {"prs", "PRs & issues"}]
 
   @impl true
   def mount(params, _session, socket) do
     project = params["project"]
-    {:ok, socket |> assign(section: "timeline", project: project) |> LiveRefresh.start(fn -> load_payload(project) end)}
+    {:ok, socket |> assign(section: "timeline", project: project, show: show(params)) |> LiveRefresh.start(fn -> load_payload(project) end)}
   end
 
-  # The project filter lives in the URL (`?project=`), so views can be shared.
+  # Filters live in the URL (`?project=` and `?show=`), so views can be shared.
   @impl true
   def handle_params(params, _uri, socket) do
+    socket = assign(socket, :show, show(params))
+
     case params["project"] do
       project when project == socket.assigns.project -> {:noreply, socket}
       project -> {:noreply, socket |> assign(:project, project) |> LiveRefresh.replace(fn -> load_payload(project) end)}
     end
+  end
+
+  defp show(%{"show" => show}) when show in ["delivery", "review", "autopilot", "prs"], do: show
+  defp show(_params), do: nil
+
+  defp filter_path(project, show) do
+    query = URI.encode_query(Enum.reject([project: project, show: show], fn {_key, value} -> is_nil(value) end))
+    if query == "", do: "/", else: "/?" <> query
   end
 
   @impl true
@@ -40,7 +51,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   @impl true
   def render(assigns) do
-    assigns = assign(assigns, :sections, @sections)
+    assigns = assign(assigns, sections: @sections, shows: @shows)
 
     ~H"""
     <section class={["dash", @payload[:error] && "dash-error"]}>
@@ -52,14 +63,25 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="brand-sub"><%= brand_line(@payload) %></p>
           </div>
           <.live_badge />
-          <nav :if={length(@payload[:projects] || []) > 1} class="project-filter" aria-label="Projects">
-            <.link patch="/" class={["project-pill", is_nil(@payload[:project]) && "is-active"]}>All</.link>
+        </div>
+        <div :if={!@payload[:error]} class="filters">
+          <nav :if={length(@payload[:projects] || []) > 1} class="project-filter" aria-label="Project">
+            <span class="filter-label">Project</span>
+            <.link patch={filter_path(nil, @show)} class={["project-pill", is_nil(@payload[:project]) && "is-active"]}>All</.link>
             <.link
               :for={project <- @payload.projects}
-              patch={"/?project=#{project.id}"}
+              patch={filter_path(project.id, @show)}
               class={["project-pill", @payload[:project] == project.id && "is-active", project.failure && "is-failed"]}
               title={project.failure || "#{project.running} running · #{project.ready} ready"}
             ><%= project.id %><span :if={project.running > 0} class="tab-count"><%= project.running %></span></.link>
+          </nav>
+          <nav class="project-filter" aria-label="Timeline">
+            <span class="filter-label">Show</span>
+            <.link
+              :for={{value, label} <- @shows}
+              patch={filter_path(@payload[:project], value)}
+              class={["project-pill", @show == value && "is-active"]}
+            ><%= label %></.link>
           </nav>
         </div>
         <div :if={!@payload[:error]} class="stats">
@@ -73,21 +95,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <.stat label="Queue" value={@payload.counts.ready} detail={"#{@payload.counts.waiting} waiting"} values={@payload.history.ready} tone="blue" />
           <.stat label="Open PRs" value={@payload.counts.open_prs} detail="on GitHub" values={@payload.history.open_prs} tone="cyan" links={pull_links(@payload)} />
           <.stat
-            label="PRs closed today"
+            label="Merged today"
             value={today(@payload.usage, :merged) + today(@payload.usage, :closed)}
             detail={"#{today(@payload.usage, :merged)} merged · #{today(@payload.usage, :closed)} closed"}
             values={closed_per_day(@payload.usage)}
             span="14 days"
             tone="violet"
             title="Pull requests merged or closed today (UTC); the sparkline covers 14 days"
-          />
-          <.stat
-            label="Runs done today"
-            value={today(@payload.usage, :completed)}
-            detail={"#{today(@payload.usage, :failed)} failed · #{today(@payload.usage, :interrupted)} interrupted"}
-            values={per_day(@payload.usage, :completed)}
-            span="14 days"
-            tone="green"
           />
           <.stat
             label="Success rate"
@@ -97,13 +111,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
             span="14 days"
             tone="cyan"
             title="Runs that finished normally, of all finished runs, over 14 days"
-          />
-          <.stat
-            label="Avg task"
-            value={avg_task(@payload.usage).cost}
-            detail={avg_task(@payload.usage).detail}
-            tone="violet"
-            title="Average cost and time per finished task over 14 days"
           />
           <.stat
             label="Spend today"
@@ -137,11 +144,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
         <div class={["charts", @section == "stats" && "is-active"]}>
           <.runs_panel stats={@payload.run_stats} usage={@payload.usage} />
-          <.spend_panel usage={@payload.usage} usage_error={@payload.usage_error} />
-          <.health_panel payload={@payload} />
+          <.spend_panel usage={@payload.usage} usage_error={@payload.usage_error} stats={@payload.run_stats} />
+          <.cost_panel usage={@payload.usage} />
           <.autopilot_panel :if={@payload.autopilot.enabled} payload={@payload} now={@now} />
-          <.models_panel usage={@payload.usage} quota={@payload.quota} throttle={@payload[:throttle]} now={@now} />
-          <.tasks_panel usage={@payload.usage} />
+          <.health_panel payload={@payload} quota={@payload.quota} throttle={@payload[:throttle]} now={@now} />
         </div>
 
         <Gallery.gallery payload={@payload} now={@now} mixed={mixed?(@payload)} active={@section == "pictures"} />
@@ -158,7 +164,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </div>
         </section>
 
-        <Timeline.timeline payload={@payload} now={@now} mixed={mixed?(@payload)} active={@section == "timeline"} />
+        <Timeline.timeline payload={@payload} now={@now} mixed={mixed?(@payload)} active={@section == "timeline"} show={@show} />
       <% end %>
     </section>
     """
@@ -279,7 +285,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   attr(:payload, :map, required: true)
+  attr(:quota, :any, default: nil)
+  attr(:throttle, :any, default: nil)
+  attr(:now, :any, required: true)
 
+  # Service health and the limits that can hold work back: the Codex quota and the throttle.
   defp health_panel(assigns) do
     health = assigns.payload.health
     checks = health.coordinator.checks ++ health.system.checks
@@ -287,7 +297,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
     ~H"""
     <section class="panel" aria-labelledby="system-title">
-      <header class="section-head"><h2 id="system-title">System</h2></header>
+      <header class="section-head"><h2 id="system-title">Health &amp; quota</h2></header>
       <div class="health-lines">
         <p class="health-line">
           <span class={"dot dot-#{status_tone(@health.coordinator.status)}"} aria-hidden="true"></span>Coordinator
@@ -301,6 +311,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <ul :if={@problems != []} class="health-problems">
         <li :for={check <- @problems}><span class={"dot dot-#{status_tone(check.status)}"} aria-hidden="true"></span><strong><%= check.name %></strong> <%= check.detail %></li>
       </ul>
+      <Charts.meter :for={meter <- quota_meters(@quota, @now)} label={meter.label} percent={meter.percent} detail={meter.detail} />
+      <p :for={item <- (@throttle && @throttle.avoid) || []} class="panel-copy">
+        <strong><%= item.model %></strong> backed off: <%= item.reason %>
+      </p>
+      <p :if={@throttle && @throttle.paused} class="panel-copy"><strong>New runs paused:</strong> <%= @throttle.paused %></p>
       <details class="checks">
         <summary>All checks (<%= length(@checks) %>)</summary>
         <ul class="health-list">
@@ -357,7 +372,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <div><dt>Interrupted</dt><dd class="numeric"><%= share(@stats.interrupted, @stats.total) %></dd></div>
         <div><dt>Failed</dt><dd class="numeric"><%= share(@stats.failed, @stats.total) %></dd></div>
         <div><dt>Merged</dt><dd class="numeric"><%= format_int(@stats.merged) %></dd></div>
-        <div><dt>Tokens today</dt><dd class="numeric"><%= compact(@usage.today[:total_tokens]) %></dd></div>
+        <div><dt>Tokens</dt><dd class="numeric"><%= compact(@usage.today[:total_tokens]) %></dd></div>
       </dl>
       <Charts.columns id="runs-chart" title="Worker runs per day by outcome, last 14 days" series={run_series()} columns={run_columns(@usage)} format={&format_count/1} integer={true} />
     </section>
@@ -366,82 +381,81 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   attr(:usage, :map, required: true)
   attr(:usage_error, :any, default: nil)
+  attr(:stats, :map, required: true)
 
   defp spend_panel(assigns) do
-    assigns = assign(assigns, :rows, spend_rows(assigns.usage))
+    days = Map.get(assigns.usage, :daily, [])
+    total = days |> Enum.flat_map(&Map.values(&1.spend_by_model)) |> Enum.sum()
+    active = Enum.count(days, &(map_size(&1.spend_by_model) > 0))
+    assigns = assign(assigns, total: total, today: get_in(assigns.usage, [:today, :usd_micro]), active: active)
 
     ~H"""
     <section class="panel panel-wide" aria-labelledby="spend-title">
-      <header class="section-head"><h2 id="spend-title" title="API-equivalent USD by model">Spend <span class="count">14 days</span></h2></header>
+      <header class="section-head">
+        <h2 id="spend-title" title="API-equivalent USD by model">Spend <span class="count">14 days</span></h2>
+      </header>
+      <dl class="run-stats">
+        <div><dt>Today</dt><dd class="numeric"><%= format_usd(@today) %></dd></div>
+        <div><dt>14 days</dt><dd class="numeric"><%= format_usd(@total) %></dd></div>
+        <div title="Average over days with spend"><dt>Per day</dt><dd class="numeric"><%= per(@total, @active) %></dd></div>
+        <div title="Spend per finished run"><dt>Per run</dt><dd class="numeric"><%= per(@total, @stats.total) %></dd></div>
+        <div title="Spend per merged pull request"><dt>Per merge</dt><dd class="numeric"><%= per(@total, @stats.merged) %></dd></div>
+      </dl>
       <p :if={@usage.status != "ok"} class="error-copy">History unavailable<%= if @usage_error do %>: <%= @usage_error %><% end %>.</p>
       <Charts.columns id="spend-chart" title="Estimated worker spend per day by model, last 14 days" series={spend_series(@usage)} columns={spend_columns(@usage)} format={&format_usd_axis/1} />
-      <div class="spend-tables">
-      <table :if={@rows != []} class="spend-table">
-        <thead><tr><th scope="col">Model</th><th scope="col">Today</th><th scope="col">14 days</th></tr></thead>
-        <tbody>
-          <tr :for={row <- @rows}>
-            <th scope="row"><span class={"legend-key #{row.class}"}></span><%= row.model %></th>
-            <td class="numeric"><%= format_usd(row.today) %></td>
-            <td class="numeric"><%= format_usd(row.total) %></td>
-          </tr>
-        </tbody>
-      </table>
-      <table :if={length(@usage[:by_project] || []) > 1} class="spend-table">
-        <thead><tr><th scope="col">Project</th><th scope="col">Today</th><th scope="col">14 days</th></tr></thead>
-        <tbody>
-          <tr :for={row <- Enum.sort_by(@usage.by_project, & &1.today_usd_micro, :desc)}>
-            <th scope="row"><%= row.project %></th>
-            <td class="numeric"><%= format_usd(row.today_usd_micro) %></td>
-            <td class="numeric"><%= format_usd(row.days_usd_micro) %></td>
-          </tr>
-        </tbody>
-      </table>
+    </section>
+    """
+  end
+
+  attr(:usage, :map, required: true)
+
+  # Where the money goes: by model (with tokens), by project and by kind of task.
+  defp cost_panel(assigns) do
+    tokens = Map.new(assigns.usage.by_model, &{&1.model, &1.total_tokens})
+    projects = Enum.sort_by(assigns.usage[:by_project] || [], & &1.days_usd_micro, :desc)
+    assigns = assign(assigns, models: spend_rows(assigns.usage), tokens: tokens, projects: projects, tasks: task_rows(assigns.usage))
+
+    ~H"""
+    <section class="panel panel-wide panel-cost" aria-labelledby="cost-title">
+      <header class="section-head">
+        <h2 id="cost-title" title={"API-equivalent USD; prices as of #{@usage.pricing_as_of}"}>Cost breakdown</h2>
+        <span class="count">today · 14 days</span>
+      </header>
+      <p :if={@models == [] and @tasks == []} class="empty-state">No recorded spend yet.</p>
+      <div class="cost-grid">
+        <table :if={@models != []} class="spend-table">
+          <thead><tr><th scope="col">Model</th><th scope="col">Today</th><th scope="col">14 days</th><th scope="col">Tokens</th></tr></thead>
+          <tbody>
+            <tr :for={row <- @models}>
+              <th scope="row"><span class="cell-name"><span class={"legend-key #{row.class}"}></span><%= row.model %></span></th>
+              <td class="numeric"><%= format_usd(row.today) %></td>
+              <td class="numeric"><%= format_usd(row.total) %></td>
+              <td class="numeric"><%= compact(Map.get(@tokens, row.model)) %></td>
+            </tr>
+          </tbody>
+        </table>
+        <table :if={length(@projects) > 1} class="spend-table">
+          <thead><tr><th scope="col">Project</th><th scope="col">Today</th><th scope="col">14 days</th></tr></thead>
+          <tbody>
+            <tr :for={row <- @projects}>
+              <th scope="row"><span class="cell-name"><%= row.project %></span></th>
+              <td class="numeric"><%= format_usd(row.today_usd_micro) %></td>
+              <td class="numeric"><%= format_usd(row.days_usd_micro) %></td>
+            </tr>
+          </tbody>
+        </table>
+        <table :if={@tasks != []} class="spend-table task-table">
+          <thead><tr><th scope="col">Task</th><th scope="col">Runs</th><th scope="col" title="Average cost per task">Avg $</th><th scope="col" title="Average time per task">Avg time</th></tr></thead>
+          <tbody>
+            <tr :for={row <- @tasks}>
+              <th scope="row"><span class="cell-name"><Timeline.icon name={row.category} class="task-icon" /><%= row.label %></span></th>
+              <td class="numeric"><%= format_int(row.runs) %></td>
+              <td class="numeric"><%= format_money(div(row.usd_micro, max(row.runs, 1))) %></td>
+              <td class="numeric"><%= if row.timed > 0, do: format_runtime(div(row.seconds, row.timed)), else: "—" %></td>
+            </tr>
+          </tbody>
+        </table>
       </div>
-    </section>
-    """
-  end
-
-  attr(:usage, :map, required: true)
-  attr(:quota, :any, default: nil)
-  attr(:throttle, :any, default: nil)
-  attr(:now, :any, required: true)
-
-  defp models_panel(assigns) do
-    ~H"""
-    <section class="panel" aria-labelledby="models-title">
-      <header class="section-head"><h2 id="models-title" title={"Tokens by model; prices as of #{@usage.pricing_as_of}"}>Models</h2></header>
-      <%= if @usage.by_model == [] do %>
-        <p class="empty-state">No recorded model usage yet.</p>
-      <% else %>
-        <Charts.bars title="Tokens by model" rows={model_rows(@usage)} />
-      <% end %>
-      <Charts.meter :for={meter <- quota_meters(@quota, @now)} label={meter.label} percent={meter.percent} detail={meter.detail} />
-      <p :for={item <- (@throttle && @throttle.avoid) || []} class="panel-copy">
-        <strong><%= item.model %></strong> backed off: <%= item.reason %>
-      </p>
-      <p :if={@throttle && @throttle.paused} class="panel-copy"><strong>New runs paused:</strong> <%= @throttle.paused %></p>
-    </section>
-    """
-  end
-
-  attr(:usage, :map, required: true)
-
-  defp tasks_panel(assigns) do
-    ~H"""
-    <section class="panel" aria-labelledby="tasks-title">
-      <header class="section-head"><h2 id="tasks-title">Per task <span class="count">14 days</span></h2></header>
-      <p :if={task_rows(@usage) == []} class="empty-state">Averages appear as tasks finish.</p>
-      <table :if={task_rows(@usage) != []} class="spend-table task-table">
-        <thead><tr><th scope="col">Task</th><th scope="col">Runs</th><th scope="col" title="Average cost per task">Avg $</th><th scope="col" title="Average time per task">Avg time</th></tr></thead>
-        <tbody>
-          <tr :for={row <- task_rows(@usage)}>
-            <th scope="row"><span class="task-name"><Timeline.icon name={row.category} class="task-icon" /><%= row.label %></span></th>
-            <td class="numeric"><%= format_int(row.runs) %></td>
-            <td class="numeric"><%= format_money(div(row.usd_micro, max(row.runs, 1))) %></td>
-            <td class="numeric"><%= if row.timed > 0, do: format_runtime(div(row.seconds, row.timed)), else: "—" %></td>
-          </tr>
-        </tbody>
-      </table>
     </section>
     """
   end
@@ -551,6 +565,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end)
     |> Enum.sort_by(&{-&1.runs, &1.label})
   end
+
+  defp per(_micro, count) when count in [0, nil], do: "—"
+  defp per(micro, count), do: format_money(div(micro, count))
 
   defp healthy?(health), do: health.coordinator.status == "operational" and health.system.status == "operational"
 
@@ -669,9 +686,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp today(usage, key), do: usage |> Map.get(:daily, []) |> List.last(%{}) |> Map.get(key, 0)
 
-  defp per_day(usage, key), do: usage |> Map.get(:daily, []) |> Enum.map(&Map.get(&1, key, 0))
-
-  # The share of finished runs that completed, per day (0 when none finished).
   defp success_per_day(usage) do
     Enum.map(Map.get(usage, :daily, []), fn day ->
       finished = Map.get(day, :completed, 0) + Map.get(day, :failed, 0) + Map.get(day, :interrupted, 0)
@@ -681,19 +695,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp share_percent(_part, total) when total in [0, nil], do: "—"
   defp share_percent(part, total), do: "#{round(part * 100 / total)}%"
-
-  defp avg_task(usage) do
-    rows = Map.get(usage, :by_task, [])
-    runs = rows |> Enum.map(& &1.runs) |> Enum.sum()
-    timed = rows |> Enum.map(& &1.timed) |> Enum.sum()
-
-    if runs == 0 do
-      %{cost: "—", detail: "no finished tasks yet"}
-    else
-      time = if timed > 0, do: format_runtime(div(rows |> Enum.map(& &1.seconds) |> Enum.sum(), timed)), else: "—"
-      %{cost: format_money(div(rows |> Enum.map(& &1.usd_micro) |> Enum.sum(), runs)), detail: "#{time} avg · #{format_int(runs)} tasks"}
-    end
-  end
 
   defp closed_per_day(usage), do: usage |> Map.get(:daily, []) |> Enum.map(&(Map.get(&1, :merged, 0) + Map.get(&1, :closed, 0)))
 
@@ -711,25 +712,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end)
   end
 
-  defp model_rows(usage) do
-    classes = usage |> spend_series() |> Map.new(&{&1.key, &1.class})
-
-    usage.by_model
-    |> Enum.sort_by(& &1.total_tokens, :desc)
-    |> Enum.map(fn row ->
-      price = if row.unpriced_tokens > 0, do: "unpriced", else: format_usd(row.usd_micro)
-
-      %{
-        label: row.model,
-        value: row.total_tokens,
-        display: "#{compact(row.total_tokens)} · #{row.runs} runs",
-        title: "#{compact(row.total_tokens)} tokens · #{price} · #{row.runs} runs",
-        class: classes[row.model]
-      }
-    end)
-  end
-
-  # One meter per Codex quota window (the weekly one first), marked when stale.
   defp quota_meters(%{windows: windows}, now) do
     for window <- windows, is_number(window.used_percent) do
       %{

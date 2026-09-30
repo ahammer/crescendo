@@ -24,20 +24,24 @@ defmodule SymphonyElixirWeb.Timeline do
   attr(:now, :any, required: true)
   attr(:mixed, :boolean, default: false)
   attr(:active, :boolean, default: false)
+  attr(:show, :string, default: nil, doc: "only rows of this group: delivery, review, autopilot or prs")
 
   @doc "The timeline column."
   @spec timeline(map()) :: Phoenix.LiveView.Rendered.t()
   def timeline(assigns) do
     payload = assigns.payload
-    {next, more} = next_items(payload, assigns.now)
+    show = assigns.show
+    keep = fn items -> Enum.filter(items, &(is_nil(show) or &1.group == show)) end
+    {next, more} = payload |> next_items(assigns.now) |> keep.() |> Enum.split(@next_limit)
+    running = Enum.filter(payload.running, &(is_nil(show) or group(&1.issue_identifier) == show))
 
     assigns =
       assign(assigns,
         next: Enum.reverse(next),
-        more: more,
-        waiting: payload.upcoming.waiting,
-        running: payload.running,
-        done: done_items(payload.usage, assigns.now)
+        more: length(more),
+        waiting: if(show in [nil, "delivery"], do: payload.upcoming.waiting, else: []),
+        running: running,
+        done: payload.usage |> done_items(assigns.now) |> keep.() |> Enum.take(@done_limit)
       )
 
     ~H"""
@@ -146,8 +150,23 @@ defmodule SymphonyElixirWeb.Timeline do
   @spec category_icon(String.t() | nil) :: String.t()
   def category_icon(identifier), do: Operations.task_category(identifier)
 
+  # Autopilot tasks read as their own name (Retrospective, Cleanup, ...).
   @spec category_label(String.t() | nil) :: String.t()
+  def category_label("research-" <> task) when byte_size(task) <= 3, do: String.upcase(task)
+  def category_label("research-" <> task), do: task |> String.replace("-", " ") |> String.capitalize()
   def category_label(identifier), do: identifier |> Operations.task_category() |> category_name()
+
+  @doc "The timeline filter group of a work item: delivery, review or autopilot."
+  @spec group(String.t() | nil) :: String.t()
+  def group(identifier) do
+    case Operations.task_category(identifier) do
+      category when category in ["delivery", "review"] -> category
+      _task -> "autopilot"
+    end
+  end
+
+  defp event_group(%{kind: kind}) when kind in ["pr_merged", "pr_closed", "pr_opened", "issue_terminal", "retired", "blocked"], do: "prs"
+  defp event_group(event), do: group(event[:issue_identifier])
 
   @spec category_name(String.t()) :: String.t()
   def category_name("review"), do: "Review"
@@ -164,6 +183,7 @@ defmodule SymphonyElixirWeb.Timeline do
         %{
           icon: "retry",
           tone: "warning",
+          group: group(entry.issue_identifier),
           label: "Retry #{entry.attempt}",
           id: entry.issue_identifier,
           url: entry[:issue_url],
@@ -180,6 +200,7 @@ defmodule SymphonyElixirWeb.Timeline do
         %{
           icon: category_icon(issue.issue_identifier),
           tone: "info",
+          group: group(issue.issue_identifier),
           label: category_label(issue.issue_identifier),
           id: issue.issue_identifier,
           url: issue[:issue_url],
@@ -191,8 +212,7 @@ defmodule SymphonyElixirWeb.Timeline do
         }
       end)
 
-    all = retries ++ ready
-    {Enum.take(all, @next_limit), max(length(all) - @next_limit, 0)}
+    retries ++ ready
   end
 
   defp done_items(usage, now) do
@@ -200,13 +220,13 @@ defmodule SymphonyElixirWeb.Timeline do
     |> Enum.filter(&(&1.kind in @done_kinds))
     # A task run shows once, as what it delivered, rather than also as a run ending.
     |> Enum.reject(&(&1.kind in @run_kinds and String.starts_with?(to_string(&1[:issue_identifier]), "research-")))
-    |> Enum.take(@done_limit)
     |> Enum.map(fn event ->
       {id, url} = event_subject(event)
 
       %{
         icon: event_icon(event),
         tone: event_tone(event.kind),
+        group: event_group(event),
         label: event_label(event),
         id: id,
         url: url,
@@ -246,11 +266,14 @@ defmodule SymphonyElixirWeb.Timeline do
   defp event_label(%{kind: "issue_terminal"}), do: "Issue closed"
   defp event_label(%{kind: "retired"}), do: "Retired"
   defp event_label(%{kind: "blocked"}), do: "Blocked"
-  defp event_label(%{kind: "completed"} = event), do: category_name(event_category(event)) <> " done"
-  defp event_label(%{kind: "task_delivered"} = event), do: category_name(event_category(event)) <> " delivered"
-  defp event_label(%{kind: "task_short"} = event), do: category_name(event_category(event)) <> " fell short"
-  defp event_label(%{kind: "failed"} = event), do: category_name(event_category(event)) <> " failed"
-  defp event_label(event), do: category_name(event_category(event)) <> " " <> event.kind
+  defp event_label(%{kind: "completed"} = event), do: event_name(event) <> " done"
+  defp event_label(%{kind: "task_delivered"} = event), do: event_name(event) <> " delivered"
+  defp event_label(%{kind: "task_short"} = event), do: event_name(event) <> " fell short"
+  defp event_label(%{kind: "failed"} = event), do: event_name(event) <> " failed"
+  defp event_label(event), do: event_name(event) <> " " <> event.kind
+
+  defp event_name(%{issue_identifier: "research-" <> _ = identifier}), do: category_label(identifier)
+  defp event_name(event), do: category_name(event_category(event))
 
   defp event_tone(kind) when kind in ["completed", "pr_merged", "issue_terminal", "task_delivered"], do: "good"
   defp event_tone(kind) when kind in ["failed", "blocked", "retired"], do: "critical"

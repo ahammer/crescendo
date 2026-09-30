@@ -987,7 +987,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Blocked"
     assert html =~ ~s(title="dependency blocked: GH-10")
     assert html =~ "1/2 running"
-    assert html =~ ~r/PRs closed today.*?3.*?2 merged · 1 closed/s
+    assert html =~ ~r/Merged today.*?3.*?2 merged · 1 closed/s
     assert html =~ ~r/class="spend-table".*?gpt-6-sol.*?\$1\.50.*?\$1\.50/s
     assert html =~ ~r/Free slot.*?Next up.*?GH-10.*?First ready/s
     assert html =~ "over $10.00 budget"
@@ -996,7 +996,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Coordinator"
     assert html =~ "1 retrying automatically"
     assert html =~ "Systems"
-    assert html =~ "Tokens today"
+    assert html =~ ~s(<dt>Tokens</dt>)
+    assert html =~ ~s(<dt>Per merge</dt><dd class="numeric">$0.750</dd>)
+    assert html =~ ~s(<dt>Per run</dt><dd class="numeric">—</dd>)
     assert html =~ "Weekly quota"
     assert html =~ "Weekly quota 25% left"
 
@@ -1031,7 +1033,9 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     by_task = [
       %{model: "gpt-6.1-sol", category: "delivery", runs: 4, usd_micro: 2_000_000, timed: 4, seconds: 2_400},
-      %{model: "gpt-6.1-sol", category: "review", runs: 2, usd_micro: 500_000, timed: 0, seconds: 0}
+      %{model: "gpt-6.1-sol", category: "review", runs: 2, usd_micro: 500_000, timed: 0, seconds: 0},
+      %{model: "gpt-6.1-sol", category: "research", runs: 1, usd_micro: 700_000, timed: 1, seconds: 60},
+      %{model: "gpt-6.1-sol", category: "marketing", runs: 1, usd_micro: 100_000, timed: 1, seconds: 60}
     ]
 
     img = fn n, id, title -> %{src: "/artifacts/0123456789abcdef01234567/#{n}.png", issue_identifier: id, title: title, at: at.(n * 10)} end
@@ -1114,7 +1118,7 @@ defmodule SymphonyElixir.ExtensionsTest do
           "$0.250",
           "Marketing delivered",
           "0 issues · 2 PRs",
-          "Research fell short",
+          "QA fell short",
           "Delivery failed",
           "Broken build",
           "Delivery interrupted",
@@ -1123,14 +1127,13 @@ defmodule SymphonyElixir.ExtensionsTest do
           "Retired",
           "Blocked",
           ~s(href="https://github.com/acme/app/pulls"),
-          "Per task",
+          "Cost breakdown",
           "Pictures",
           "Live",
           "+1",
           ~s(src="/artifacts/0123456789abcdef01234567/5.png"),
           "Fireplace shot",
           "86%",
-          "$0.417",
           "$0.500",
           "10m 0s"
         ] do
@@ -1151,6 +1154,25 @@ defmodule SymphonyElixir.ExtensionsTest do
         ] do
       assert html =~ text
     end
+
+    # The Show filter narrows the timeline to one kind of work, and keeps the project filter.
+    assert html =~ ~s(href="/?show=autopilot")
+    timeline = fn page -> page |> String.split(~s(aria-labelledby="timeline-title")) |> List.last() end
+    {:ok, _view, reviews} = live(build_conn(), "/?show=review")
+    reviews = timeline.(reviews)
+    assert reviews =~ "Review done"
+    refute reviews =~ "Delivery failed"
+    refute reviews =~ "Queued 1"
+    {:ok, _view, prs} = live(build_conn(), "/?show=prs")
+    prs = timeline.(prs)
+    assert prs =~ "Merged"
+    refute prs =~ "Review done"
+    {:ok, _view, tasks_page} = live(build_conn(), "/?show=autopilot")
+    tasks_page = timeline.(tasks_page)
+    assert tasks_page =~ "Marketing delivered"
+    refute tasks_page =~ "6 waiting"
+    {:ok, _view, unknown} = live(build_conn(), "/?show=bogus")
+    assert unknown =~ "Delivery failed"
 
     # Dispatches show as running work, not as finished rows.
     refute html =~ "GH-3"

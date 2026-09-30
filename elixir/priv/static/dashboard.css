@@ -241,6 +241,7 @@ p {
 
 .stat {
   min-width: 0;
+  overflow: hidden;
   padding: 10px 12px;
   background: var(--surface);
   border: 1px solid var(--line);
@@ -278,6 +279,7 @@ p {
   align-items: flex-end;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
 }
 
 .stat-value {
@@ -852,9 +854,6 @@ p {
 }
 
 .spend-table th:first-child {
-  display: flex;
-  align-items: center;
-  gap: 6px;
   color: var(--ink-2);
   font-weight: 500;
   text-align: left;
@@ -2352,7 +2351,7 @@ p {
   }
 
   .stats {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 10px;
   }
 
@@ -2420,7 +2419,7 @@ p {
 
   .dock .agent-card,
   .dock .free-slot {
-    height: 196px;
+    height: 176px;
     overflow: hidden;
   }
 
@@ -2504,6 +2503,11 @@ p {
     grid-column: 1 / -1;
   }
 
+  /* The agent strip stays in the flow on desktops, so it never covers cards. */
+  .dash > .dock {
+    position: static;
+  }
+
   .dash > .timeline,
   .dash > .timeline.is-active {
     position: sticky;
@@ -2516,6 +2520,11 @@ p {
   .charts {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     align-content: start;
+  }
+
+  /* With two columns the cost tables get a full row; Autopilot and Health pair below. */
+  .charts > .panel-cost {
+    grid-column: 1 / -1;
   }
 }
 
@@ -2558,7 +2567,7 @@ p {
   }
 
   .stats {
-    grid-template-columns: repeat(8, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
   }
 
   .stat {
@@ -3059,12 +3068,13 @@ p {
   background: var(--code);
 }
 
+/* Contain, not cover: agent captures are often contact sheets whose middle is empty. */
 .shot-hero img,
 .shot-thumbs img {
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
 }
 
 .shot-hero:hover img,
@@ -3174,4 +3184,40 @@ p {
 
 .research-channel.step-retry .step-dot {
   background: var(--warning);
+}
+
+/* Filters: which project, and which kind of work the timeline shows. */
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 18px;
+}
+
+.filters .project-filter {
+  align-items: center;
+}
+
+.filter-label {
+  margin-right: 2px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* Cost breakdown: model, project and task tables side by side where they fit. */
+.cost-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  align-items: start;
+  gap: 4px 22px;
+}
+
+.cell-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
 }

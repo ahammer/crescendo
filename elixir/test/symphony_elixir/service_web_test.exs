@@ -72,6 +72,12 @@ defmodule SymphonyElixir.ServiceWebTest do
     assert html =~ "project-filter"
     assert html =~ ~s(<span class="project-chip">alpha</span>)
 
+    # Filters combine in the URL: each link keeps the other filter.
+    html = render_patch(view, "/?project=alpha&show=review")
+    assert html =~ ~s(href="/?project=alpha")
+    assert html =~ ~s(href="/?show=review")
+    assert html =~ ~s(href="/?project=beta&amp;show=review")
+
     html = render_patch(view, "/?project=beta")
     assert html =~ ~s(class="project-pill is-active")
     refute html =~ ~s(<span class="project-chip">)
