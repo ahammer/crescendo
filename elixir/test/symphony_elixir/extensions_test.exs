@@ -716,6 +716,51 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute html =~ ~s(<li class="label-chip">symphony:ready</li>)
   end
 
+  test "agent inspector hides the single workflow's configured labels before the limit" do
+    write_workflow_file!(Workflow.workflow_file_path(), extra_config: %{labels: %{prefix: "crescendo"}})
+    [base] = static_snapshot().running
+    labels = Enum.map(~w(ready blocked hold in-review channel:qa model:sol size:small research), &("crescendo:" <> &1))
+    agent = Map.put(base, :labels, labels ++ ["customer-facing"])
+    name = Module.concat(__MODULE__, :ConfiguredLabelOrchestrator)
+    start_supervised!({StaticOrchestrator, name: name, snapshot: %{static_snapshot() | running: [agent]}})
+    start_test_endpoint(orchestrator: name, snapshot_timeout_ms: 50)
+
+    {:ok, view, _html} = live(build_conn(), "/agents/MT-HTTP")
+    assert render(view |> element(".label-list")) =~ "customer-facing"
+    refute render(view |> element(".label-list")) =~ "crescendo:"
+  end
+
+  test "agent inspectors use each matched project's configured label prefix" do
+    [base] = static_snapshot().running
+
+    for {project, prefix} <- [{"alpha", "crescendo"}, {"beta", "custom"}] do
+      path = Path.join(Path.dirname(Workflow.workflow_file_path()), "#{project}.md")
+      write_workflow_file!(path, extra_config: %{labels: %{prefix: prefix}})
+
+      start_supervised!(
+        {WorkflowStore, name: SymphonyElixir.Project.via(project, :workflow_store), project: project, path: path},
+        id: project
+      )
+    end
+
+    agents = for project <- ["alpha", "beta"], do: Map.merge(base, %{project: project, labels: ["crescendo:ready", "custom:ready", "customer-facing"]})
+    name = Module.concat(__MODULE__, :ProjectLabelOrchestrator)
+    start_supervised!({StaticOrchestrator, name: name, snapshot: %{static_snapshot() | running: agents}})
+    start_test_endpoint(orchestrator: name, snapshot_timeout_ms: 50)
+
+    for {path, hidden, visible} <- [
+          {"/agents/alpha/MT-HTTP", "crescendo:ready", "custom:ready"},
+          {"/agents/beta/MT-HTTP", "custom:ready", "crescendo:ready"},
+          {"/agents/MT-HTTP", "crescendo:ready", "custom:ready"}
+        ] do
+      {:ok, view, _html} = live(build_conn(), path)
+      labels = render(view |> element(".label-list"))
+      assert labels =~ "customer-facing"
+      assert labels =~ visible
+      refute labels =~ hidden
+    end
+  end
+
   test "agent inspector JSON link follows its project when present" do
     orchestrator_name = Module.concat(__MODULE__, :ProjectInspectorOrchestrator)
     [base] = static_snapshot().running

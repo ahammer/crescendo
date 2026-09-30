@@ -10,6 +10,7 @@ defmodule SymphonyElixirWeb.AgentLive do
 
   import SymphonyElixirWeb.DashboardComponents
 
+  alias SymphonyElixir.{Config, Project}
   alias SymphonyElixirWeb.{Endpoint, LiveRefresh, Presenter, TranscriptComponents}
 
   @impl true
@@ -37,12 +38,25 @@ defmodule SymphonyElixirWeb.AgentLive do
   # that failed to load says nothing about the run, so it changes nothing.
   defp track_agent(%{assigns: %{payload: %{running: running}, id: id, project: project}} = socket) do
     case Enum.find(running, &(&1.issue_identifier == id and project in [nil, &1[:project]])) do
-      nil -> assign(socket, :ended, not is_nil(socket.assigns.agent))
-      agent -> assign(socket, agent: agent, ended: false)
+      nil ->
+        assign(socket, :ended, not is_nil(socket.assigns.agent))
+
+      agent ->
+        prefix = label_prefix(agent, socket.assigns[:label_prefix] || "symphony")
+        assign(socket, agent: agent, ended: false, label_prefix: prefix)
     end
   end
 
   defp track_agent(socket), do: socket
+
+  defp label_prefix(agent, fallback) do
+    Project.with_project(agent[:project], fn ->
+      case Config.settings() do
+        {:ok, settings} -> settings.labels.prefix
+        {:error, _reason} -> fallback
+      end
+    end)
+  end
 
   @impl true
   def render(assigns) do
@@ -67,7 +81,7 @@ defmodule SymphonyElixirWeb.AgentLive do
 
       <%= cond do %>
         <% @agent -> %>
-          <.run_view agent={@agent} ended={@ended} pane={@pane} now={@now} max_turns={get_in(@payload, [:runtime, :max_turns])} />
+          <.run_view agent={@agent} ended={@ended} pane={@pane} now={@now} label_prefix={@label_prefix} max_turns={get_in(@payload, [:runtime, :max_turns])} />
         <% @payload[:error] -> %>
           <section class="insp-message error-card">
             <h2 class="error-title">Snapshot unavailable</h2>
@@ -89,6 +103,7 @@ defmodule SymphonyElixirWeb.AgentLive do
   attr(:pane, :string, required: true)
   attr(:now, :any, required: true)
   attr(:max_turns, :any, default: nil)
+  attr(:label_prefix, :string, required: true)
 
   defp run_view(assigns) do
     agent = assigns.agent
@@ -97,6 +112,7 @@ defmodule SymphonyElixirWeb.AgentLive do
 
     assigns =
       assign(assigns,
+        labels: visible_labels(agent, assigns.label_prefix),
         workspace: workspace,
         entries: entries,
         run: get_in(agent, [:cost, :run]) || %{usd_micro: 0, unpriced_tokens: 0},
@@ -188,9 +204,9 @@ defmodule SymphonyElixirWeb.AgentLive do
             </div>
             <div :if={@agent[:description]}><dt>About</dt><dd><%= @agent.description %></dd></div>
             <div :if={kind_detail(@agent)}><dt>Context</dt><dd><%= kind_detail(@agent) %></dd></div>
-            <div :if={visible_labels(@agent) != []}>
+            <div :if={@labels != []}>
               <dt>Labels</dt>
-              <dd><ul class="label-list"><li :for={label <- visible_labels(@agent)} class="label-chip"><%= label %></li></ul></dd>
+              <dd><ul class="label-list"><li :for={label <- @labels} class="label-chip"><%= label %></li></ul></dd>
             </div>
             <div><dt>Model</dt><dd class="mono"><%= route_model(@agent) %></dd></div>
             <div><dt>Route</dt><dd><%= route_detail(@agent) %></dd></div>

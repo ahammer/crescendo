@@ -113,11 +113,11 @@ defmodule SymphonyElixirWeb.DashboardComponents do
   defp kind_detail(_kind, _entry), do: nil
 
   @doc "Labels that describe the work; scheduling labels are shown elsewhere."
-  @spec visible_labels(map()) :: [String.t()]
-  def visible_labels(entry) do
+  @spec visible_labels(map(), String.t()) :: [String.t()]
+  def visible_labels(entry, prefix \\ "symphony") do
     entry
     |> Map.get(:labels, [])
-    |> Enum.reject(&(String.starts_with?(&1, "symphony:") or &1 == "symphony"))
+    |> Enum.reject(&(String.starts_with?(&1, prefix <> ":") or &1 == prefix))
     |> Enum.take(8)
   end
 
