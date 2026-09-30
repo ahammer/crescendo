@@ -600,7 +600,7 @@ defmodule SymphonyElixir.Orchestrator do
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
-        Operations.event(state.operations, "issue_terminal", %{issue_identifier: issue.identifier, issue_url: issue.url, summary: issue.state})
+        Operations.disposition(state.operations, Map.from_struct(issue), Config.settings!().labels.prefix)
 
         terminate_running_issue(state, issue.id, true)
 
@@ -636,7 +636,7 @@ defmodule SymphonyElixir.Orchestrator do
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Blocked issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; releasing block")
-        Operations.event(state.operations, "issue_terminal", %{issue_identifier: issue.identifier, issue_url: issue.url, summary: issue.state})
+        Operations.disposition(state.operations, Map.from_struct(issue), Config.settings!().labels.prefix)
         cleanup_issue_workspace(issue, Map.get(state.blocked, issue.id, %{}))
         release_issue_claim(state, issue.id)
 
@@ -971,6 +971,7 @@ defmodule SymphonyElixir.Orchestrator do
     Operations.event(state.operations, "attempt_failed", %{
       issue_identifier: issue.identifier,
       issue_url: issue.url,
+      item_attempt: attempts,
       summary: "Attempt #{attempts}/#{settings.max_item_attempts}: #{reason}"
     })
 
@@ -986,7 +987,7 @@ defmodule SymphonyElixir.Orchestrator do
     case Tracker.retire(issue, comment) do
       :ok ->
         Logger.info("Autopilot retired #{issue_context(issue)}: #{reason}")
-        Operations.event(state.operations, "retired", %{issue_identifier: issue.identifier, issue_url: issue.url, summary: reason})
+        Operations.disposition(state.operations, issue |> Map.from_struct() |> Map.put(:state_reason, "not_planned"), Config.settings!().labels.prefix)
         cleanup_issue_workspace(issue)
 
       {:error, error} ->
@@ -1010,6 +1011,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error, summary) do
     Operations.event(state.operations, "blocked", %{
+      run_id: Map.get(running_entry, :run_id),
+      item_attempt: nil,
       issue_identifier: Map.get(running_entry, :identifier, issue_id),
       issue_url: Map.get(Map.get(running_entry, :issue) || %{}, :url),
       summary: summary
@@ -1368,6 +1371,7 @@ defmodule SymphonyElixir.Orchestrator do
         Operations.start_run(state.operations, entry.run_id, %{
           issue_identifier: issue.identifier,
           issue_url: issue.url,
+          item_attempt: item_attempt,
           summary: "Dispatched to #{worker_host || "local"}"
         })
 
@@ -1522,6 +1526,7 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
 
+        Operations.disposition(state.operations, Map.from_struct(issue), Config.settings!().labels.prefix)
         cleanup_issue_workspace(issue, metadata)
         {:noreply, release_issue_claim(state, issue_id)}
 

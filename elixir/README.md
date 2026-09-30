@@ -425,7 +425,7 @@ The observability UI now runs on a minimal Phoenix stack:
   warning does not stop dispatch.
 - The dashboard at `/` is built for phones first. Eight header stats carry sparklines: agents,
   queue, open pull requests (with a link to each project's pull request list on GitHub), pull
-  requests closed today, runs done today, the 14-day success rate, the average task cost and time,
+  request transitions today, runs done today, the 14-day turn completion rate, the average task cost and time,
   and spend today (from a five-minute sample of queue counts and spend kept for 48 hours in
   `operations.dets`). Below them are the 14-day runs and spend charts (with each model's and
   project's spend) and cards for system health, autopilot, model usage and per-task averages (cost
@@ -575,3 +575,19 @@ up for you.
 ## License
 
 This project is licensed under the [Apache License 2.0](../LICENSE).
+
+
+### Durable outcome facts
+
+`operations.dets` preserves run endings separately from blocked item attempts and scoped delivery
+or retirement. The dashboard's turn completion rate measures normal worker endings, not product
+acceptance. Stopped workers retain their recorded duration/cost and are not classified as failures.
+PR closes/reopens remain transitions, not abandoned deliveries.
+
+Daily state API rows add `stopped`, `blocked_attempts`, `accepted_deliveries`, `retirements` and
+`unknown_dispositions`. New attempt/disposition events retain their work item, attempt and last
+recorded run ID; missing historical attribution is `unknown`. Counts cover the retained event ring;
+durable idempotency keys survive restart. Plain issue closure has unknown acceptance. For accepted
+issue work without a merged PR, apply `<prefix>:delivery:verified-existing` or
+`<prefix>:delivery:split` after validation and document scoped evidence in the workpad; `not_planned`
+is retirement. See [the detailed semantics](../docs/crescendo.md#durable-outcome-facts).

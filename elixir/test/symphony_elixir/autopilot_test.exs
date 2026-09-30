@@ -693,6 +693,38 @@ defmodule SymphonyElixir.AutopilotTest do
       assert Enum.any?(activity, &(&1.kind == "stopped" and &1.issue_identifier == "PR-2"))
     end
 
+    test "completed blocked work and accepted reconciliation use separate durable facts" do
+      write_autopilot_workflow!(max_concurrent_agents: 1)
+      issue = %Issue{id: "1", identifier: "GH-1", title: "Work", state: "open", dispatchable: true, labels: []}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      path = Path.join(Path.dirname(Workflow.workflow_file_path()), "facts.dets")
+      {pid, name} = start_orchestrator!(operations_path: path, operations_table: :autopilot_facts_test)
+      cool_down_research(pid)
+      send(pid, :run_poll_cycle)
+      entry = :sys.get_state(pid).running["1"]
+      Process.exit(entry.pid, :kill)
+      send(pid, {:DOWN, entry.ref, :process, entry.pid, :normal})
+      assert :sys.get_state(pid).running == %{}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | labels: ["symphony:blocked"]}])
+      send(pid, :run_poll_cycle)
+      operations = Orchestrator.snapshot(name, 5_000).operations
+      assert %{completed: 1, blocked_attempts: 1, accepted_deliveries: 0} = List.last(operations.daily)
+      assert Enum.any?(operations.activity, &match?(%{kind: "attempt_failed", run_id: run_id} when run_id == entry.run_id, &1))
+
+      # The next attempt closes with explicit scoped evidence while its worker is running.
+      second = :sys.get_state(pid).running["1"]
+      assert second.item_attempt == 2
+      Operations.usage(:autopilot_facts_test, second.run_id, "gpt-6-sol", %{input_tokens: 1_000_000}, "GH-1")
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | state: "closed", labels: ["symphony:delivery:split"]}])
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).running == %{}
+      operations = Orchestrator.snapshot(name, 5_000).operations
+      assert %{completed: 1, stopped: 1, blocked_attempts: 1, accepted_deliveries: 1} = List.last(operations.daily)
+      assert operations.recorded.usd_micro == 1_000_000
+      send(pid, :run_poll_cycle)
+      assert Orchestrator.snapshot(name, 5_000).operations.daily == operations.daily
+    end
+
     test "agents keep a short, readable history of Codex events and their route" do
       write_autopilot_workflow!()
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
@@ -885,12 +917,12 @@ defmodule SymphonyElixir.AutopilotTest do
     )
   end
 
-  defp start_orchestrator! do
+  defp start_orchestrator!(opts \\ []) do
     suffix = System.unique_integer([:positive])
     supervisor = Module.concat(__MODULE__, "Tasks#{suffix}")
     name = Module.concat(__MODULE__, "Orchestrator#{suffix}")
     start_supervised!({Task.Supervisor, name: supervisor})
-    pid = start_supervised!({Orchestrator, name: name, task_supervisor: supervisor})
+    pid = start_supervised!({Orchestrator, Keyword.merge(opts, name: name, task_supervisor: supervisor)})
     # Let the startup tick settle so the test drives poll cycles itself.
     :sys.get_state(pid)
     {pid, name}

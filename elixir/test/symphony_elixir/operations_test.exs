@@ -35,6 +35,107 @@ defmodule SymphonyElixir.OperationsTest do
     assert Operations.spend_today(table) == 0
   end
 
+  test "item attempts and scoped dispositions survive replay independently of run endings" do
+    path = Path.join(System.tmp_dir!(), "outcome-facts-#{System.unique_integer([:positive])}.dets")
+    table = :outcome_facts_test
+
+    on_exit(fn ->
+      Operations.close(table)
+      File.rm(path)
+    end)
+
+    {:ok, ^table} = Operations.open(path, table)
+
+    details = %{issue_identifier: "GH-1", item_attempt: 1, model: "gpt-6-sol"}
+    Operations.start_run(table, "blocked-run", details)
+    Operations.finish_run(table, "blocked-run", "completed", details)
+    Operations.event(table, "attempt_failed", details)
+    Operations.event(table, "attempt_failed", details)
+    Operations.event(table, "blocked", details)
+    assert %{completed: 1, blocked_attempts: 1, accepted_deliveries: 0} = List.last(Operations.snapshot(table).daily)
+    assert Enum.any?(Operations.snapshot(table).activity, &match?(%{kind: "attempt_failed", run_id: "blocked-run", item_attempt: 1}, &1))
+
+    accepted = %{identifier: "GH-2", url: nil, labels: ["crescendo:delivery:verified-existing"]}
+    Operations.start_run(table, "accepted-run", %{issue_identifier: "GH-2", item_attempt: 1})
+    Operations.usage(table, "accepted-run", "gpt-6-sol", %{input_tokens: 1_000_000}, "GH-2")
+    Operations.disposition(table, accepted)
+    Operations.finish_run(table, "accepted-run", "stopped", %{issue_identifier: "GH-2"})
+    Operations.finish_run(table, "accepted-run", "failed", %{issue_identifier: "GH-2"})
+    assert %{usd_micro: 1_000_000, runs: 1} = Operations.item_usage(table, "GH-2")
+    assert Enum.any?(Operations.snapshot(table).activity, &match?(%{kind: "stopped", seconds: seconds, usd_micro: 1_000_000} when is_integer(seconds), &1))
+
+    Operations.disposition(table, %{identifier: "GH-3", url: nil, labels: ["crescendo:delivery:split"]})
+    Operations.disposition(table, %{identifier: "GH-4", url: nil, labels: [], state_reason: "not_planned"})
+    Operations.disposition(table, %{identifier: "GH-5", url: nil, labels: []})
+    pull = %{pr_number: 6, pr_url: "https://github.com/acme/repo/pull/6"}
+    Operations.event(table, "pr_closed", pull)
+    Operations.event(table, "pr_opened", pull)
+    Operations.event(table, "pr_merged", pull)
+    Operations.event(table, "pr_merged", pull)
+    before = Operations.snapshot(table)
+    assert %{stopped: 1, failed: 0, blocked_attempts: 1, accepted_deliveries: 3, retirements: 1, unknown_dispositions: 1, closed: 1} = List.last(before.daily)
+    assert Enum.any?(before.activity, &(&1.kind == "pr_reopened"))
+    assert Enum.any?(before.activity, &match?(%{kind: "item_disposition", disposition: "merged", attribution: "unknown"}, &1))
+
+    Operations.close(table)
+    {:ok, ^table} = Operations.open(path, table)
+    Operations.disposition(table, accepted)
+    Operations.event(table, "attempt_failed", details)
+    Operations.event(table, "pr_merged", pull)
+    after_replay = Operations.snapshot(table)
+    assert after_replay.daily == before.daily
+    assert List.last(after_replay.daily).accepted_deliveries == 3
+    assert List.last(after_replay.daily).blocked_attempts == 1
+    assert after_replay.by_task == before.by_task
+    assert after_replay.recorded == before.recorded
+  end
+
+  test "blocks without autopilot distinguish runs even without numbered attempts" do
+    path = Path.join(System.tmp_dir!(), "blocked-runs-#{System.unique_integer([:positive])}.dets")
+    table = :blocked_runs_test
+
+    on_exit(fn ->
+      Operations.close(table)
+      File.rm(path)
+    end)
+
+    {:ok, ^table} = Operations.open(path, table)
+
+    for run <- ["one", "two"] do
+      Operations.start_run(table, run, %{issue_identifier: "GH-1", item_attempt: 1})
+      details = %{issue_identifier: "GH-1", run_id: run, item_attempt: nil}
+      Operations.event(table, "blocked", details)
+      Operations.event(table, "blocked", details)
+    end
+
+    assert List.last(Operations.snapshot(table).daily).blocked_attempts == 2
+  end
+
+  test "old events keep unknown run attribution without inventing acceptance" do
+    path = Path.join(System.tmp_dir!(), "legacy-facts-#{System.unique_integer([:positive])}.dets")
+    table = :legacy_facts_test
+
+    on_exit(fn ->
+      Operations.close(table)
+      File.rm(path)
+    end)
+
+    {:ok, ^table} = Operations.open(path, table)
+    at = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    :dets.insert(table, [
+      {{:event, 1}, %{kind: "completed", issue_identifier: "GH-1", at: at}},
+      {{:event, 2}, %{kind: "attempt_failed", issue_identifier: "GH-1", at: at}},
+      {{:event, 3}, %{kind: "issue_terminal", issue_identifier: "GH-2", at: at}}
+    ])
+
+    assert %{completed: 1, blocked_attempts: 1, accepted_deliveries: 0, unknown_dispositions: 1} = List.last(Operations.snapshot(table).daily)
+    assert Enum.all?(Operations.snapshot(table).activity, &(&1.attribution == "unknown"))
+    Operations.close(table)
+    {:ok, ^table} = Operations.open(path, table)
+    assert List.last(Operations.snapshot(table).daily).blocked_attempts == 1
+  end
+
   test "prices come from the built-in table with configured models on top" do
     pricing = %{
       "as_of" => "2026-10-01",
