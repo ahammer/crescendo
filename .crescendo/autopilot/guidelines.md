@@ -15,7 +15,9 @@ repositories. These rules apply to every agent working in this repository.
 
 - This repository runs you. Never touch the running service: no `systemctl` on `crescendo*` units,
   no edits under `~/.config/crescendo`, `~/.local/state/crescendo` or `~/.local/lib/crescendo`, and
-  never run `ops/bin/deploy`.
+  never run `ops/bin/deploy`. Reading them (and `$CRESCENDO_STATE_URL`) to understand the service
+  is fine. Changes reach the service only through merged pull requests, which the deploy timer
+  ships.
 - The web dashboard is public and must stay strictly read-only: no endpoint or control that changes
   configuration or dispatches work. Configuration lives in local files.
 - Nothing is ever parked waiting for a person: blocked work is retried and, after its attempts,

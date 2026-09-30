@@ -210,6 +210,7 @@ defmodule SymphonyElixir.Autopilot do
         source: research.source,
         when: research.when,
         every_ms: research.every_ms,
+        at: research.at,
         due_at: due_at(state, research, now),
         attempts: Map.get(task, :attempts, 0),
         last: Map.get(task, :last),
@@ -226,13 +227,32 @@ defmodule SymphonyElixir.Autopilot do
 
   defp tasks(state), do: Map.get(state, :tasks, %{})
 
-  defp due_at(state, research, _now) do
-    case Map.get(tasks(state), research.channel, %{}) do
-      %{retry_at: %DateTime{} = retry_at} -> retry_at
-      %{finished_at: %DateTime{} = finished_at} -> DateTime.add(finished_at, research.every_ms, :millisecond)
-      _ -> ~U[1970-01-01 00:00:00Z]
+  # A task with `at` runs at that time of day (UTC): first at the latest past
+  # occurrence, then at the first occurrence at least half its interval after
+  # it last finished, so a long run never skips a day.
+  defp due_at(state, research, now) do
+    case {Map.get(tasks(state), research.channel, %{}), time_of_day(research[:at])} do
+      {%{retry_at: %DateTime{} = retry_at}, _at} -> retry_at
+      {%{finished_at: %DateTime{} = finished_at}, nil} -> DateTime.add(finished_at, research.every_ms, :millisecond)
+      {%{finished_at: %DateTime{} = finished_at}, at} -> finished_at |> DateTime.add(div(research.every_ms, 2), :millisecond) |> next_occurrence(at)
+      {_never, nil} -> ~U[1970-01-01 00:00:00Z]
+      {_never, at} -> now |> next_occurrence(at) |> DateTime.add(-1, :day)
     end
   end
+
+  defp next_occurrence(from, at) do
+    candidate = DateTime.new!(DateTime.to_date(from), at)
+    if DateTime.compare(candidate, from) == :lt, do: DateTime.add(candidate, 1, :day), else: candidate
+  end
+
+  @doc "Parses a UTC time of day such as `06:00`."
+  @spec time_of_day(term()) :: Time.t() | nil
+  def time_of_day(text) when is_binary(text) do
+    with [_all, hour, minute] <- Regex.run(~r/^([01]\d|2[0-3]):([0-5]\d)$/, String.trim(text)),
+         do: Time.new!(String.to_integer(hour), String.to_integer(minute), 0)
+  end
+
+  def time_of_day(_value), do: nil
 
   @doc "One synthetic research item per configured channel, in name order."
   @spec research_items(map()) :: [Issue.t()]
@@ -268,6 +288,7 @@ defmodule SymphonyElixir.Autopilot do
         expectations: Map.get(spec, "expectations") || [],
         route: spec["route"] || effort_route(autopilot_settings, spec["effort"]),
         every_ms: duration_ms(spec["every"]) || autopilot_settings.research_cooldown_ms,
+        at: spec["at"],
         when: Map.get(spec, "when") || "idle",
         source: Map.get(spec, "source") || "local"
       }

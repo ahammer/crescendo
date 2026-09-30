@@ -249,6 +249,7 @@ defmodule SymphonyElixir.RepoAutopilotTest do
       for bad <- [
             %{"every" => "sometimes"},
             %{"when" => "never"},
+            %{"at" => "noon"},
             %{"effort" => 3},
             %{"source" => "elsewhere"},
             %{"expectations" => "run it"},
@@ -375,12 +376,12 @@ defmodule SymphonyElixir.RepoAutopilotTest do
       File.write!(Path.join([dir, "tasks", "qa.md"]), "---\nfocus: QA\nevery: 1d\ndelivers: {pull_requests: {min: 1, paths: [docs]}}\n---\nHunt")
       File.write!(Path.join([dir, "tasks", "plain.md"]), "Just a prompt with no front matter")
       File.write!(Path.join([dir, "tasks", "open.md"]), "---\nfocus: Front matter never closed")
-      File.write!(Path.join([dir, "tasks", "twice.md"]), "---\nfocus: Twice a day\nevery: 12h\n---\nHunt")
+      File.write!(Path.join([dir, "tasks", "twice.md"]), "---\nfocus: Twice a day\nevery: 12h\nat: \"06:00\"\n---\nHunt")
 
       output = ExUnit.CaptureIO.capture_io(fn -> assert :ok = Commands.run(["autopilot", "check", dir], nil) end)
       assert output =~ "qa: every 1d · idle · effort default · issues 1..3 · PRs 1..∞ in docs"
       assert output =~ "plain: every 30m"
-      assert output =~ "twice: every 12h"
+      assert output =~ "twice: every 12h at 06:00 UTC"
       assert output =~ "guidelines: guidelines.md"
 
       # With the project workflow the folder loads as the service would load it.

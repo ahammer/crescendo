@@ -2384,6 +2384,8 @@ Extension config (`autopilot` object):
   - A channel object's `min_issues` MAY be `0` for a channel whose findings are optional.
   - `every` is the channel's own interval (`30m`, `6h`, `1d`, `2w`; default
     `research_cooldown_ms`).
+  - `at` (`HH:MM`, UTC, OPTIONAL) anchors a channel to a time of day. It first runs at the latest
+    past occurrence, then at the first occurrence at least half of `every` after it last finished.
   - `when` is `idle` (default) or `anytime`.
   - `effort` names a rung of `codex.routing.ladder` for the `research_route` model.
   - `expectations` is a list of text the prompt must meet.

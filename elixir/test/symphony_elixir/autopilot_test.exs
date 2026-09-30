@@ -175,6 +175,25 @@ defmodule SymphonyElixir.AutopilotTest do
       assert %{name: "docs", when: "anytime", every_ms: 86_400_000} = docs
     end
 
+    test "a task anchored to a time of day runs there, whatever else is queued" do
+      now = ~U[2026-09-29 10:00:00Z]
+      settings = %{@settings | channels: %{"retro" => %{"focus" => "Retrospective", "every" => "1d", "at" => "06:00", "when" => "anytime", "delivers" => %{"issues" => %{"min" => 0}}}}}
+
+      # Never run: due since today's 06:00, even for a busy project with a full backlog.
+      assert {_, %Issue{id: "research:retro"}} = Autopilot.next_research(@empty, settings, 99, now, idle: false)
+      assert [%{due_at: ~U[2026-09-29 06:00:00Z], at: "06:00"}] = Autopilot.task_statuses(@empty, settings, now)
+      assert [%{due_at: ~U[2026-09-28 06:00:00Z]}] = Autopilot.task_statuses(@empty, settings, ~U[2026-09-29 05:00:00Z])
+
+      # A run finishing late still keeps tomorrow's slot; the next one waits for it.
+      state = Autopilot.record_research_finished(@empty, "retro", :delivered, ~U[2026-09-29 08:30:00Z], settings)
+      assert [%{due_at: ~U[2026-09-30 06:00:00Z]}] = Autopilot.task_statuses(state, settings, now)
+      assert {_, nil} = Autopilot.next_research(state, settings, 0, ~U[2026-09-30 05:59:00Z])
+      assert {_, %Issue{}} = Autopilot.next_research(state, settings, 0, ~U[2026-09-30 06:00:00Z])
+
+      assert Autopilot.time_of_day(" 23:59 ") == ~T[23:59:00]
+      assert Enum.map(["24:00", "6:00", "06:60", nil], &Autopilot.time_of_day/1) == [nil, nil, nil, nil]
+    end
+
     test "schedules parse from short durations" do
       assert Enum.map(["30m", "6h", " 1d ", "2w", 90_000], &Autopilot.duration_ms/1) == [1_800_000, 21_600_000, 86_400_000, 1_209_600_000, 90_000]
       assert Enum.map(["0h", "1y", "", nil, -5], &Autopilot.duration_ms/1) == [nil, nil, nil, nil, nil]

@@ -618,7 +618,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp task_title(task, now) do
     last = if task.last, do: " · last #{task.last}#{if task.finished_at, do: " #{ago(task.finished_at, now)}"}", else: ""
-    "#{task.name}: every #{format_every(task.every_ms)} · #{task.when} · #{task.source}#{last}"
+    at = if task[:at], do: " at #{task.at} UTC", else: ""
+    "#{task.name}: every #{format_every(task.every_ms)}#{at} · #{task.when} · #{task.source}#{last}"
   end
 
   defp task_due(%{due_at: %DateTime{} = due_at}), do: due_at

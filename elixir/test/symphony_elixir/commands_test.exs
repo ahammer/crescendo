@@ -84,9 +84,13 @@ defmodule SymphonyElixir.CommandsTest do
     assert settings.tracker.required_labels == ["true:ready"]
   end
 
-  test "labels sync creates the labels a project's workflow uses that its repository lacks", %{service: service} do
+  test "labels sync creates the labels a project's workflow uses that its repository lacks", %{root: root, service: service} do
     capture_io(fn -> Commands.run(["project", "add", service, "shimmer", "ahammer/Shimmer"], &no_gh/1) end)
-    File.write!(service, "projects: {shimmer: {}, other: {enabled: false}}")
+    File.write!(service, "paths: {state: state}\nprojects: {shimmer: {}, other: {enabled: false}}")
+    # A task from the repository's .crescendo/autopilot mirror gets its channel label too.
+    tasks = Path.join([root, "state", "projects", "shimmer", "repo-autopilot", "tasks"])
+    File.mkdir_p!(tasks)
+    File.write!(Path.join(tasks, "retro.md"), "---\nfocus: Retrospective\n---\nLook back")
     parent = self()
 
     gh = fn
@@ -104,7 +108,7 @@ defmodule SymphonyElixir.CommandsTest do
     refute "crescendo:ready" in created
     refute "crescendo:hold" in created
 
-    for label <- ["crescendo:in-review", "crescendo:blocked", "crescendo:channel:qa", "crescendo:size:small", "crescendo:model:sol"],
+    for label <- ["crescendo:in-review", "crescendo:blocked", "crescendo:channel:retro", "crescendo:size:small", "crescendo:model:sol"],
         do: assert(label in created)
 
     assert output =~ "shimmer: created crescendo:blocked"

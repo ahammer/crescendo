@@ -117,7 +117,7 @@ defmodule SymphonyElixir.Commands do
     effort = (research.route || %{})["effort"] || "default"
     prs = if pulls, do: " · PRs #{pulls.min}..#{pulls.max || "∞"}#{if pulls.paths != [], do: " in #{Enum.join(pulls.paths, ",")}"}", else: ""
 
-    "#{research.channel}: every #{every(research.every_ms)} · #{research.when} · effort #{effort} · issues #{research.min_issues}..#{research.max_issues}#{prs}"
+    "#{research.channel}: every #{every(research.every_ms)}#{if research.at, do: " at #{research.at} UTC"} · #{research.when} · effort #{effort} · issues #{research.min_issues}..#{research.max_issues}#{prs}"
   end
 
   defp every(ms) when rem(ms, 86_400_000) == 0, do: "#{div(ms, 86_400_000)}d"
@@ -193,7 +193,7 @@ defmodule SymphonyElixir.Commands do
         :ok ->
           projects
           |> Enum.filter(&(only == [] or &1.id in only))
-          |> Enum.find_value(:ok, &sync_error(&1, gh))
+          |> Enum.find_value(:ok, &sync_error(&1, service, gh))
 
         error ->
           error
@@ -208,15 +208,15 @@ defmodule SymphonyElixir.Commands do
     end
   end
 
-  defp sync_error(project, gh) do
-    case sync_project(project, gh) do
+  defp sync_error(project, service, gh) do
+    case sync_project(project, service, gh) do
       :ok -> nil
       error -> error
     end
   end
 
-  defp sync_project(project, gh) do
-    with {:ok, settings, repo} <- project_settings(project),
+  defp sync_project(project, service, gh) do
+    with {:ok, settings, repo} <- project_settings(project, service),
          {:ok, existing} <- existing_labels(project.id, repo, gh) do
       Enum.reduce_while(labels(settings), :ok, &sync_label(&1, &2, project.id, repo, existing, gh))
     end
@@ -236,7 +236,7 @@ defmodule SymphonyElixir.Commands do
   defp labels_migrate(path, id, old_prefix, gh) do
     with {:ok, service} <- Service.load(path),
          %Service.Project{} = project <- Enum.find(Service.projects(service), &(&1.id == id)) || {:error, "no project #{id}"},
-         {:ok, settings, repo} <- project_settings(project) do
+         {:ok, settings, repo} <- project_settings(project, service) do
       prefix = settings.labels.prefix
 
       labels(settings)
@@ -254,8 +254,12 @@ defmodule SymphonyElixir.Commands do
     end
   end
 
-  defp project_settings(project) do
-    with {:ok, workflow} <- Workflow.load(project.workflow, project.defaults),
+  # Loaded as the service loads it, with the repository's autopilot tasks (as
+  # last mirrored), so their channel labels exist too.
+  defp project_settings(project, service) do
+    mirror = SymphonyElixir.RepoAutopilot.mirror_dir(Path.join([Service.state_root(service), "projects", project.id]))
+
+    with {:ok, workflow} <- Workflow.load(project.workflow, project.defaults, mirror),
          {:ok, settings} <- Schema.parse(workflow.config),
          repo when is_binary(repo) <- settings.tracker.provider["repo"] do
       {:ok, settings, repo}

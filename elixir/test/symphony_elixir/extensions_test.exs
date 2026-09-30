@@ -1035,7 +1035,7 @@ defmodule SymphonyElixir.ExtensionsTest do
       next_research_at: later.(3_600),
       repo: %{state: :synced, error: nil},
       tasks: [
-        task.("deps", %{when: "anytime", every_ms: 604_800_000, due_at: later.(10_800), last: :delivered}) |> Map.put(:finished_at, later.(-600)),
+        task.("deps", %{when: "anytime", every_ms: 604_800_000, due_at: later.(10_800), last: :delivered, at: "06:00"}) |> Map.put(:finished_at, later.(-600)),
         task.("docs", %{}),
         task.("qa", %{when: "anytime", every_ms: 3_600_000, due_at: DateTime.to_iso8601(later.(1_800))}) |> Map.merge(%{attempts: 1, last: :short}),
         task.("ux", %{every_ms: 5_400_000, due_at: "not a time"}),
@@ -1100,7 +1100,7 @@ defmodule SymphonyElixir.ExtensionsTest do
           "due · when idle",
           "retry 2 in 29m",
           "in 2h 59m",
-          "every 7d · anytime · repo · last delivered",
+          "every 7d at 06:00 UTC · anytime · repo · last delivered",
           "every 1h",
           "every 90m"
         ] do

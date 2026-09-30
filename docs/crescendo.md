@@ -224,6 +224,7 @@ channels:
     max_issues: 4
     route: {model: gpt-6.1-sol, effort: xhigh}
     every: 1d          # schedule: 30m, 6h, 1d, 2w (default research_cooldown_ms)
+    at: "06:00"        # optional time of day (UTC) the task runs at, every `every`
     when: idle         # idle: only when nothing else runs or waits; anytime: whenever a slot is free
 ```
 

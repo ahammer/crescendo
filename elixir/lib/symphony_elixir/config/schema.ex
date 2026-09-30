@@ -441,7 +441,7 @@ defmodule SymphonyElixir.Config.Schema do
 
     @prompt_kinds ["pull_request", "research"]
     @channel_name ~r/^[a-z0-9][a-z0-9-]*$/
-    @channel_keys ["focus", "prompt", "min_issues", "max_issues", "route", "effort", "every", "when", "expectations", "delivers", "source"]
+    @channel_keys ["focus", "prompt", "min_issues", "max_issues", "route", "effort", "every", "at", "when", "expectations", "delivers", "source"]
     @channel_error "names must be lowercase letters, digits, or dashes and map to focus text or " <>
                      "{focus, prompt, min_issues, max_issues, route, effort, every, when, expectations, delivers}"
 
@@ -535,7 +535,8 @@ defmodule SymphonyElixir.Config.Schema do
     defp string_list?(values), do: is_list(values) and Enum.all?(values, &(is_binary(&1) and &1 != ""))
 
     defp valid_schedule?(spec) do
-      (is_nil(spec["every"]) or SymphonyElixir.Autopilot.duration_ms(spec["every"]) != nil) and spec["when"] in [nil, "idle", "anytime"]
+      (is_nil(spec["every"]) or SymphonyElixir.Autopilot.duration_ms(spec["every"]) != nil) and spec["when"] in [nil, "idle", "anytime"] and
+        (is_nil(spec["at"]) or SymphonyElixir.Autopilot.time_of_day(spec["at"]) != nil)
     end
 
     # `delivers` lists what a task run must produce: issues and pull requests
