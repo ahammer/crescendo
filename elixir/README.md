@@ -446,6 +446,15 @@ The observability UI now runs on a minimal Phoenix stack:
   polling, dispatch capacity, blocked items, research, tracker and pull request read age and
   errors, rate limit use and failed attempts in the last hour, the usage store, and free workspace
   disk space.
+- Service snapshots preserve every requested project's outcome: `projects[].snapshot_status`
+  is `ok`, `timeout`, `unavailable`, or `not_selected` for a project outside the filter.
+  Unobserved project running/ready counts are `null`. The selected aggregate has
+  `snapshot_status: complete|partial` and a `snapshot_errors` list of project/status pairs.
+  Partial snapshots keep observed rows and private-project redaction, set all aggregate `counts`
+  to `null`, and show an incomplete warning and unknown counts instead of idle/free slots.
+  Health warns on incompleteness; dispatch can still report Governor-held service slots without
+  inventing running or queue counts. The next successful snapshot clears the warning.
+  Deployment validators reject partial, filtered, or unknown project observations.
 - An agent card opens the full-screen agent inspector at `/agents/<issue_identifier>`. It shows the
   agent's run as a chat, rebuilt from Codex app-server notifications: messages and reasoning
   (streamed as they are written), commands with exit code, duration and the last 60 lines or 8 KB of

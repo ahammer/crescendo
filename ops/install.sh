@@ -9,7 +9,7 @@ units=$HOME/.config/systemd/user
 
 mkdir -p "$root/bin" "$root/releases" "$units" "$config/projects"
 chmod 700 "$config"
-for script in start crescendo deploy; do install -m 755 "$here/bin/$script" "$root/bin/$script"; done
+for script in start crescendo deploy deploy-state.py; do install -m 755 "$here/bin/$script" "$root/bin/$script"; done
 for unit in crescendo.service crescendo-deploy.service crescendo-deploy.timer; do install -m 644 "$here/systemd/$unit" "$units/$unit"; done
 systemctl --user daemon-reload
 

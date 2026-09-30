@@ -50,7 +50,7 @@ defmodule SymphonyElixirWeb.Presenter do
     ids = service |> Service.projects() |> Enum.map(& &1.id)
     project = if opts[:project] in ids, do: opts[:project]
     selected = if project, do: [project], else: ids
-    snapshots = for id <- selected, %{} = snapshot <- [project_snapshot(id, Keyword.fetch!(opts, :timeout))], do: {id, snapshot}
+    snapshots = for id <- selected, do: {id, project_snapshot(id, Keyword.fetch!(opts, :timeout))}
     governor = if Governor.running?(), do: Governor.snapshot()
 
     snapshots
@@ -89,18 +89,23 @@ defmodule SymphonyElixirWeb.Presenter do
     by_id = Map.new(snapshots)
 
     for project <- Service.projects(service) do
-      snapshot = by_id[project.id] || %{}
+      snapshot = by_id[project.id]
 
       %{
         id: project.id,
         weight: project.weight,
         started: is_pid(GenServer.whereis(Project.via(project.id, :orchestrator))),
-        running: length(snapshot[:running] || []),
-        ready: length(get_in(snapshot, [:upcoming, :ready]) || []),
+        snapshot_status: snapshot_status(snapshot),
+        running: if(is_map(snapshot), do: length(snapshot[:running] || [])),
+        ready: if(is_map(snapshot), do: length(get_in(snapshot, [:upcoming, :ready]) || [])),
         failure: failures[project.id]
       }
     end
   end
+
+  defp snapshot_status(%{}), do: "ok"
+  defp snapshot_status(nil), do: "not_selected"
+  defp snapshot_status(status), do: to_string(status)
 
   defp generated_at(now), do: now |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
@@ -116,6 +121,8 @@ defmodule SymphonyElixirWeb.Presenter do
       waiting: length(get_in(snapshot, [:upcoming, :waiting]) || []),
       open_prs: length(get_in(snapshot, [:pull_requests, :items]) || [])
     }
+
+    counts = if snapshot[:snapshot_status] == "partial", do: Map.new(counts, fn {key, _value} -> {key, nil} end), else: counts
 
     %{
       generated_at: generated_at(now),
@@ -139,6 +146,7 @@ defmodule SymphonyElixirWeb.Presenter do
       health: health_payload(snapshot, usage, settings, now),
       run_stats: run_stats(usage)
     }
+    |> Map.merge(Map.take(snapshot, [:snapshot_status, :snapshot_errors]))
   end
 
   @spec issue_payload(String.t(), GenServer.name(), timeout()) :: {:ok, map()} | {:error, :issue_not_found}
@@ -536,6 +544,7 @@ defmodule SymphonyElixirWeb.Presenter do
     coordinator =
       Enum.reject(
         [
+          snapshot_check(snapshot),
           polling_check(Map.get(snapshot, :polling)),
           dispatch_check(snapshot, settings),
           throttle_check(throttle_payload(Map.get(snapshot, :throttle))),
@@ -548,6 +557,7 @@ defmodule SymphonyElixirWeb.Presenter do
     system =
       Enum.reject(
         [
+          snapshot_check(snapshot),
           tracker_check(Map.get(snapshot, :upcoming), settings, now),
           pulls_check(Map.get(snapshot, :pull_requests), now),
           model_check(Map.get(snapshot, :quota), usage, now),
@@ -576,6 +586,23 @@ defmodule SymphonyElixirWeb.Presenter do
   defp polling_check(%{checking?: true}), do: check("Polling loop", "healthy", "Polling now")
   defp polling_check(%{poll_interval_ms: ms}) when is_integer(ms), do: check("Polling loop", "healthy", "Every #{div(ms, 1_000)}s")
   defp polling_check(_polling), do: check("Polling loop", "idle", "No polling data yet")
+
+  defp snapshot_check(%{snapshot_errors: [_ | _] = errors}) do
+    detail = Enum.map_join(errors, " · ", &"#{&1.project}: #{&1.status}")
+    check("Project snapshots", "warning", "Snapshot incomplete · #{detail}")
+  end
+
+  defp snapshot_check(_snapshot), do: nil
+
+  defp dispatch_check(%{snapshot_status: "partial"} = snapshot, _settings) do
+    slots =
+      case snapshot.throttle do
+        %{busy: busy, service_slots: slots} -> "#{busy} of #{slots} service slots held · "
+        _ -> ""
+      end
+
+    check("Dispatch", "warning", "#{slots}Running and queue counts unknown")
+  end
 
   defp dispatch_check(snapshot, settings) do
     max = (settings && settings.agent.max_concurrent_agents) || length(snapshot.running)

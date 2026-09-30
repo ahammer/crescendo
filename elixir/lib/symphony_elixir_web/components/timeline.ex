@@ -48,14 +48,14 @@ defmodule SymphonyElixirWeb.Timeline do
     <aside class={["timeline", @active && "is-active"]} aria-labelledby="timeline-title">
       <header class="section-head timeline-head">
         <h2 id="timeline-title">Timeline</h2>
-        <span class="count"><%= @payload.counts.ready %> next · <%= length(@running) %> now</span>
+        <span class="count"><%= @payload.counts.ready || "—" %> next · <%= if @payload[:snapshot_status] == "partial", do: "—", else: length(@running) %> now</span>
       </header>
       <p :if={@payload.upcoming.error} class="error-copy">Tracker data is stale: <%= @payload.upcoming.error %></p>
       <div class="tl-scroll">
         <ol class="tl" aria-label="Coming up, running and finished work">
           <li class="tl-group">Up next</li>
           <li :if={@more > 0} class="tl-more">+<%= @more %> more queued</li>
-          <li :if={@next == []} class="tl-empty">Nothing queued.</li>
+          <li :if={@next == []} class="tl-empty"><%= if @payload[:snapshot_status] == "partial", do: "Queue unknown.", else: "Nothing queued." %></li>
           <.row :for={item <- @next} item={item} phase="next" mixed={@mixed} />
           <li :if={@waiting != []} class="tl-waiting">
             <details>
@@ -72,7 +72,7 @@ defmodule SymphonyElixirWeb.Timeline do
           </li>
 
           <li class="tl-group tl-now">Now</li>
-          <li :if={@running == []} class="tl-empty">No agent is running.</li>
+          <li :if={@running == []} class="tl-empty"><%= if @payload[:snapshot_status] == "partial", do: "Running work unknown.", else: "No agent is running." %></li>
           <li :for={entry <- @running} class="tl-row tl-phase-now">
             <.link navigate={agent_path(entry)} class="tl-link" aria-label={"Inspect #{entry.issue_identifier}"}>
               <.tl_node icon={category_icon(entry.issue_identifier)} tone="live" />

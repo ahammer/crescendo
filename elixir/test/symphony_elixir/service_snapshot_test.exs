@@ -173,6 +173,18 @@ defmodule SymphonyElixirWeb.ServiceSnapshotTest do
     assert merged.operations.status == "unavailable"
   end
 
+  test "failed snapshots are retained as errors while only observed data merges" do
+    merged = ServiceSnapshot.merge([{"a", snapshot(%{})}, {"b", :timeout}, {"c", :unavailable}], nil)
+    assert merged.snapshot_status == "partial"
+    assert merged.snapshot_errors == [%{project: "b", status: "timeout"}, %{project: "c", status: "unavailable"}]
+    assert merged.running == [%{identifier: "GH-1", project: "a"}]
+    assert merged.upcoming.ready != []
+
+    empty = ServiceSnapshot.merge([{"b", :timeout}], nil)
+    assert empty.snapshot_status == "partial"
+    assert empty.running == []
+  end
+
   test "no projects merge into an empty snapshot" do
     merged = ServiceSnapshot.merge([], nil)
 

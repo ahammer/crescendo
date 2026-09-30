@@ -75,12 +75,23 @@ It never enables a unit or overwrites local configuration.
 - `bin/deploy`, run by `crescendo-deploy.timer` every 10 minutes, deploys the newest `main`:
   1. It builds `releases/<sha>` and passes the full `make all` gate under the machine lease.
   2. It drains, so no new runs start and running ones finish (it waits up to two hours, then
-     postpones).
+     postpones). Unknown or partial snapshots keep the drain waiting; Governor-held slots also
+     prevent an empty observed running list from ending the drain.
   3. It points `service.env` at the release and restarts the service.
-  4. It waits for the state API to answer with every project started, and otherwise rolls back.
+  4. It waits for a complete, unfiltered state response with every project started, no project
+     failure, and every project snapshot `ok`; otherwise it rolls back.
 
   A release that fails its gate or health check is not tried again. Each outcome is appended to
   `<state>/deploys.jsonl`, and the five newest releases are kept.
+
+The service's read-only state API and dashboard mark each project's snapshot as `ok`, `timeout`,
+`unavailable`, or `not_selected` (outside the filter). Unknown running/ready counts are `null`.
+The selected aggregate reports `snapshot_status: complete|partial` and `snapshot_errors` with
+project/status pairs. Partial reads preserve observed work and private-project redaction, but
+aggregate `counts` are `null`, health warns and the dashboard shows unknown counts. Governor-held
+service slots can still be shown; they do not imply a queue count. A successful read clears the
+warning. `ops/bin/deploy-state.py` validates deployment observations independently of the deploy
+script; it only reads JSON from stdin and never accesses or restarts the service.
 
 ## Commands
 

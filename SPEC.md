@@ -1443,6 +1443,16 @@ RECOMMENDED snapshot error modes:
 - `timeout`
 - `unavailable`
 
+For Crescendo's multi-project read-only API and dashboard, every requested project snapshot
+MUST retain its outcome. `projects[].snapshot_status` is `ok`, `timeout`, `unavailable`, or
+`not_selected` when excluded by the project filter. Unknown project running/ready counts are
+`null`, never zero. `snapshot_status` is `complete` or `partial` for the selected projects;
+`snapshot_errors` lists failed projects and their statuses. A partial response preserves observed
+rows with private-project redaction, sets all aggregate `counts` to `null`, and warns in health
+and the dashboard. Governor-held service slots remain a separate signal, not a queue estimate.
+A successful subsequent read clears the warning. Deployment drain and health validators MUST
+reject partial, filtered, or unknown project state before treating an observation as safe.
+
 ### 13.4 OPTIONAL Human-Readable Status Surface
 
 A human-readable status surface (terminal output, dashboard, etc.) is OPTIONAL and
