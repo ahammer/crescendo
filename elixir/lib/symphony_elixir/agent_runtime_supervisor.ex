@@ -18,13 +18,18 @@ defmodule SymphonyElixir.AgentRuntimeSupervisor do
 
     orchestrator_name = Keyword.get(opts, :orchestrator_name, SymphonyElixir.Orchestrator)
 
+    orchestrator_opts =
+      opts
+      |> Keyword.drop([:name, :task_supervisor_name, :orchestrator_name])
+      |> Keyword.merge(name: orchestrator_name, task_supervisor: task_supervisor_name)
+
     children = [
       Supervisor.child_spec(
         {Task.Supervisor, name: task_supervisor_name},
         id: task_supervisor_name
       ),
       Supervisor.child_spec(
-        {SymphonyElixir.Orchestrator, name: orchestrator_name, task_supervisor: task_supervisor_name},
+        {SymphonyElixir.Orchestrator, orchestrator_opts},
         id: orchestrator_name
       )
     ]

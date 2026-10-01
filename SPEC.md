@@ -850,9 +850,16 @@ Reconciliation runs every tick and has two parts.
 
 Part A: Stall detection
 
-- For each running issue, compute `elapsed_ms` since:
+- The orchestrator owns each worker phase; workers report entry into Codex and cleanup.
+  Dispatch begins in workspace preparation, including `after_create` and `before_run`.
+- Workspace preparation and `after_run` cleanup use the workspace operation/hook deadlines,
+  not Codex inactivity. A hook timeout fails the attempt (cleanup failures remain best effort).
+- During Codex startup and execution, compute `elapsed_ms` since:
   - `last_codex_timestamp` if any event has been seen, else
-  - `started_at`
+  - entry into the Codex phase, after workspace preparation.
+- Startup also retains the finite `codex.read_timeout_ms` request/response deadline.
+- Phase reports apply only to the current worker attempt. Reloads preserve phases; runtime
+  restart cancels workers with their scheduler, and slots are released before redispatch.
 - If `elapsed_ms > codex.stall_timeout_ms`, terminate the worker and queue a retry.
 - If `stall_timeout_ms <= 0`, skip stall detection entirely.
 
@@ -1174,7 +1181,8 @@ Timeouts:
 - `codex.read_timeout_ms`: request/response timeout during startup and sync requests
 - `codex.turn_timeout_ms`: maximum silence interval while a turn stream is active; each
   app-server output resets it, so it is not a total turn runtime cap
-- `codex.stall_timeout_ms`: enforced by orchestrator based on event inactivity
+- `codex.stall_timeout_ms`: enforced by orchestrator during Codex startup/execution based on
+  event inactivity; workspace preparation and cleanup retain their own hook deadlines
 
 Error mapping (RECOMMENDED normalized categories):
 

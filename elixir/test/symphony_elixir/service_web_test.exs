@@ -122,8 +122,8 @@ defmodule SymphonyElixir.ServiceWebTest do
   end
 
   test "an unavailable project is reported and partial data stays redacted" do
-    runtime = SymphonyElixir.Project.via("alpha", :runtime)
-    :ok = Supervisor.terminate_child(runtime, Orchestrator)
+    runtime = SymphonyElixir.Project.via("alpha", :agent_runtime)
+    :ok = Supervisor.terminate_child(runtime, SymphonyElixir.Project.via("alpha", :orchestrator))
     stop_supervised!(Governor)
 
     try do
@@ -138,7 +138,7 @@ defmodule SymphonyElixir.ServiceWebTest do
       assert dispatch.detail == "Running and queue counts unknown"
       assert Enum.all?(Map.values(state.counts), &is_nil/1)
     after
-      assert {:ok, _pid} = Supervisor.restart_child(runtime, Orchestrator)
+      assert {:ok, _pid} = Supervisor.restart_child(runtime, SymphonyElixir.Project.via("alpha", :orchestrator))
     end
   end
 

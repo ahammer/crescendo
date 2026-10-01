@@ -194,6 +194,18 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  def handle_info({:worker_phase, issue_id, worker_pid, phase}, %{running: running} = state)
+      when phase in [:codex, :cleanup] do
+    case Map.get(running, issue_id) do
+      %{pid: ^worker_pid} = entry ->
+        entry = entry |> Map.put(:phase, phase) |> Map.put(:phase_started_at, DateTime.utc_now())
+        {:noreply, %{state | running: Map.put(running, issue_id, entry)}}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info({:worker_runtime_info, issue_id, runtime_info}, %{running: running} = state)
       when is_binary(issue_id) and is_map(runtime_info) do
     case Map.get(running, issue_id) do
@@ -781,7 +793,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms) do
-    if Map.has_key?(state.blocked, issue_id) do
+    if Map.has_key?(state.blocked, issue_id) or Map.get(running_entry, :phase) in [:workspace, :cleanup] do
       state
     else
       restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms)
@@ -841,7 +853,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp last_activity_timestamp(running_entry) when is_map(running_entry) do
-    Map.get(running_entry, :last_codex_timestamp) || Map.get(running_entry, :started_at)
+    Map.get(running_entry, :last_codex_timestamp) || Map.get(running_entry, :phase_started_at) ||
+      Map.get(running_entry, :started_at)
   end
 
   defp last_activity_timestamp(_running_entry), do: nil
@@ -1149,6 +1162,7 @@ defmodule SymphonyElixir.Orchestrator do
     candidate_issue?(issue, active_states, terminal_states) and
       !MapSet.member?(state.claimed, issue.id) and
       !Map.has_key?(state.running, issue.id) and
+      !Map.has_key?(state.retry_attempts, issue.id) and
       !Map.has_key?(state.blocked, issue.id) and
       Autopilot.pull_request_ready?(issue, state.autopilot, Config.settings!().autopilot) and
       dispatch_admission(state, issue) == :ok
@@ -1342,6 +1356,7 @@ defmodule SymphonyElixir.Orchestrator do
             issue: issue,
             worker_host: worker_host,
             workspace_path: nil,
+            phase: :workspace,
             session_id: nil,
             last_codex_message: nil,
             last_codex_timestamp: nil,

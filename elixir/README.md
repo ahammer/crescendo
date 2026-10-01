@@ -212,6 +212,12 @@ Notes:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`
   - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
+- Workspace preparation (`after_create`, `before_run`) and cleanup (`after_run`) use
+  `hooks.timeout_ms`, independently of `codex.stall_timeout_ms`. The orchestrator tracks worker
+  phases; Codex inactivity starts when preparation finishes, including app-server startup.
+  Startup request/response waits also retain `codex.read_timeout_ms`. Hook failures retry normally;
+  cleanup failures are logged and ignored. Reloads preserve the current phase, and runtime restart
+  cancels workers with their scheduler before redispatch.
 - `codex.turn_timeout_ms` is the maximum silence interval while a turn is streaming. Each
   app-server update resets it; it is not a total turn runtime cap.
 - Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.

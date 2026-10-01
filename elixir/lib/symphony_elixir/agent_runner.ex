@@ -47,6 +47,7 @@ defmodule SymphonyElixir.AgentRunner do
             run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
           end
         after
+          send_worker_phase(codex_update_recipient, issue, :cleanup)
           Workspace.run_after_run_hook(workspace, issue, worker_host)
         end
 
@@ -54,6 +55,13 @@ defmodule SymphonyElixir.AgentRunner do
         {:error, reason}
     end
   end
+
+  defp send_worker_phase(recipient, %Issue{id: issue_id}, phase) when is_pid(recipient) do
+    send(recipient, {:worker_phase, issue_id, self(), phase})
+    :ok
+  end
+
+  defp send_worker_phase(_recipient, _issue, _phase), do: :ok
 
   defp codex_message_handler(recipient, issue) do
     fn message ->
@@ -86,6 +94,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
+    send_worker_phase(codex_update_recipient, issue, :codex)
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
 
