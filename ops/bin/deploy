@@ -11,7 +11,8 @@ state=${CRESCENDO_STATE_DIR:-$HOME/.local/state/crescendo}
 unit=${CRESCENDO_UNIT:-crescendo.service}
 repo=${CRESCENDO_REPO:-https://github.com/ahammer/crescendo.git}
 branch=${CRESCENDO_BRANCH:-main}
-drain_limit=${CRESCENDO_DRAIN_LIMIT_SECONDS:-7200}
+drain_limit=${CRESCENDO_DRAIN_LIMIT_SECONDS:-300}
+dispatch_pause=${CRESCENDO_DISPATCH_PAUSE_SECONDS:-1800}
 state_url=http://127.0.0.1:${CRESCENDO_PORT:-4280}/api/v1/state
 env_file=$config/service.env
 
@@ -66,24 +67,25 @@ fi
 # 3. Drain: no new runs start; wait for the running ones to finish.
 #    CRESCENDO_DRAIN=0 deploys at once instead: running work is interrupted and
 #    resumes from its workspace (an interruption is never a failed attempt).
-running() {
-  curl -fsS --max-time 10 "$state_url" | python3 "$(dirname "$0")/deploy-state.py" running
+validator=$(dirname "$0")/deploy-state.py
+token="$target-$$-$(date +%s)"
+outcome=cancelled
+cleanup() {
+  python3 "$validator" finish "$state" "$target" "$token" "$outcome"
 }
-mkdir -p "$state"
-date -u +%FT%TZ > "$state/drain"
-# However the script ends (even when stopped), dispatch resumes.
-trap 'rm -f "$state/drain"' EXIT
+# Installed before acquiring the drain: timeout, cancellation and failed swaps all release it.
+trap cleanup EXIT
 trap 'exit 130' INT TERM
-waited=0
-while [ "${CRESCENDO_DRAIN:-1}" != 0 ] && [ "$(running || echo busy)" != 0 ]; do
-  if [ "$waited" -ge "$drain_limit" ]; then
-    record postponed "$target" "runs still active after ${drain_limit}s"
-    log "postponed: runs still active"
-    exit 0
-  fi
-  sleep 30
-  waited=$((waited + 30))
-done
+result=0
+python3 "$validator" drain "$state" "$target" "$state_url" \
+  "$drain_limit" "$dispatch_pause" "$token" "${CRESCENDO_DRAIN:-1}" || result=$?
+case "$result" in
+  0) ;;
+  2) outcome=postponed; record postponed "$target" "runs still active after ${drain_limit}s"; exit 0 ;;
+  3) log "dispatch pause: waiting before another drain"; exit 0 ;;
+  *) exit "$result" ;;
+esac
+outcome=swap_failed
 
 # 4. Swap and restart.
 cp "$env_file" "$env_file.before-$target"
@@ -103,12 +105,15 @@ if [ "$ok" -ne 1 ]; then
   cp "$env_file.before-$target" "$env_file"
   systemctl --user restart "$unit"
   touch "$release/.failed"
+  outcome=rolled_back
   record rolled_back "$target" "not healthy after restart; back on $(basename "$current")"
   log "rolled back $target"
   exit 1
 fi
+outcome=deployed
 record deployed "$target" "replaced $(basename "$current")"
 log "deployed $target"
+cleanup
 
 # 6. Keep the five newest releases, never the running one.
 ls -1dt "$root"/releases/*/ | tail -n +6 | while read -r old; do

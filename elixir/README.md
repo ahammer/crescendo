@@ -455,7 +455,11 @@ The observability UI now runs on a minimal Phoenix stack:
   Health warns on incompleteness; dispatch can still report Governor-held service slots without
   inventing running or queue counts. The next successful snapshot clears the warning.
   Deployment validators reject partial, filtered, or unknown project observations and unknown
-  Governor-held slot counts.
+  Governor-held slot counts. Routine deployment drains wait at most five minutes, then leave at
+  least thirty minutes for dispatch before retrying busy work; newer candidates share the pause.
+  Fully idle services deploy immediately after rechecking under the hold. The deployment journal
+  records hold start/end, elapsed and sampled idle time, ready work and quota/budget restrictions.
+  See [deployment policy](../docs/crescendo.md#install-and-deploy) for overrides and recovery.
 - An agent card opens the full-screen agent inspector at `/agents/<issue_identifier>`. It shows the
   agent's run as a chat, rebuilt from Codex app-server notifications: messages and reasoning
   (streamed as they are written), commands with exit code, duration and the last 60 lines or 8 KB of

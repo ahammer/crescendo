@@ -50,6 +50,12 @@ defmodule SymphonyElixir.DeployStateTest do
     assert {_message, 1} = validate(state, "unknown")
   end
 
+  test "bounded deployment drains and recovery use only temporary state" do
+    check = Path.expand("../../../ops/tests/test_deploy_drain.py", __DIR__)
+    assert {output, 0} = System.cmd("python3", [check], stderr_to_stdout: true)
+    assert output =~ "OK"
+  end
+
   defp validate(state, mode) do
     wrapper = "import subprocess, sys; sys.exit(subprocess.run(sys.argv[2:], input=sys.argv[1].encode()).returncode)"
     System.cmd("python3", ["-c", wrapper, Jason.encode!(state), "python3", @validator, mode], stderr_to_stdout: true)
