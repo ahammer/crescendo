@@ -63,6 +63,16 @@ prompt files hot-reload as before. Adding, removing or reweighting a project, or
 service file, needs a service restart. A project whose workflow cannot load is reported on the
 dashboard (its filter pill is marked) and the other projects still run.
 
+Workspace hooks use each project's `hooks.timeout_ms`, independently of Codex inactivity.
+The orchestrator tracks workspace preparation, Codex startup/execution, and `after_run` cleanup;
+`codex.stall_timeout_ms` applies only during Codex startup/execution, with a fresh deadline after
+preparation. Startup also retains `codex.read_timeout_ms`. Hook timeouts follow normal retries;
+cleanup failures are best effort. Slots remain occupied through cleanup and are released once
+on worker exit or reconciliation. Workflow reloads preserve phases; runtime restarts cancel
+workers together with their scheduler before redispatch.
+Due retries and retries held for admission stay in weighted slot demand, while future backoff
+does not reserve a slot. Retry timers refresh the slot policy before checking capacity.
+
 ## Install and deploy
 
 `ops/install.sh` installs the scripts to `~/.local/lib/crescendo/bin` and the systemd user units.

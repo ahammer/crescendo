@@ -4,12 +4,13 @@ defmodule SymphonyElixir.ProjectRuntime do
   orchestrator and repository autopilot mirror, all registered under the
   project's id. A crashed store takes
   the processes after it down with it (`rest_for_one`), so the orchestrator
-  never runs on a missing configuration.
+  never runs on a missing configuration. The agent runtime restarts the
+  orchestrator and its tasks together, so old workers cannot survive their scheduler.
   """
 
   use Supervisor
 
-  alias SymphonyElixir.{Artifacts, Orchestrator, Project, RepoAutopilot, Service, WorkflowStore}
+  alias SymphonyElixir.{AgentRuntimeSupervisor, Artifacts, Project, RepoAutopilot, Service, WorkflowStore}
 
   @spec start_link({Service.t(), Service.Project.t()}) :: Supervisor.on_start()
   def start_link({%Service{} = service, %Service.Project{} = project}) do
@@ -30,11 +31,11 @@ defmodule SymphonyElixir.ProjectRuntime do
 
     children = [
       {WorkflowStore, name: Project.via(id, :workflow_store), project: id, path: project.workflow, defaults: project.defaults, overlay: overlay},
-      Supervisor.child_spec({Task.Supervisor, name: tasks}, id: :task_supervisor),
-      {Orchestrator,
-       name: Project.via(id, :orchestrator),
+      {AgentRuntimeSupervisor,
+       name: Project.via(id, :agent_runtime),
+       task_supervisor_name: tasks,
+       orchestrator_name: Project.via(id, :orchestrator),
        project: id,
-       task_supervisor: tasks,
        operations_path: Path.join(state_dir, "operations.dets"),
        operations_table: String.to_atom("symphony_operations_" <> id),
        artifacts_root: Artifacts.root()},
