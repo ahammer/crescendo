@@ -702,8 +702,8 @@ defmodule SymphonyElixir.AutopilotTest do
       cool_down_research(pid)
       send(pid, :run_poll_cycle)
       entry = :sys.get_state(pid).running["1"]
-      Process.exit(entry.pid, :kill)
       send(pid, {:DOWN, entry.ref, :process, entry.pid, :normal})
+      Process.exit(entry.pid, :kill)
       assert :sys.get_state(pid).running == %{}
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | labels: ["symphony:blocked"]}])
       send(pid, :run_poll_cycle)
@@ -723,6 +723,19 @@ defmodule SymphonyElixir.AutopilotTest do
       assert operations.recorded.usd_micro == 1_000_000
       send(pid, :run_poll_cycle)
       assert Orchestrator.snapshot(name, 5_000).operations.daily == operations.daily
+
+      # Closure clears the retry budget; a reopened item starts at attempt one again.
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      send(pid, :run_poll_cycle)
+      reopened = :sys.get_state(pid).running["1"]
+      assert reopened.item_attempt == 1
+      send(pid, {:DOWN, reopened.ref, :process, reopened.pid, :normal})
+      Process.exit(reopened.pid, :kill)
+      assert :sys.get_state(pid).running == %{}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | labels: ["symphony:blocked"]}])
+      send(pid, :run_poll_cycle)
+      operations = Orchestrator.snapshot(name, 5_000).operations
+      assert %{completed: 2, stopped: 1, blocked_attempts: 2, accepted_deliveries: 1} = List.last(operations.daily)
     end
 
     test "agents keep a short, readable history of Codex events and their route" do

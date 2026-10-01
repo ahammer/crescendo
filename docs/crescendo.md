@@ -343,7 +343,8 @@ The existing Operations DETS ledger separates three observations:
   first ending and its time/cost.
 - `attempt_failed` (or `blocked` without autopilot) measures a blocked item attempt, independently
   of its run ending. New facts retain the work item, item-attempt number and last recorded run ID.
-  The durable item/attempt key prevents duplicate counting.
+  The durable item/attempt/run key prevents duplicate counting while distinguishing new attempts
+  after a closed item reopens and its retry budget resets.
 - `item_disposition` records scoped acceptance or retirement. `merged` accepts the observed PR's
   scope; it does not claim full product acceptance. For deliveries without a PR, a closed issue
   carrying `<prefix>:delivery:verified-existing` accepts verified existing work; a closed issue with

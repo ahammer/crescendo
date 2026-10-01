@@ -318,9 +318,9 @@ defmodule SymphonyElixir.Operations do
   defp fact_key("item_disposition", %{issue_identifier: item, disposition: disposition}),
     do: {:disposition, item, disposition}
 
-  defp fact_key(kind, %{issue_identifier: item, item_attempt: attempt})
+  defp fact_key(kind, %{issue_identifier: item, item_attempt: attempt} = details)
        when kind in ["attempt_failed", "blocked"] and is_integer(attempt),
-       do: {:blocked_attempt, item, attempt}
+       do: {:blocked_attempt, item, attempt, details[:run_id]}
 
   defp fact_key("blocked", %{issue_identifier: item, run_id: run_id}) when is_binary(run_id),
     do: {:blocked_run, item, run_id}

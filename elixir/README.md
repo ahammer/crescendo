@@ -587,7 +587,8 @@ PR closes/reopens remain transitions, not abandoned deliveries.
 Daily state API rows add `stopped`, `blocked_attempts`, `accepted_deliveries`, `retirements` and
 `unknown_dispositions`. New attempt/disposition events retain their work item, attempt and last
 recorded run ID; missing historical attribution is `unknown`. Counts cover the retained event ring;
-durable idempotency keys survive restart. Plain issue closure has unknown acceptance. For accepted
-issue work without a merged PR, apply `<prefix>:delivery:verified-existing` or
+durable idempotency keys survive restart. Keys for blocked attempts include run IDs, so resetting
+the retry budget on reopening retains new attempts. Plain issue closure has unknown acceptance.
+For accepted issue work without a merged PR, apply `<prefix>:delivery:verified-existing` or
 `<prefix>:delivery:split` after validation and document scoped evidence in the workpad; `not_planned`
 is retirement. See [the detailed semantics](../docs/crescendo.md#durable-outcome-facts).

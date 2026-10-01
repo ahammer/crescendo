@@ -2515,6 +2515,7 @@ Operations history MUST distinguish run endings, blocked item attempts and scope
 not necessarily failure; reconciliation after acceptance MUST retain run time and recorded cost.
 New facts SHOULD retain the work item, run ID and item-attempt number. Historical attribution that
 was never recorded MUST remain unknown rather than inferred from nearby timestamps.
+Run identity MUST distinguish blocked attempts when an item's attempt counter resets after reopening.
 
 A blocked attempt MUST count once independently of its run ending. Dispositions distinguish merged
 PR scope, verified existing work, split delivery with unmet follow-ups, retirement and unknown
