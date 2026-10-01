@@ -67,8 +67,12 @@ def record(root, outcome, target, **fields):
     root.mkdir(parents=True, exist_ok=True)
     event = dict(at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                  outcome=outcome, release=target, **fields)
-    with (root / "deploys.jsonl").open("a") as journal:
-        journal.write(json.dumps(event) + "\n")
+    with (root / "deploys.jsonl").open("ab+") as journal:
+        if journal.tell():
+            journal.seek(-1, 2)
+            if journal.read(1) != b"\n":
+                journal.write(b"\n")  # Separate an interrupted append from the next event.
+        journal.write((json.dumps(event) + "\n").encode())
 
 
 def retry_until(root):
@@ -138,7 +142,8 @@ def finish(root, target, token, outcome, wall=time.time):
                elapsed_seconds=max(0, wall() - start["started_epoch"]),
                retry_until=wall() + start["pause_seconds"])
     finally:
-        flag.unlink()
+        if flag.exists() and flag.read_text() == token:
+            flag.unlink()
 
 
 def main(args):

@@ -130,6 +130,17 @@ class DrainTest(unittest.TestCase):
         self.finish()
         self.assertEqual((self.root / "drain").read_text(), "manual")
 
+    def test_manual_hold_enabled_during_cleanup_is_preserved(self):
+        self.assertEqual(self.drain(lambda: state(0)), 0)
+        flag = self.root / "drain"
+
+        def manual_takeover():
+            flag.write_text("manual")
+            return self.now
+
+        policy.finish(self.root, "a", "owner", "deployed", wall=manual_takeover)
+        self.assertEqual(flag.read_text(), "manual")
+
     def test_observations_keep_quota_budget_and_no_ready_work_separate(self):
         self.assertEqual(self.drain(lambda: state(0, 0, "quota", "budget")), 0)
         self.sleep(10)
@@ -146,6 +157,14 @@ class DrainTest(unittest.TestCase):
         with (self.root / "deploys.jsonl").open("a") as journal:
             journal.write('{"interrupted":\n')
         self.assertEqual(self.drain(target="new"), 3)
+
+    def test_truncated_journal_tail_preserves_the_next_drain_retry_pause(self):
+        (self.root / "deploys.jsonl").write_text('{"interrupted":')
+        self.assertEqual(self.drain(), 2)
+        self.finish()
+        self.assertEqual(policy.retry_until(self.root), self.now + 1800)
+        self.assertEqual(self.drain(target="new"), 3)
+        self.assertFalse((self.root / "drain").exists())
 
     def test_force_is_explicit_and_invalid_limits_never_acquire(self):
         self.assertEqual(self.drain(force=True), 0)
