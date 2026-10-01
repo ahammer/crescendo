@@ -241,6 +241,40 @@ defmodule SymphonyElixir.OperationsTest do
     :ok = Operations.close(table)
   end
 
+  test "full history exposes the bounded event ring and two days of samples" do
+    path = Path.join(System.tmp_dir!(), "operations-history-#{System.unique_integer([:positive])}.dets")
+    {:ok, table} = Operations.open(path, :operations_history_test)
+
+    on_exit(fn ->
+      Operations.close(table)
+      File.rm(path)
+    end)
+
+    for number <- 1..2_001 do
+      Operations.event(table, "dispatch", %{issue_identifier: "GH-#{number}", run_id: "run-#{number}"})
+    end
+
+    bucket = div(System.os_time(:second), 300)
+    sample = %{running: 1, ready: 2, waiting: 0, attention: 0, open_prs: 0, spend_micro: 123}
+
+    for offset <- [0, 144, 288, 575, 576] do
+      :dets.insert(table, {{:sample, bucket - offset}, sample})
+    end
+
+    recent = Operations.snapshot(table)
+    history = Operations.snapshot(table, history: true)
+    assert length(recent.activity) == 100
+    assert length(history.activity) == 2_000
+    assert hd(history.activity).issue_identifier == "GH-2001"
+    assert List.last(history.activity).issue_identifier == "GH-2"
+    assert Enum.all?(history.activity, &(&1.attribution == "recorded"))
+    assert length(recent.samples) == 1
+    assert length(history.samples) == 4
+    assert Enum.map(history.samples, & &1.at) == Enum.sort(Enum.map(history.samples, & &1.at))
+    assert history.daily == recent.daily
+    assert %{activity: [], samples: []} = Operations.snapshot(nil, history: true)
+  end
+
   test "a finished run records its task: model, category, time and cost" do
     path = Path.join(System.tmp_dir!(), "symphony-operations-tasks-#{System.unique_integer([:positive])}.dets")
     on_exit(fn -> File.rm(path) end)

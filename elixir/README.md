@@ -417,6 +417,10 @@ The observability UI now runs on a minimal Phoenix stack:
 - A local `operations.dets` file beside the rotating log keeps model usage and the latest 2,000
   lifecycle events across restarts. `/api/v1/state` exposes these as `usage`, `upcoming`, and
   `pull_requests`; a failed poll leaves the last good inventory visible with its timestamp and an error.
+  For a retrospective, request `/api/v1/state?history=full` (optionally `&project=<id>`) to read
+  up to 2,000 events per selected project and 48 hours of five-minute samples. Check the oldest
+  timestamps before claiming a complete cycle; daily totals and 14-day task averages keep their
+  existing windows. The default API and dashboard show 100 events and 12 hours of samples.
 - Dollar figures compare recorded tokens with standard short-context API prices dated
   September 24, 2026. They are estimates, not actual ChatGPT billing; unknown models remain
   unpriced. Recording starts with the first run after this version is deployed. The dashboard

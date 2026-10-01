@@ -10,7 +10,8 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
 
   @spec state(Conn.t(), map()) :: Conn.t()
   def state(conn, params) do
-    json(conn, Presenter.payload(project: params["project"], orchestrator: orchestrator(), timeout: snapshot_timeout_ms()))
+    opts = [project: params["project"], orchestrator: orchestrator(), timeout: snapshot_timeout_ms()]
+    json(conn, Presenter.payload(Keyword.put(opts, :history, params["history"] == "full")))
   end
 
   @spec issue(Conn.t(), map()) :: Conn.t()

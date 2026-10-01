@@ -67,6 +67,35 @@ defmodule SymphonyElixir.ServiceWebTest do
     assert json_response(get(build_conn(), "/api/v1/MT-404"), 404)["error"]["code"] == "issue_not_found"
   end
 
+  test "full history includes older work across projects with the usual privacy and filters" do
+    for id <- ["alpha", "beta"] do
+      table = :sys.get_state(SymphonyElixir.Project.via(id, :orchestrator)).operations
+
+      for number <- 1..105 do
+        SymphonyElixir.Operations.event(table, "dispatch", %{issue_identifier: "GH-#{number}", summary: "#{id} evidence"})
+      end
+
+      bucket = div(System.os_time(:second), 300) - 288
+      :dets.insert(table, {{:sample, bucket}, %{running: 0, ready: 1, waiting: 0, attention: 0, open_prs: 0, spend_micro: 0}})
+    end
+
+    recent = json_response(get(build_conn(), "/api/v1/state"), 200)
+    history = json_response(get(build_conn(), "/api/v1/state?history=full"), 200)
+    assert length(recent["usage"]["activity"]) == 100
+    assert length(history["usage"]["activity"]) == 210
+    assert Enum.count(history["usage"]["activity"], &(&1["project"] == "alpha")) == 105
+    assert Enum.count(history["usage"]["activity"], &(&1["project"] == "beta")) == 105
+    refute Jason.encode!(history) =~ "beta evidence"
+    assert Enum.any?(history["usage"]["activity"], &(&1["summary"] == "alpha evidence"))
+    assert length(history["usage"]["samples"]) == length(recent["usage"]["samples"]) + 1
+    assert history["usage"]["daily"] == recent["usage"]["daily"]
+
+    alpha = json_response(get(build_conn(), "/api/v1/state?history=full&project=alpha"), 200)
+    assert length(alpha["usage"]["activity"]) == 105
+    assert Enum.all?(alpha["usage"]["activity"], &(&1["project"] == "alpha"))
+    assert length(json_response(get(build_conn(), "/api/v1/state?history=invalid"), 200)["usage"]["activity"]) == 100
+  end
+
   test "a suspended project is unknown while healthy data survives, and recovers" do
     beta = GenServer.whereis(SymphonyElixir.Project.via("beta", :orchestrator))
     :ok = :sys.suspend(beta)
