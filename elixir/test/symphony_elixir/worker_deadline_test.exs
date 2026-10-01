@@ -161,6 +161,80 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
     refute File.exists?(ctx.workspace)
   end
 
+  test "a stalled retry respects backoff and gets a turn beside a higher-weight project", %{root: root} do
+    marker = Path.join(root, "dispatched")
+
+    for id <- ["light", "heavy"] do
+      workflow = Path.join([root, "projects", id, "WORKFLOW.md"])
+      File.mkdir_p!(Path.dirname(workflow))
+
+      write_workflow_file!(workflow,
+        tracker_kind: "memory",
+        tracker_required_labels: [id],
+        poll_interval_ms: 1_000_000,
+        workspace_root: Path.join(root, "workspaces"),
+        hook_before_run: "touch '#{marker}'; exit 1"
+      )
+    end
+
+    path = Path.join(root, "crescendo.yml")
+    File.write!(path, "paths: {state: state}\npool: {slots: 1}\nprojects: {light: {}, heavy: {weight: 3}}")
+    {:ok, service} = Service.load(path)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    start_supervised!({Governor, service})
+    start_supervised!({Projects, service})
+    await(fn -> Enum.all?(["light", "heavy"], &(GenServer.whereis(Project.via(&1, :orchestrator)) != nil)) end)
+
+    await(fn ->
+      Enum.all?(["light", "heavy"], &(:sys.get_state(Project.via(&1, :orchestrator)).issues_observed_at != nil))
+    end)
+
+    orchestrator = GenServer.whereis(Project.via("light", :orchestrator))
+    issue = %Issue{id: "retry", identifier: "GH-RETRY", title: "Retry", state: "In Progress", labels: ["light"], dispatchable: true}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    retry = %{
+      attempt: 1,
+      timer_ref: nil,
+      retry_token: make_ref(),
+      due_at_ms: System.monotonic_time(:millisecond) + 60_000,
+      identifier: issue.identifier,
+      error: "stalled without codex activity"
+    }
+
+    :sys.replace_state(orchestrator, &%{&1 | retry_attempts: %{issue.id => retry}, claimed: MapSet.new()})
+    Governor.checkin("heavy", 0, 1)
+    send(orchestrator, :run_poll_cycle)
+    assert :sys.get_state(orchestrator).running == %{}
+    refute File.exists?(marker)
+    assert Enum.find(Governor.snapshot().projects, &(&1.id == "light")).waiting == 0
+
+    :sys.replace_state(orchestrator, fn state ->
+      put_in(state.retry_attempts[issue.id].due_at_ms, System.monotonic_time(:millisecond))
+    end)
+
+    send(orchestrator, {:retry_issue, issue.id, retry.retry_token})
+    assert :sys.get_state(orchestrator).retry_attempts[issue.id].attempt == 1
+    assert Enum.find(Governor.snapshot().projects, &(&1.id == "light")).waiting == 1
+
+    for round <- 1..6 do
+      case Governor.acquire("heavy", "rival-#{round}", :issue) do
+        :ok -> Governor.release("heavy", "rival-#{round}")
+        {:wait, _reason} -> :ok
+      end
+
+      Governor.snapshot()
+      send(orchestrator, :run_poll_cycle)
+
+      if pending = :sys.get_state(orchestrator).retry_attempts[issue.id] do
+        send(orchestrator, {:retry_issue, issue.id, pending.retry_token})
+        :sys.get_state(orchestrator)
+      end
+    end
+
+    await(fn -> File.exists?(marker) end)
+  end
+
   defp start_worker(root, overrides, mode \\ :complete) do
     binary = Path.join(root, "codex")
 

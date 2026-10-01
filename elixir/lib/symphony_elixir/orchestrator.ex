@@ -1483,6 +1483,7 @@ defmodule SymphonyElixir.Orchestrator do
             identifier: identifier,
             issue_url: issue_url,
             error: error,
+            delay_type: metadata[:delay_type],
             worker_host: worker_host,
             workspace_path: workspace_path
           })
@@ -1492,6 +1493,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
     case Map.get(state.retry_attempts, issue_id) do
       %{attempt: attempt, retry_token: ^retry_token} = retry_entry ->
+        state = %{state | throttle: evaluate_throttle(state)}
+
         metadata = %{
           identifier: Map.get(retry_entry, :identifier),
           issue_url: Map.get(retry_entry, :issue_url),
@@ -2369,8 +2372,26 @@ defmodule SymphonyElixir.Orchestrator do
   defp demand(%State{} = state) do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
-    ready = Enum.count(state.polled_issues, &ready_for_dispatch?(&1, state, active_states, terminal_states))
+    now_ms = System.monotonic_time(:millisecond)
+
+    ready =
+      Enum.count(state.polled_issues, fn issue ->
+        ready_for_dispatch?(issue, state, active_states, terminal_states) or
+          (candidate_issue?(issue, active_states, terminal_states) and retry_waiting?(state, issue, now_ms))
+      end)
+
     if ready == 0 and research_wanted?(state), do: 1, else: ready
+  end
+
+  defp retry_waiting?(state, issue, now_ms) do
+    case Map.get(state.retry_attempts, issue.id) do
+      %{due_at_ms: due_at_ms} = retry ->
+        (retry[:delay_type] == :held or due_at_ms <= now_ms) and
+          dispatch_admission(state, issue, retry_class(issue)) == :ok
+
+      _ ->
+        false
+    end
   end
 
   defp research_wanted?(%State{} = state) do
@@ -2414,7 +2435,11 @@ defmodule SymphonyElixir.Orchestrator do
   # Why an otherwise dispatchable item must wait: the throttle (the budget or
   # a quota pause), or a route whose model is backed off with no step allowed.
   defp dispatch_admission(%State{} = state, %Issue{} = issue) do
-    with :ok <- Throttle.admit(state.throttle, dispatch_class(state, issue)) do
+    dispatch_admission(state, issue, dispatch_class(state, issue))
+  end
+
+  defp dispatch_admission(state, issue, class) do
+    with :ok <- Throttle.admit(state.throttle, class) do
       case select_route(state, issue) do
         {:wait, _reason} = wait -> wait
         _route -> :ok

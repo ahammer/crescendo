@@ -70,6 +70,8 @@ preparation. Startup also retains `codex.read_timeout_ms`. Hook timeouts follow 
 cleanup failures are best effort. Slots remain occupied through cleanup and are released once
 on worker exit or reconciliation. Workflow reloads preserve phases; runtime restarts cancel
 workers together with their scheduler before redispatch.
+Due retries and retries held for admission stay in weighted slot demand, while future backoff
+does not reserve a slot. Retry timers refresh the slot policy before checking capacity.
 
 ## Install and deploy
 

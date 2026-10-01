@@ -218,6 +218,8 @@ Notes:
   Startup request/response waits also retain `codex.read_timeout_ms`. Hook failures retry normally;
   cleanup failures are logged and ignored. Reloads preserve the current phase, and runtime restart
   cancels workers with their scheduler before redispatch.
+- Due retries and retries held for admission stay in the service's weighted slot queue;
+  future backoff does not reserve a slot. Retry timers refresh the slot policy before checking capacity.
 - `codex.turn_timeout_ms` is the maximum silence interval while a turn is streaming. Each
   app-server update resets it; it is not a total turn runtime cap.
 - Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.

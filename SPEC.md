@@ -830,6 +830,9 @@ Backoff formula:
 
 Retry handling behavior:
 
+Due retries and retries held for admission participate in weighted slot demand; future backoff
+does not reserve a slot. A retry refreshes its slot policy before checking capacity.
+
 1. Refresh the specific issue with `fetch_issues_by_ids([issue_id])`.
 2. If not found, release claim.
 3. If found in a terminal state, clean its workspace and release claim.
