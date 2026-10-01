@@ -1571,6 +1571,12 @@ Minimum endpoints:
 - `GET /api/v1/state`
   - Returns a summary view of the current system state (running sessions, retry queue/delays,
     aggregate token/runtime totals, latest rate limits, and any additional tracked summary fields).
+  - `?history=full` returns the retained Operations history: up to 2,000 lifecycle events per
+    selected project and 48 hours of five-minute samples. It composes with `project=<id>`;
+    service aggregation MUST preserve each selected project's retained events and privacy policy.
+    The default summary and dashboard use the newest 100 events and 12 hours of samples.
+    History is bounded, not a guaranteed cycle or lifetime record; callers MUST check timestamps
+    before treating a window as complete. Daily totals and 14-day task averages keep their existing windows.
   - Suggested response shape:
 
     ```json

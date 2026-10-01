@@ -7,8 +7,8 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
   """
 
   @doc "Merges `{project, snapshot}` pairs; `governor` is the Governor's snapshot, if any."
-  @spec merge([{String.t(), map() | :timeout | :unavailable}], map() | nil) :: map()
-  def merge(results, governor) do
+  @spec merge([{String.t(), map() | :timeout | :unavailable}], map() | nil, keyword()) :: map()
+  def merge(results, governor, opts \\ []) do
     {snapshots, failed} = Enum.split_with(results, fn {_id, result} -> is_map(result) end)
 
     %{
@@ -18,7 +18,7 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
       retrying: tagged(snapshots, :retrying),
       blocked: tagged(snapshots, :blocked),
       codex_totals: snapshots |> Enum.map(fn {_id, snapshot} -> snapshot[:codex_totals] || %{} end) |> sum(),
-      operations: operations(snapshots),
+      operations: operations(snapshots, opts),
       operations_error: joined(snapshots, fn snapshot -> snapshot[:operations_error] end),
       upcoming: upcoming(snapshots, governor),
       autopilot: autopilot(snapshots),
@@ -112,7 +112,7 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
     |> Enum.max_by(& &1.observed_at, DateTime, fn -> nil end)
   end
 
-  defp operations(snapshots) do
+  defp operations(snapshots, opts) do
     ops = for {id, snapshot} <- snapshots, operations = snapshot[:operations], do: {id, operations}
     all = Enum.map(ops, &elem(&1, 1))
 
@@ -122,7 +122,7 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
       today: all |> Enum.map(&(&1[:today] || %{})) |> sum(),
       recorded: all |> Enum.map(&(&1[:recorded] || %{})) |> sum(),
       by_model: by_model(all),
-      activity: activity(ops),
+      activity: activity(ops, opts),
       daily: daily(all),
       samples: samples(all),
       median_run_seconds: medians(all),
@@ -155,11 +155,13 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
     |> Enum.take(120)
   end
 
-  defp activity(ops) do
-    ops
-    |> Enum.flat_map(fn {id, operations} -> Enum.map(operations[:activity] || [], &Map.put(&1, :project, id)) end)
-    |> Enum.sort_by(&to_string(&1[:at]), :desc)
-    |> Enum.take(100)
+  defp activity(ops, opts) do
+    events =
+      ops
+      |> Enum.flat_map(fn {id, operations} -> Enum.map(operations[:activity] || [], &Map.put(&1, :project, id)) end)
+      |> Enum.sort_by(&to_string(&1[:at]), :desc)
+
+    if opts[:history], do: events, else: Enum.take(events, 100)
   end
 
   defp daily(all) do

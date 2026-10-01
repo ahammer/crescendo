@@ -20,7 +20,7 @@ defmodule SymphonyElixirWeb.Presenter do
   def state_payload(orchestrator, snapshot_timeout_ms, opts \\ []) do
     now = DateTime.utc_now()
 
-    case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
+    case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms, opts) do
       %{} = snapshot ->
         build(snapshot, settings(), runtime_context(), now, opts)
 
@@ -50,11 +50,11 @@ defmodule SymphonyElixirWeb.Presenter do
     ids = service |> Service.projects() |> Enum.map(& &1.id)
     project = if opts[:project] in ids, do: opts[:project]
     selected = if project, do: [project], else: ids
-    snapshots = for id <- selected, do: {id, project_snapshot(id, Keyword.fetch!(opts, :timeout))}
+    snapshots = for id <- selected, do: {id, project_snapshot(id, Keyword.fetch!(opts, :timeout), opts)}
     governor = if Governor.running?(), do: Governor.snapshot()
 
     snapshots
-    |> ServiceSnapshot.merge(governor)
+    |> ServiceSnapshot.merge(governor, opts)
     |> build(service_settings(service, selected, project), service_runtime(selected, project), now, opts)
     |> Map.merge(%{project: project, projects: project_list(service, snapshots)})
     |> Redaction.payload(redacted(service))
@@ -63,8 +63,8 @@ defmodule SymphonyElixirWeb.Presenter do
   # Private projects' work stays off the public dashboard and API.
   defp redacted(service), do: for(project <- Service.projects(service), project.redact, into: MapSet.new(), do: project.id)
 
-  defp project_snapshot(id, timeout),
-    do: Project.with_project(id, fn -> Orchestrator.snapshot(Project.via(id, :orchestrator), timeout) end)
+  defp project_snapshot(id, timeout, opts),
+    do: Project.with_project(id, fn -> Orchestrator.snapshot(Project.via(id, :orchestrator), timeout, opts) end)
 
   # A service view of the settings: its slots (or one project's share), budget and pricing.
   defp service_settings(service, [first | _], project) do

@@ -26,10 +26,13 @@ Focus: {{ issue.research.focus }}
 The cycle runs from the previous retrospective (the newest `docs/retrospectives/*.md`) to now, or
 the last 24 hours if there is none. Collect, read-only:
 
-- **Service state:** `curl -s "$CRESCENDO_STATE_URL"` (and `?project=<id>`). It holds the running
+- **Service state:** `curl -s "$CRESCENDO_STATE_URL?history=full"` (and `&project=<id>`). It holds the running
   and queued work, the activity feed (dispatches, run outcomes, task deliveries, merges, closes,
   retries, retirements), per-task averages (`usage.by_task`), daily outcomes, the autopilot task
   schedules, the throttle and the quota.
+  Freeze the cycle cutoff at the first snapshot. Check the oldest event and sample timestamps:
+  history is bounded, so missing hours stay unknown. Filter events to the cycle; `usage.by_task`
+  covers retained 14-day tasks and UTC daily totals can straddle the cycle boundary.
 - **GitHub:** for each managed repository, the pull requests merged or closed and the issues closed
   or opened in the cycle (`gh pr list --state all --search "updated:>=<date>"`, `gh issue list ...`),
   with their review comments. Note pull requests closed without merging and why.

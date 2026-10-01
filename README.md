@@ -16,7 +16,8 @@ implements its [specification](SPEC.md). On top of the Symphony reference implem
 - **Autopilot.** Pull requests are reviewed and merged, stuck work is retried and then delivered in
   part or closed (nothing waits on an operator), and an empty queue is refilled by research runs per
   configurable channel.
-- **A read-only dashboard** across projects, with a filter per project.
+- **A read-only dashboard** across projects, with a filter per project and a
+  [bounded history API](docs/crescendo.md#dashboard-and-api) for retrospectives.
 
 All configuration is local: [docs/crescendo.md](docs/crescendo.md) covers the service file, and
 [elixir/README.md](elixir/README.md) covers setup and the per-project `WORKFLOW.md`.

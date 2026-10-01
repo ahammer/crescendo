@@ -348,6 +348,12 @@ The `SYMPHONY_*` names are kept for tools that predate the service.
   that workflow's prefix (default `symphony`); an open inspector keeps its last resolved prefix if
   configuration becomes unavailable.
 - `GET /api/v1/state[?project=<id>]` is the merged state, with every item tagged by `project`.
+- Add `history=full` for retrospectives: `usage.activity` includes up to 2,000 retained events
+  per selected project and `usage.samples` includes the retained 48 hours of five-minute samples.
+  The default API and dashboard show the newest 100 events and 12 hours of samples. Project
+  filtering, private-project redaction and partial-snapshot reporting apply to both views.
+  Check the oldest timestamps before claiming a complete cycle; event eviction can shorten it.
+  Daily totals and 14-day task averages keep their existing windows.
 - `GET /api/v1/<project>/<id>` is one work item.
 
 There are no write routes.

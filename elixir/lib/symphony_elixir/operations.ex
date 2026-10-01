@@ -464,8 +464,10 @@ defmodule SymphonyElixir.Operations do
     :ok
   end
 
-  @spec snapshot(handle()) :: map()
-  def snapshot(nil) do
+  def snapshot(table, opts \\ [])
+
+  @spec snapshot(handle(), keyword()) :: map()
+  def snapshot(nil, _opts) do
     %{
       status: "unavailable",
       pricing_as_of: @price_date,
@@ -481,8 +483,8 @@ defmodule SymphonyElixir.Operations do
     }
   end
 
-  def snapshot(table) do
-    do_snapshot(table)
+  def snapshot(table, opts) do
+    do_snapshot(table, opts)
   rescue
     error ->
       Logger.warning("Operations history read failed: #{Exception.message(error)}")
@@ -493,7 +495,7 @@ defmodule SymphonyElixir.Operations do
       snapshot(nil)
   end
 
-  defp do_snapshot(table) do
+  defp do_snapshot(table, opts) do
     today = Date.utc_today() |> Date.to_iso8601()
 
     {recorded, daily, by_model, model_runs, events, spend, samples} =
@@ -538,9 +540,9 @@ defmodule SymphonyElixir.Operations do
       today: daily,
       recorded: recorded,
       by_model: by_model |> Enum.map(fn {model, usage} -> usage |> Map.put(:model, model) |> Map.put(:runs, model_runs |> Map.fetch!(model) |> MapSet.size()) end) |> Enum.sort_by(& &1.model),
-      activity: ordered_events |> Enum.reverse() |> Enum.take(100),
+      activity: ordered_events |> Enum.reverse() |> Enum.take(if(opts[:history], do: @event_limit, else: 100)),
       daily: daily_series(spend, ordered_events),
-      samples: recent_samples(samples),
+      samples: recent_samples(samples, if(opts[:history], do: @sample_retention_buckets, else: @sample_window_buckets)),
       median_run_seconds: median_run_seconds(ordered_events),
       by_task: by_task(Enum.map(tasks, &elem(&1, 1))),
       images: recent_images(images)
@@ -578,12 +580,12 @@ defmodule SymphonyElixir.Operations do
     |> Enum.sort_by(&{&1.model, &1.category})
   end
 
-  # The last twelve hours of five-minute samples, oldest first.
-  defp recent_samples(samples) do
+  # Five-minute samples, oldest first; the dashboard uses twelve hours, history uses the retained two days.
+  defp recent_samples(samples, window_buckets) do
     newest = div(System.os_time(:second), @sample_seconds)
 
     samples
-    |> Enum.filter(fn {bucket, _sample} -> bucket > newest - @sample_window_buckets end)
+    |> Enum.filter(fn {bucket, _sample} -> bucket > newest - window_buckets end)
     |> Enum.sort_by(&elem(&1, 0))
     |> Enum.map(fn {bucket, sample} -> Map.put(sample, :at, DateTime.from_unix!(bucket * @sample_seconds) |> DateTime.to_iso8601()) end)
   end

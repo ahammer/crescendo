@@ -1912,11 +1912,11 @@ defmodule SymphonyElixir.Orchestrator do
   @spec snapshot() :: map() | :timeout | :unavailable
   def snapshot, do: snapshot(__MODULE__, 15_000)
 
-  @spec snapshot(GenServer.server(), timeout()) :: map() | :timeout | :unavailable
-  def snapshot(server, timeout) do
+  @spec snapshot(GenServer.server(), timeout(), keyword()) :: map() | :timeout | :unavailable
+  def snapshot(server, timeout, opts \\ []) do
     if GenServer.whereis(server) do
       try do
-        GenServer.call(server, :snapshot, timeout)
+        GenServer.call(server, if(opts[:history], do: {:snapshot, opts}, else: :snapshot), timeout)
       catch
         :exit, {:timeout, _} -> :timeout
         :exit, _ -> :unavailable
@@ -1927,7 +1927,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
-  def handle_call(:snapshot, _from, state) do
+  def handle_call(:snapshot, from, state), do: handle_call({:snapshot, []}, from, state)
+
+  def handle_call({:snapshot, opts}, _from, state) do
     state = refresh_runtime_config(state)
     now = DateTime.utc_now()
     now_ms = System.monotonic_time(:millisecond)
@@ -2014,7 +2016,7 @@ defmodule SymphonyElixir.Orchestrator do
        retrying: retrying,
        blocked: blocked,
        codex_totals: state.codex_totals,
-       operations: Operations.snapshot(state.operations),
+       operations: Operations.snapshot(state.operations, opts),
        operations_error: state.operations_error,
        upcoming: upcoming_issues(state),
        autopilot: autopilot_snapshot(state),
