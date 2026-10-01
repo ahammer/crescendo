@@ -1454,6 +1454,15 @@ A successful subsequent read clears the warning. Deployment drain and health val
 reject partial, filtered, or unknown project state and unknown Governor-held slot counts before
 treating an observation as safe.
 
+Crescendo routine deployments MUST bound a busy drain (default five minutes) and leave a dispatch
+pause (default thirty minutes) before another busy drain, including superseding candidates. An
+idle service MAY bypass the pause but MUST recheck after acquiring the hold. Retry deadlines and
+drain observations belong to the existing deployment journal. Observations MUST report actual
+hold start/end and elapsed time, sampled idle time, ready work and quota/budget restrictions
+without attributing every unused slot to deployment. Unknown observations MUST NOT imply idle.
+Gate failures precede the hold; postponement, cancellation, failed swap, health rollback and
+success MUST release the deployment's own hold while preserving a manual hold.
+
 ### 13.4 OPTIONAL Human-Readable Status Surface
 
 A human-readable status surface (terminal output, dashboard, etc.) is OPTIONAL and

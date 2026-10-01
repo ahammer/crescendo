@@ -74,8 +74,12 @@ It never enables a unit or overwrites local configuration.
 - `bin/crescendo` runs a command (below) with the deployed release, from any directory.
 - `bin/deploy`, run by `crescendo-deploy.timer` every 10 minutes, deploys the newest `main`:
   1. It builds `releases/<sha>` and passes the full `make all` gate under the machine lease.
-  2. It drains, so no new runs start and running ones finish (it waits up to two hours, then
-     postpones). Unknown or partial snapshots keep the drain waiting; Governor-held slots also
+  2. It drains, so no new runs start and running ones finish (it waits up to five minutes, then
+     postpones). A postponement leaves at least thirty minutes for dispatch before another busy
+     drain, even for a newer candidate. Each invocation selects the newest `main`, coalescing
+     superseded candidates. A fully idle service bypasses the pause and deploys immediately;
+     the running count is checked again after acquiring the hold. Unknown or partial snapshots
+     keep the drain waiting; Governor-held slots also
      prevent an empty observed running list from ending the drain. Unknown held-slot counts
      keep the drain waiting too.
   3. It points `service.env` at the release and restarts the service.
@@ -84,7 +88,22 @@ It never enables a unit or overwrites local configuration.
      rolls back.
 
   A release that fails its gate or health check is not tried again. Each outcome is appended to
-  `<state>/deploys.jsonl`, and the five newest releases are kept.
+  `<state>/deploys.jsonl`, and the five newest releases are kept. `CRESCENDO_DRAIN_LIMIT_SECONDS`
+  (default `300`) bounds each wait; `CRESCENDO_DISPATCH_PAUSE_SECONDS` (default `1800`) sets the
+  minimum dispatch pause. Both must be positive. An explicit `CRESCENDO_DRAIN=0` retains the
+  operator's immediate, interrupting deploy override; routine timer deployments never interrupt
+  workers to meet the drain deadline. Existing manual drains are preserved.
+
+  The journal is also the retry-policy state: `drain_started` includes a conservative retry deadline,
+  and `drain_finished` records the result, actual start/end timestamps, elapsed hold seconds and
+  observed idle seconds (zero running workers and zero Governor-held slots, including the swap).
+  `drain_sample` records elapsed time, running/held slots, ready work, service capacity, quota pause
+  and budget restriction every thirty seconds. Unknown snapshots record unknown running counts;
+  they never count as idle. These observations measure deployment holds separately from quota,
+  budget and no ready work; they do not claim that every unused slot could have dispatched eligible
+  work. Idle durations are sampled estimates, not historical attribution. Cleanup releases only
+  this invocation's hold after postponement, cancellation, failed swap, rollback or success.
+  Gate failures occur before the hold. Dispatch resumes before release cleanup and script install.
 
 The service's read-only state API and dashboard mark each project's snapshot as `ok`, `timeout`,
 `unavailable`, or `not_selected` (outside the filter). Unknown running/ready counts are `null`.
@@ -93,7 +112,8 @@ project/status pairs. Partial reads preserve observed work and private-project r
 aggregate `counts` are `null`, health warns and the dashboard shows unknown counts. Governor-held
 service slots can still be shown; they do not imply a queue count. A successful read clears the
 warning. `ops/bin/deploy-state.py` validates deployment observations independently of the deploy
-script; it only reads JSON from stdin and never accesses or restarts the service.
+script. Its validation modes read JSON from stdin; its drain mode reads the state API and owns
+only the temporary drain flag and journal. It never restarts the service.
 
 ## Commands
 
