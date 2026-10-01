@@ -2506,3 +2506,23 @@ The reference `WORKFLOW.autopilot.md` uses these conventions:
   merges pinned to the reviewed head commit. When it abandons a pull request it closes it and
   releases the linked issue (closed as not planned, or relabeled `symphony:needs-attention`).
 - `symphony:hold` stops and holds any issue or pull request.
+
+
+### B.5 Durable Outcome Facts (Crescendo)
+
+Operations history MUST distinguish run endings, blocked item attempts and scoped item dispositions.
+`completed` measures a normal worker turn, not accepted delivery. `stopped` is a transport ending,
+not necessarily failure; reconciliation after acceptance MUST retain run time and recorded cost.
+New facts SHOULD retain the work item, run ID and item-attempt number. Historical attribution that
+was never recorded MUST remain unknown rather than inferred from nearby timestamps.
+Run identity MUST distinguish blocked attempts when an item's attempt counter resets after reopening.
+
+A blocked attempt MUST count once independently of its run ending. Dispositions distinguish merged
+PR scope, verified existing work, split delivery with unmet follow-ups, retirement and unknown
+acceptance. Ordinary closure MUST NOT imply full acceptance. A transient PR close/reopen is a
+transition, not an abandoned delivery. Repeated reconciliation and replay MUST NOT duplicate
+accepted deliveries or attributed attempts. These facts belong in the existing durable Operations
+store, not a separate metrics service; counts cover its bounded retained history.
+
+See [Crescendo outcome semantics](docs/crescendo.md#durable-outcome-facts) for evidence markers,
+retention and the state API's daily series fields.

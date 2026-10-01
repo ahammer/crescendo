@@ -95,16 +95,16 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <.stat label="Queue" value={@payload.counts.ready || "—"} detail={"#{@payload.counts.waiting || "—"} waiting"} values={@payload.history.ready} tone="blue" />
           <.stat label="Open PRs" value={@payload.counts.open_prs || "—"} detail="on GitHub" values={@payload.history.open_prs} tone="cyan" links={pull_links(@payload)} />
           <.stat
-            label="Merged today"
+            label="PR transitions today"
             value={today(@payload.usage, :merged) + today(@payload.usage, :closed)}
             detail={"#{today(@payload.usage, :merged)} merged · #{today(@payload.usage, :closed)} closed"}
             values={closed_per_day(@payload.usage)}
             span="14 days"
             tone="violet"
-            title="Pull requests merged or closed today (UTC); the sparkline covers 14 days"
+            title="Observed PR merge and close transitions (UTC), including transient closures"
           />
           <.stat
-            label="Success rate"
+            label="Turn completion rate"
             value={share_percent(@payload.run_stats.completed, @payload.run_stats.total)}
             detail={"#{format_int(@payload.run_stats.completed)} of #{format_int(@payload.run_stats.total)} runs · 14 days"}
             values={success_per_day(@payload.usage)}
@@ -373,10 +373,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <header class="section-head"><h2 id="runs-title">Runs <span class="count">14 days</span></h2></header>
       <dl class="run-stats">
         <div><dt>Runs</dt><dd class="numeric"><%= format_int(@stats.total) %></dd></div>
-        <div><dt>Completed</dt><dd class="numeric"><%= share(@stats.completed, @stats.total) %></dd></div>
+        <div><dt>Completed turns</dt><dd class="numeric"><%= share(@stats.completed, @stats.total) %></dd></div>
         <div><dt>Interrupted</dt><dd class="numeric"><%= share(@stats.interrupted, @stats.total) %></dd></div>
         <div><dt>Failed</dt><dd class="numeric"><%= share(@stats.failed, @stats.total) %></dd></div>
-        <div><dt>Merged</dt><dd class="numeric"><%= format_int(@stats.merged) %></dd></div>
+        <div><dt>Stopped runs</dt><dd class="numeric"><%= format_int(@stats.stopped) %></dd></div>
+        <div><dt>Blocked item attempts</dt><dd class="numeric"><%= format_int(@stats.blocked_attempts) %></dd></div>
+        <div><dt>Scoped deliveries</dt><dd class="numeric"><%= format_int(@stats.accepted_deliveries) %></dd></div>
+        <div><dt>Retirements</dt><dd class="numeric"><%= format_int(@stats.retirements) %></dd></div>
+        <div><dt>Unknown acceptance</dt><dd class="numeric"><%= format_int(@stats.unknown_dispositions) %></dd></div>
+        <div><dt>Merged PRs</dt><dd class="numeric"><%= format_int(@stats.merged) %></dd></div>
         <div><dt>Tokens</dt><dd class="numeric"><%= compact(@usage.today[:total_tokens]) %></dd></div>
       </dl>
       <Charts.columns id="runs-chart" title="Worker runs per day by outcome, last 14 days" series={run_series()} columns={run_columns(@usage)} format={&format_count/1} integer={true} />
@@ -695,7 +700,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp success_per_day(usage) do
     Enum.map(Map.get(usage, :daily, []), fn day ->
-      finished = Map.get(day, :completed, 0) + Map.get(day, :failed, 0) + Map.get(day, :interrupted, 0)
+      finished = Map.get(day, :completed, 0) + Map.get(day, :failed, 0) + Map.get(day, :interrupted, 0) + Map.get(day, :stopped, 0)
       if finished > 0, do: round(Map.get(day, :completed, 0) * 100 / finished), else: 0
     end)
   end
@@ -707,15 +712,16 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp run_series do
     [
-      %{key: :completed, label: "Completed", class: "status-good"},
+      %{key: :completed, label: "Completed turns", class: "status-good"},
       %{key: :interrupted, label: "Interrupted", class: "status-warning"},
-      %{key: :failed, label: "Failed", class: "status-critical"}
+      %{key: :failed, label: "Failed", class: "status-critical"},
+      %{key: :stopped, label: "Stopped", class: "status-warning"}
     ]
   end
 
   defp run_columns(usage) do
     Enum.map(Map.get(usage, :daily, []), fn day ->
-      %{label: short_date(day.date), tip: day.date, values: Map.take(day, [:completed, :interrupted, :failed])}
+      %{label: short_date(day.date), tip: day.date, values: Map.take(day, [:completed, :interrupted, :failed, :stopped])}
     end)
   end
 

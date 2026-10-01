@@ -17,7 +17,7 @@ defmodule SymphonyElixirWeb.Timeline do
   @done_limit 60
   # Finished work worth a row; dispatches show as running, and turn or
   # retry bookkeeping would drown the rest.
-  @done_kinds ~w(completed failed stopped interrupted pr_merged pr_closed pr_opened issue_terminal retired blocked task_delivered task_short)
+  @done_kinds ~w(completed failed stopped interrupted pr_merged pr_closed pr_opened pr_reopened item_disposition attempt_failed issue_terminal retired blocked task_delivered task_short)
   @run_kinds ~w(completed failed stopped interrupted)
 
   attr(:payload, :map, required: true)
@@ -165,7 +165,7 @@ defmodule SymphonyElixirWeb.Timeline do
     end
   end
 
-  defp event_group(%{kind: kind}) when kind in ["pr_merged", "pr_closed", "pr_opened", "issue_terminal", "retired", "blocked"], do: "prs"
+  defp event_group(%{kind: kind}) when kind in ["pr_merged", "pr_closed", "pr_opened", "pr_reopened", "item_disposition", "issue_terminal", "retired", "blocked"], do: "prs"
   defp event_group(event), do: group(event[:issue_identifier])
 
   @spec category_name(String.t()) :: String.t()
@@ -261,12 +261,15 @@ defmodule SymphonyElixirWeb.Timeline do
   defp event_icon(event), do: event_category(event)
 
   defp event_label(%{kind: "pr_merged"}), do: "Merged"
-  defp event_label(%{kind: "pr_closed"}), do: "Closed"
+  defp event_label(%{kind: "pr_closed"}), do: "PR closed (transition)"
+  defp event_label(%{kind: "pr_reopened"}), do: "PR reopened"
+  defp event_label(%{kind: "attempt_failed"}), do: "Blocked item attempt"
+  defp event_label(%{kind: "item_disposition"} = event), do: "Item disposition: " <> event.disposition
   defp event_label(%{kind: "pr_opened"}), do: "PR opened"
   defp event_label(%{kind: "issue_terminal"}), do: "Issue closed"
   defp event_label(%{kind: "retired"}), do: "Retired"
   defp event_label(%{kind: "blocked"}), do: "Blocked"
-  defp event_label(%{kind: "completed"} = event), do: event_name(event) <> " done"
+  defp event_label(%{kind: "completed"} = event), do: event_name(event) <> " turn completed"
   defp event_label(%{kind: "task_delivered"} = event), do: event_name(event) <> " delivered"
   defp event_label(%{kind: "task_short"} = event), do: event_name(event) <> " fell short"
   defp event_label(%{kind: "failed"} = event), do: event_name(event) <> " failed"

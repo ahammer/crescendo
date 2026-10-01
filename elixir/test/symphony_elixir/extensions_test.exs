@@ -376,7 +376,19 @@ defmodule SymphonyElixir.ExtensionsTest do
              },
              "history" => %{"running" => [], "ready" => [], "waiting" => [], "attention" => [], "open_prs" => [], "spend_micro" => []},
              "health" => state_payload["health"],
-             "run_stats" => %{"total" => 0, "completed" => 0, "interrupted" => 0, "failed" => 0, "merged" => 0, "closed" => 0}
+             "run_stats" => %{
+               "total" => 0,
+               "completed" => 0,
+               "interrupted" => 0,
+               "failed" => 0,
+               "merged" => 0,
+               "closed" => 0,
+               "stopped" => 0,
+               "blocked_attempts" => 0,
+               "accepted_deliveries" => 0,
+               "retirements" => 0,
+               "unknown_dispositions" => 0
+             }
            }
 
     # Health reports only observed signals: a blocked and a retrying item
@@ -987,7 +999,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Blocked"
     assert html =~ ~s(title="dependency blocked: GH-10")
     assert html =~ "1/2 running"
-    assert html =~ ~r/Merged today.*?3.*?2 merged · 1 closed/s
+    assert html =~ ~r/PR transitions today.*?3.*?2 merged · 1 closed/s
     assert html =~ ~r/class="spend-table".*?gpt-6-sol.*?\$1\.50.*?\$1\.50/s
     assert html =~ ~r/Free slot.*?Next up.*?GH-10.*?First ready/s
     assert html =~ "over $10.00 budget"
@@ -1023,6 +1035,9 @@ defmodule SymphonyElixir.ExtensionsTest do
       %{kind: "stopped", at: at.(50), issue_identifier: "research-qa"},
       %{kind: "interrupted", at: at.(55), issue_identifier: "GH-8"},
       %{kind: "pr_closed", at: at.(60), pr_number: 40, summary: "Old idea"},
+      %{kind: "pr_reopened", at: at.(65), pr_number: 40},
+      %{kind: "attempt_failed", at: at.(66), issue_identifier: "GH-4"},
+      %{kind: "item_disposition", at: at.(67), issue_identifier: "GH-9", disposition: "split"},
       %{kind: "pr_opened", at: at.(70), pr_number: 42, summary: "New docs"},
       %{kind: "issue_terminal", at: at.(80), issue_identifier: "GH-6", summary: "closed"},
       %{kind: "retired", at: at.(90), issue_identifier: "GH-5"},
@@ -1113,7 +1128,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     for text <- [
           "Merged",
           "Tidy the README",
-          "Review done",
+          "Review turn completed",
           "5m 0s",
           "$0.250",
           "Marketing delivered",
@@ -1123,6 +1138,9 @@ defmodule SymphonyElixir.ExtensionsTest do
           "Broken build",
           "Delivery interrupted",
           "PR opened",
+          "PR reopened",
+          "Blocked item attempt",
+          "Item disposition: split",
           "Issue closed",
           "Retired",
           "Blocked",
@@ -1160,13 +1178,13 @@ defmodule SymphonyElixir.ExtensionsTest do
     timeline = fn page -> page |> String.split(~s(aria-labelledby="timeline-title")) |> List.last() end
     {:ok, _view, reviews} = live(build_conn(), "/?show=review")
     reviews = timeline.(reviews)
-    assert reviews =~ "Review done"
+    assert reviews =~ "Review turn completed"
     refute reviews =~ "Delivery failed"
     refute reviews =~ "Queued 1"
     {:ok, _view, prs} = live(build_conn(), "/?show=prs")
     prs = timeline.(prs)
     assert prs =~ "Merged"
-    refute prs =~ "Review done"
+    refute prs =~ "Review turn completed"
     {:ok, _view, tasks_page} = live(build_conn(), "/?show=autopilot")
     tasks_page = timeline.(tasks_page)
     assert tasks_page =~ "Marketing delivered"

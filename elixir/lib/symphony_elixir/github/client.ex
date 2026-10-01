@@ -536,6 +536,7 @@ defmodule SymphonyElixir.GitHub.Client do
         title: issue["title"],
         description: issue["body"],
         state: state,
+        state_reason: issue["state_reason"],
         url: issue["html_url"],
         assignee_id: get_in(issue, ["assignee", "login"]),
         labels: extract_labels(issue),

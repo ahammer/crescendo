@@ -68,7 +68,8 @@ defmodule SymphonyElixir.Operations do
   def start_run(table, id, details) do
     safe_write(fn ->
       :ok = :dets.insert(table, {{:run, id}, Map.merge(details, %{status: "running", started_s: System.os_time(:second)})})
-      event(table, "dispatch", details)
+      :ok = :dets.insert(table, {{:item_run, details[:issue_identifier]}, %{run_id: id, item_attempt: details[:item_attempt]}})
+      event(table, "dispatch", Map.put(details, :run_id, id))
     end)
   end
 
@@ -77,7 +78,9 @@ defmodule SymphonyElixir.Operations do
   def finish_run(_table, nil, _kind, _details), do: :ok
 
   def finish_run(table, id, kind, details) do
-    safe_write(fn -> do_finish_run(table, id, kind, details) end)
+    safe_write(fn ->
+      if :dets.lookup(table, {:task, id}) == [], do: do_finish_run(table, id, kind, Map.put(details, :run_id, id))
+    end)
   end
 
   # A finished run leaves a task record (model, category, time and cost) for
@@ -243,8 +246,86 @@ defmodule SymphonyElixir.Operations do
   def event(nil, _kind, _details), do: :ok
 
   def event(table, kind, details) do
-    safe_write(fn -> do_event(table, kind, details) end)
+    safe_write(fn ->
+      details = correlate_item(table, kind, details)
+      transition = pull_transition(table, kind, details)
+      if transition, do: record_event(table, transition, details)
+
+      if kind == "pr_merged" do
+        record_event(table, "item_disposition", Map.put(details, :disposition, "merged"))
+      end
+    end)
   end
+
+  @doc "Records a terminal item's scoped disposition; ordinary closure is unknown acceptance."
+  @spec disposition(handle(), map(), String.t()) :: :ok
+  def disposition(table, issue, prefix \\ "crescendo") do
+    disposition =
+      cond do
+        issue[:state_reason] == "not_planned" -> "retirement"
+        "#{prefix}:delivery:verified-existing" in issue.labels -> "verified_existing"
+        "#{prefix}:delivery:split" in issue.labels -> "split"
+        true -> "unknown"
+      end
+
+    event(table, "item_disposition", %{
+      issue_identifier: issue.identifier,
+      issue_url: issue.url,
+      disposition: disposition,
+      summary: "Terminal item: #{disposition}"
+    })
+  end
+
+  defp correlate_item(table, kind, details) do
+    identifier = details[:issue_identifier] || if(details[:pr_number], do: "PR-#{details.pr_number}")
+    details = if identifier, do: Map.put(details, :issue_identifier, identifier), else: details
+
+    if kind in ["attempt_failed", "blocked", "item_disposition", "retired", "pr_merged"] do
+      case :dets.lookup(table, {:item_run, identifier}) do
+        [{_key, run}] -> Map.merge(run, details)
+        _ -> details
+      end
+    else
+      details
+    end
+  end
+
+  defp pull_transition(table, kind, %{pr_number: number}) when kind in ["pr_opened", "pr_closed", "pr_merged"] do
+    previous = :dets.lookup(table, {:pull_transition, number})
+    :ok = :dets.insert(table, {{:pull_transition, number}, kind})
+
+    case {kind, previous} do
+      {"pr_opened", [{{:pull_transition, ^number}, "pr_closed"}]} -> "pr_reopened"
+      {^kind, [{{:pull_transition, ^number}, ^kind}]} -> nil
+      _ -> kind
+    end
+  end
+
+  defp pull_transition(_table, kind, _details), do: kind
+
+  defp record_event(table, kind, details) do
+    key = fact_key(kind, details)
+
+    if is_nil(key) or :dets.lookup(table, key) == [] do
+      do_event(table, kind, details, key)
+      sync(table)
+    end
+  end
+
+  defp fact_key("item_disposition", %{issue_identifier: item, disposition: disposition})
+       when disposition in ["merged", "verified_existing", "split"], do: {:accepted_delivery, item}
+
+  defp fact_key("item_disposition", %{issue_identifier: item, disposition: disposition}),
+    do: {:disposition, item, disposition}
+
+  defp fact_key(kind, %{issue_identifier: item, item_attempt: attempt} = details)
+       when kind in ["attempt_failed", "blocked"] and is_integer(attempt),
+       do: {:blocked_attempt, item, attempt, details[:run_id]}
+
+  defp fact_key("blocked", %{issue_identifier: item, run_id: run_id}) when is_binary(run_id),
+    do: {:blocked_run, item, run_id}
+
+  defp fact_key(_kind, _details), do: nil
 
   @sample_seconds 300
   @sample_retention_buckets div(48 * 3600, 300)
@@ -368,16 +449,17 @@ defmodule SymphonyElixir.Operations do
   def save_quota(nil, _snapshot), do: :ok
   def save_quota(table, snapshot), do: safe_write(fn -> :dets.insert(table, {:quota, snapshot}) end)
 
-  defp do_event(table, kind, details) do
+  defp do_event(table, kind, details, key) do
     sequence =
       case :dets.lookup(table, :sequence) do
         [{:sequence, value}] -> value + 1
         _ -> 1
       end
 
-    entry = details |> Map.take([:issue_identifier, :issue_url, :pr_number, :pr_url, :summary, :model, :title, :category, :seconds, :usd_micro])
+    entry = details |> Map.take([:issue_identifier, :issue_url, :pr_number, :pr_url, :summary, :model, :title, :category, :seconds, :usd_micro, :run_id, :item_attempt, :disposition])
     entry = Map.merge(entry, %{kind: kind, at: DateTime.utc_now() |> DateTime.to_iso8601()})
-    :ok = :dets.insert(table, [{:sequence, sequence}, {{:event, sequence}, entry}])
+    records = [{:sequence, sequence}, {{:event, sequence}, entry}]
+    :ok = :dets.insert(table, if(key, do: [{key, true} | records], else: records))
     if sequence > @event_limit, do: :dets.delete(table, {:event, sequence - @event_limit})
     :ok
   end
@@ -443,7 +525,9 @@ defmodule SymphonyElixir.Operations do
         table
       )
 
-    ordered_events = events |> Enum.sort_by(fn {sequence, _} -> sequence end) |> Enum.map(&elem(&1, 1))
+    ordered_events =
+      events |> Enum.sort_by(fn {sequence, _} -> sequence end) |> Enum.map(fn {_sequence, event} -> Map.put(event, :attribution, if(event[:run_id], do: "recorded", else: "unknown")) end)
+
     # Task and image records ride in the samples accumulator, tagged (sample buckets are integers).
     {tasks, samples} = Enum.split_with(samples, &match?({:task, _}, &1))
     {images, samples} = Enum.split_with(samples, &match?({:image, _, _}, &1))
@@ -550,19 +634,31 @@ defmodule SymphonyElixir.Operations do
     "completed" => :completed,
     "failed" => :failed,
     "interrupted" => :interrupted,
+    "stopped" => :stopped,
+    "attempt_failed" => :blocked_attempts,
+    "blocked" => :blocked_attempts,
+    "retired" => :retirements,
+    "issue_terminal" => :unknown_dispositions,
     "pr_merged" => :merged,
     "pr_closed" => :closed
   }
 
-  # The last two weeks (UTC), oldest first: estimated spend per model plus run
-  # outcomes and merged or closed pull requests counted from the retained event ring.
+  @dispositions %{
+    "merged" => :accepted_deliveries,
+    "verified_existing" => :accepted_deliveries,
+    "split" => :accepted_deliveries,
+    "retirement" => :retirements,
+    "unknown" => :unknown_dispositions
+  }
+
+  # Counts cover the retained event ring; PR closures are transitions, not abandonment.
   defp daily_series(spend, events) do
     today = Date.utc_today()
     dates = for offset <- (@series_days - 1)..0//-1, do: today |> Date.add(-offset) |> Date.to_iso8601()
 
     outcomes =
       Enum.reduce(events, %{}, fn event, acc ->
-        with kind when is_atom(kind) <- Map.get(@outcome_kinds, event[:kind]),
+        with kind when is_atom(kind) <- series_kind(event),
              at when is_binary(at) <- event[:at] do
           Map.update(acc, {String.slice(at, 0, 10), kind}, 1, &(&1 + 1))
         else
@@ -577,11 +673,19 @@ defmodule SymphonyElixir.Operations do
         completed: Map.get(outcomes, {date, :completed}, 0),
         failed: Map.get(outcomes, {date, :failed}, 0),
         interrupted: Map.get(outcomes, {date, :interrupted}, 0),
+        stopped: Map.get(outcomes, {date, :stopped}, 0),
+        blocked_attempts: Map.get(outcomes, {date, :blocked_attempts}, 0),
+        accepted_deliveries: Map.get(outcomes, {date, :accepted_deliveries}, 0),
+        retirements: Map.get(outcomes, {date, :retirements}, 0),
+        unknown_dispositions: Map.get(outcomes, {date, :unknown_dispositions}, 0),
         merged: Map.get(outcomes, {date, :merged}, 0),
         closed: Map.get(outcomes, {date, :closed}, 0)
       }
     end)
   end
+
+  defp series_kind(%{kind: "item_disposition", disposition: disposition}), do: @dispositions[disposition]
+  defp series_kind(event), do: @outcome_kinds[event[:kind]]
 
   defp interrupt_active_runs(table) do
     active =

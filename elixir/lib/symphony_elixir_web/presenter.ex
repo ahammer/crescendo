@@ -481,7 +481,7 @@ defmodule SymphonyElixirWeb.Presenter do
 
     %{
       budget_usd_micro: budget_usd_micro(settings),
-      runs_today: Map.get(today, :completed, 0) + Map.get(today, :failed, 0) + Map.get(today, :interrupted, 0),
+      runs_today: Map.get(today, :completed, 0) + Map.get(today, :failed, 0) + Map.get(today, :interrupted, 0) + Map.get(today, :stopped, 0),
       max_agents: settings && settings.agent.max_concurrent_agents,
       queued: counts.ready,
       longest: longest && %{issue_identifier: longest.identifier, seconds: Map.get(longest, :runtime_seconds, 0), model: Map.get(longest, :model)}
@@ -529,7 +529,12 @@ defmodule SymphonyElixirWeb.Presenter do
     [completed, interrupted, failed, merged, closed] = Enum.map([:completed, :interrupted, :failed, :merged, :closed], sum)
 
     %{
-      total: completed + interrupted + failed,
+      total: completed + interrupted + failed + sum.(:stopped),
+      stopped: sum.(:stopped),
+      blocked_attempts: sum.(:blocked_attempts),
+      accepted_deliveries: sum.(:accepted_deliveries),
+      retirements: sum.(:retirements),
+      unknown_dispositions: sum.(:unknown_dispositions),
       completed: completed,
       interrupted: interrupted,
       failed: failed,

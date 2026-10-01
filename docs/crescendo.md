@@ -331,3 +331,41 @@ The `SYMPHONY_*` names are kept for tools that predate the service.
 - `GET /api/v1/<project>/<id>` is one work item.
 
 There are no write routes.
+
+
+## Durable outcome facts
+
+The existing Operations DETS ledger separates three observations:
+
+- Run endings (`completed`, `failed`, `stopped`, `interrupted`) measure worker transport/turn
+  completion, with wall time and recorded API-equivalent cost. A completed turn is not acceptance;
+  stopping an accepted worker during reconciliation is not failure. Duplicate endings preserve the
+  first ending and its time/cost.
+- `attempt_failed` (or `blocked` without autopilot) measures a blocked item attempt, independently
+  of its run ending. New facts retain the work item, item-attempt number and last recorded run ID.
+  The durable item/attempt/run key prevents duplicate counting while distinguishing new attempts
+  after a closed item reopens and its retry budget resets.
+- `item_disposition` records scoped acceptance or retirement. `merged` accepts the observed PR's
+  scope; it does not claim full product acceptance. For deliveries without a PR, a closed issue
+  carrying `<prefix>:delivery:verified-existing` accepts verified existing work; a closed issue with
+  `<prefix>:delivery:split` accepts its documented delivered scope, leaving follow-ups outstanding.
+  Here `<prefix>` is `labels.prefix`. Apply the label only after validation, and document evidence
+  and unmet criteria in the workpad. Use these issue markers for deliveries without a merged PR,
+  so the same delivered scope is not counted once as a PR and again as an issue.
+  `not_planned` or successful autopilot retirement records `retirement`, never accepted delivery.
+  Ordinary issue closure records `unknown` acceptance. Repeated reconciliation is idempotent:
+  each item contributes at most one accepted delivery.
+
+PR close/open events remain transitions: `pr_closed` followed by `pr_reopened` may later become
+`pr_merged`. Close transitions are not abandoned deliveries. The dashboard labels completed turns,
+blocked item attempts, scoped deliveries, retirements and unknown acceptance separately. The daily
+series adds `stopped`, `blocked_attempts`, `accepted_deliveries`, `retirements` and
+`unknown_dispositions`; existing run and PR-transition fields retain their meanings.
+
+Counts use the retained 2,000-event history within the 14-day UTC series, not lifetime totals.
+Idempotency keys and last recorded item/run correlations survive event eviction and restart.
+Historical events without run IDs expose `attribution: unknown`; they are not retroactively joined
+by timestamps or converted from normal completion/closure into acceptance. Historical blocked
+attempts count as observed; their missing run/attempt identity cannot be reconstructed. Historical
+merge transitions remain merge observations, without backfilled acceptance facts. Nested planner
+and independent reviewer usage is not fully included in the recorded cost estimates.

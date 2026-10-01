@@ -156,6 +156,8 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
     assert issue.title == "Issue 42"
     assert issue.description == "Body 42"
     assert issue.state == "open"
+    closed = GitHubClient.normalize_issue_for_test(Map.merge(raw_issue(42), %{"state" => "closed", "state_reason" => "not_planned"}), "octo/repo")
+    assert closed.state_reason == "not_planned"
     assert issue.url == "https://github.test/octo/repo/issues/42"
     assert issue.assignee_id == "octocat"
     assert issue.labels == ["bug", "platform"]
