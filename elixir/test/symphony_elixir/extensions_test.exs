@@ -302,7 +302,17 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "last_message" => "rendered",
                  "started_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),
                  "last_event_at" => nil,
-                 "tokens" => %{"input_tokens" => 4, "cached_input_tokens" => 0, "output_tokens" => 8, "total_tokens" => 12},
+                 "tokens" => %{
+                   "input_tokens" => 4,
+                   "cached_input_tokens" => 0,
+                   "cache_write_input_tokens" => 0,
+                   "reasoning_output_tokens" => 0,
+                   "reported_total_tokens" => nil,
+                   "model_context_window" => nil,
+                   "output_tokens" => 8,
+                   "total_tokens" => 12
+                 },
+                 "codex_provenance" => %{},
                  "run_id" => nil,
                  "description" => nil,
                  "branch" => nil,
@@ -351,8 +361,45 @@ defmodule SymphonyElixir.ExtensionsTest do
              "usage" => %{
                "status" => "unavailable",
                "pricing_as_of" => "2026-09-24",
-               "today" => %{"input_tokens" => 0, "cached_input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0, "usd_micro" => 0, "unpriced_tokens" => 0},
-               "recorded" => %{"input_tokens" => 0, "cached_input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0, "usd_micro" => 0, "unpriced_tokens" => 0},
+               "cost_basis" => "api_equivalent_estimate",
+               "account_usage" => %{
+                 "coverage" => "incomplete",
+                 "threads_recorded" => 0,
+                 "threads_observed" => 0,
+                 "threads_covered" => 0,
+                 "estimated_credits_micros" => nil,
+                 "estimated_usd_micros" => nil
+               },
+               "delivery_metrics" => %{
+                 "status" => "incomplete_delivery_lineage",
+                 "accepted_delivery_cost" => nil,
+                 "accepted_delivery_latency" => nil,
+                 "verified_deliveries" => nil,
+                 "runs_recorded" => 0,
+                 "review_heads_recorded" => 0,
+                 "thread_links" => 0,
+                 "helper_usage_coverage" => "unknown"
+               },
+               "today" => %{
+                 "input_tokens" => 0,
+                 "cached_input_tokens" => 0,
+                 "cache_write_input_tokens" => 0,
+                 "reasoning_output_tokens" => 0,
+                 "output_tokens" => 0,
+                 "total_tokens" => 0,
+                 "usd_micro" => 0,
+                 "unpriced_tokens" => 0
+               },
+               "recorded" => %{
+                 "input_tokens" => 0,
+                 "cached_input_tokens" => 0,
+                 "cache_write_input_tokens" => 0,
+                 "reasoning_output_tokens" => 0,
+                 "output_tokens" => 0,
+                 "total_tokens" => 0,
+                 "usd_micro" => 0,
+                 "unpriced_tokens" => 0
+               },
                "by_model" => [],
                "activity" => [],
                "daily" => state_payload["usage"]["daily"],
@@ -1003,13 +1050,13 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ ~r/class="spend-table".*?gpt-6-sol.*?\$1\.50.*?\$1\.50/s
     assert html =~ ~r/Free slot.*?Next up.*?GH-10.*?First ready/s
     assert html =~ "over $10.00 budget"
-    assert html =~ "Worker usage alert"
+    assert html =~ "API-equivalent worker usage"
     assert html =~ "1/2"
     assert html =~ "Coordinator"
     assert html =~ "1 retrying automatically"
     assert html =~ "Systems"
     assert html =~ ~s(<dt>Tokens</dt>)
-    assert html =~ ~s(<dt>Per merge</dt><dd class="numeric">$0.750</dd>)
+    assert html =~ ~s(<dt>Per observed merge</dt><dd class="numeric">$0.750</dd>)
     assert html =~ ~s(<dt>Per run</dt><dd class="numeric">—</dd>)
     assert html =~ "Weekly quota"
     assert html =~ "Weekly quota 25% left"
@@ -1242,7 +1289,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
     {:ok, view, html} = live(build_conn(), "/")
-    refute html =~ "Worker usage alert"
+    refute html =~ "passed the daily budget"
 
     updated_usage = %{usage | today: %{usage.today | usd_micro: 50_000_000}}
 
@@ -1252,8 +1299,8 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     StatusDashboard.notify_update()
 
-    assert_eventually(fn -> render(view) =~ "Worker usage alert" end)
-    assert render(view) =~ "Planning and independent review usage are not included"
+    assert_eventually(fn -> render(view) =~ "passed the daily budget" end)
+    assert render(view) =~ "Account billing and accepted-delivery cost are unverified"
   end
 
   test "http server serves embedded assets, accepts form posts, and rejects invalid hosts" do

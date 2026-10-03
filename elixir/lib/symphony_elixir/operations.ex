@@ -2,6 +2,7 @@ defmodule SymphonyElixir.Operations do
   @moduledoc "Durable, bounded operational history for the web dashboard."
 
   require Logger
+  alias SymphonyElixir.Codex.Usage
 
   @table :symphony_operations
   @event_limit 2_000
@@ -32,7 +33,11 @@ defmodule SymphonyElixir.Operations do
   @spec rates(map() | nil) :: rates()
   def rates(%{models: %{} = models}) do
     Enum.reduce(models, @rates, fn {model, price}, acc ->
-      Map.put(acc, model, {usd_micro(price["input"]), usd_micro(price["cached_input"]), usd_micro(price["output"])})
+      Map.put(
+        acc,
+        model,
+        {usd_micro(price["input"]), usd_micro(price["cached_input"]), usd_micro(price["output"])}
+      )
     end)
   end
 
@@ -67,8 +72,21 @@ defmodule SymphonyElixir.Operations do
 
   def start_run(table, id, details) do
     safe_write(fn ->
-      :ok = :dets.insert(table, {{:run, id}, Map.merge(details, %{status: "running", started_s: System.os_time(:second)})})
-      :ok = :dets.insert(table, {{:item_run, details[:issue_identifier]}, %{run_id: id, item_attempt: details[:item_attempt]}})
+      run =
+        Map.merge(details, %{
+          status: "running",
+          started_s: System.os_time(:second),
+          first_eligible_at: lookup(table, {:eligible, details[:issue_id]}, nil)
+        })
+
+      :ok = :dets.insert(table, [{{:run, id}, run}, {{:lineage_run, id}, run}])
+
+      :ok =
+        :dets.insert(
+          table,
+          {{:item_run, details[:issue_identifier]}, %{run_id: id, item_attempt: details[:item_attempt]}}
+        )
+
       event(table, "dispatch", Map.put(details, :run_id, id))
     end)
   end
@@ -79,7 +97,8 @@ defmodule SymphonyElixir.Operations do
 
   def finish_run(table, id, kind, details) do
     safe_write(fn ->
-      if :dets.lookup(table, {:task, id}) == [], do: do_finish_run(table, id, kind, Map.put(details, :run_id, id))
+      if :dets.lookup(table, {:task, id}) == [],
+        do: do_finish_run(table, id, kind, Map.put(details, :run_id, id))
     end)
   end
 
@@ -87,6 +106,12 @@ defmodule SymphonyElixir.Operations do
   # the per-task averages, and its finish event carries the same figures.
   defp do_finish_run(table, id, kind, details) do
     now = System.os_time(:second)
+    run = lookup(table, {:run, id}, %{})
+    checkpoint = checkpoint(table, run[:issue_id])
+
+    if (kind != "completed" and checkpoint) && checkpoint[:run_id] == id do
+      :ok = :dets.insert(table, {{:thread_checkpoint, run.issue_id}, Map.put(checkpoint, :eligible, false)})
+    end
 
     started =
       case :dets.lookup(table, {:run, id}) do
@@ -98,11 +123,33 @@ defmodule SymphonyElixir.Operations do
     category = task_category(details[:issue_identifier])
     seconds = if started, do: max(now - started, 0)
     model = details[:model] || "unknown"
-    task = %{at_s: now, model: model, category: category, seconds: seconds, usd_micro: cost.usd_micro, outcome: kind}
+
+    task = %{
+      at_s: now,
+      model: model,
+      category: category,
+      seconds: seconds,
+      usd_micro: cost.usd_micro,
+      outcome: kind
+    }
 
     :ok = :dets.delete(table, {:run, id})
     :ok = :dets.insert(table, {{:task, id}, task})
-    :dets.select_delete(table, [{{{:task, :_}, %{at_s: :"$1"}}, [{:<, :"$1", now - @task_days * 86_400}], [true]}])
+
+    :ok =
+      :dets.insert(
+        table,
+        {{:lineage_run, id}, Map.merge(lookup(table, {:lineage_run, id}, run), %{status: kind, finished_s: now})}
+      )
+
+    :dets.select_delete(table, [
+      {{{:lineage_run, :_}, %{finished_s: :"$1"}}, [{:<, :"$1", now - 90 * 86_400}], [true]}
+    ])
+
+    :dets.select_delete(table, [
+      {{{:task, :_}, %{at_s: :"$1"}}, [{:<, :"$1", now - @task_days * 86_400}], [true]}
+    ])
+
     event(table, kind, Map.merge(details, %{category: category, seconds: seconds, usd_micro: cost.usd_micro}))
     sync(table)
   end
@@ -130,7 +177,10 @@ defmodule SymphonyElixir.Operations do
   def usage(_table, nil, _model, _delta, _item, _rates), do: :ok
 
   def usage(table, run_id, model, delta, item, rates) do
-    if Enum.any?([:input_tokens, :cached_input_tokens, :output_tokens, :total_tokens], &(Map.get(delta, &1, 0) > 0)) do
+    if Enum.any?(
+         [:input_tokens, :cached_input_tokens, :output_tokens, :total_tokens],
+         &(Map.get(delta, &1, 0) > 0)
+       ) do
       safe_write(fn -> record_usage(table, run_id, model, delta, item, rates) end)
     else
       :ok
@@ -142,6 +192,202 @@ defmodule SymphonyElixir.Operations do
     if is_binary(item), do: add_item_usage(table, item, run_id, delta, price)
   end
 
+  @doc "Records first observed eligibility before worker-capacity admission."
+  @spec observe_eligible(handle(), String.t()) :: :ok
+  def observe_eligible(nil, _issue_id), do: :ok
+
+  def observe_eligible(table, issue_id) do
+    safe_write(fn ->
+      :dets.insert_new(table, {{:eligible, issue_id}, DateTime.to_iso8601(DateTime.utc_now())})
+    end)
+  end
+
+  @doc "Atomically persists a scoped thread watermark and every run allocation."
+  @spec thread_usage(handle(), term(), String.t(), String.t() | nil, map(), String.t(), rates(), boolean()) ::
+          {:ok, map()} | {:error, term()}
+  def thread_usage(table, thread, run_id, model, snapshot, item, rates, restored \\ false) do
+    checked_write(table, fn ->
+      key = {:thread_usage, thread}
+      record = lookup(table, key, %{total: %{}, allocations: %{}, source: nil, owner: nil})
+      ignored = record.source == :canonical and snapshot.source == :legacy
+      {total, delta} = Usage.delta(record.total, if(ignored, do: record.total, else: snapshot.total))
+
+      owner =
+        if restored and record.owner,
+          do: record.owner,
+          else: {run_id, Date.to_iso8601(Date.utc_today()), model || "unknown", item}
+
+      allocations = allocate_usage(record.allocations, owner, delta, rates)
+      last_turn = if ignored, do: record[:last_turn], else: complete_turn(snapshot)
+
+      value =
+        Map.merge(record, %{
+          total: total,
+          allocations: allocations,
+          owner: owner,
+          source: if(ignored, do: record.source, else: snapshot.source),
+          last_turn: last_turn
+        })
+
+      :ok = :dets.insert(table, {key, value})
+      :ok = :dets.sync(table)
+      {:ok, if(restored, do: Map.new(delta, fn {field, _} -> {field, 0} end), else: delta)}
+    end)
+  end
+
+  defp complete_turn(%{source: :canonical, complete: true, turn_id: turn}) when is_binary(turn), do: turn
+  defp complete_turn(_snapshot), do: nil
+
+  # A later subset classification can correct an earlier allocation without
+  # charging parent tokens again. Exact historical attribution may be unknown.
+  defp allocate_usage(allocations, owner, delta, rates) do
+    subsets = [
+      cached_input_tokens: :input_tokens,
+      cache_write_input_tokens: :input_tokens,
+      reasoning_output_tokens: :output_tokens
+    ]
+
+    allocations =
+      Map.put(
+        allocations,
+        owner,
+        priced_usage(
+          Map.get(allocations, owner, empty_usage()),
+          Map.drop(delta, Keyword.keys(subsets)),
+          rates,
+          elem(owner, 2)
+        )
+      )
+
+    owners = [owner | Enum.sort(Map.keys(allocations) -- [owner])]
+
+    Enum.reduce(subsets, allocations, fn {field, parent}, allocations ->
+      {allocations, 0} =
+        Enum.reduce(owners, {allocations, Map.get(delta, field, 0)}, fn key, {allocations, remaining} ->
+          usage = allocations[key]
+          count = min(remaining, usage[parent] - Map.get(usage, field, 0))
+
+          {Map.put(allocations, key, priced_usage(usage, %{field => count}, rates, elem(key, 2))), remaining - count}
+        end)
+
+      allocations
+    end)
+  end
+
+  @doc "Stores credential-free provenance and preserves links to all owners of a resumed thread."
+  @spec thread_context(handle(), term(), map()) :: :ok | {:error, term()}
+  def thread_context(table, thread, context) do
+    checked_write(table, fn ->
+      previous = lookup(table, {:thread_context, thread}, %{})
+      runs = MapSet.put(previous[:runs] || MapSet.new(), context[:run_id])
+      :ok = :dets.insert(table, {{:thread_context, thread}, Map.put(context, :runs, runs)})
+      :ok = :dets.sync(table)
+    end)
+  end
+
+  @doc "Retains merge heads and research associations without asserting independent acceptance."
+  @spec record_lineage(handle(), String.t(), term(), map()) :: :ok
+  def record_lineage(nil, _kind, _id, _evidence), do: :ok
+
+  def record_lineage(table, kind, id, evidence) do
+    safe_write(fn ->
+      value = Map.put(evidence, :observed_at, DateTime.to_iso8601(DateTime.utc_now()))
+      :ok = :dets.insert(table, {{:lineage_evidence, kind, id}, value})
+      :ok = :dets.sync(table)
+    end)
+  end
+
+  @doc "Replaces a thread's native cumulative account estimate; null stays unknown."
+  @spec account_usage(handle(), term(), String.t(), map() | nil) :: :ok | {:error, term()}
+  def account_usage(table, thread, thread_id, usage) do
+    checked_write(table, fn ->
+      usage =
+        if is_map(usage) && usage["threadId"] == thread_id && is_integer(usage["estimatedUsageCreditsMicros"]) &&
+             usage["estimatedUsageCreditsMicros"] >= 0,
+           do: usage
+
+      :ok =
+        :dets.insert(
+          table,
+          {{:account_usage, thread}, %{usage: usage, observed_at: DateTime.to_iso8601(DateTime.utc_now())}}
+        )
+
+      :ok = :dets.sync(table)
+    end)
+  end
+
+  @spec checkpoint(handle(), String.t()) :: map() | nil
+  def checkpoint(nil, _item), do: nil
+
+  def checkpoint(table, item) do
+    case lookup(table, {:thread_checkpoint, item}, nil) do
+      %{eligible: true} = value ->
+        usage = lookup(table, {:thread_usage, value[:thread_key]}, nil)
+
+        if is_map(usage) and usage[:total] == value[:usage_watermark],
+          do: value,
+          else: Map.put(value, :eligible, false)
+
+      value when is_map(value) ->
+        value
+
+      _ ->
+        nil
+    end
+  end
+
+  @doc "A checkpoint must be durable and have accounted usage before reuse is eligible."
+  @spec save_checkpoint(handle(), String.t(), map()) :: :ok | {:error, term()}
+  def save_checkpoint(table, item, checkpoint) do
+    checked_write(table, fn ->
+      usage = lookup(table, {:thread_usage, checkpoint[:thread_key]}, nil)
+
+      eligible =
+        checkpoint[:eligible] == true and is_map(usage) and
+          is_binary(checkpoint[:turn_id]) and usage[:last_turn] == checkpoint[:turn_id]
+
+      checkpoint =
+        checkpoint |> Map.put(:usage_watermark, usage && usage.total) |> Map.put(:eligible, eligible)
+
+      :ok = :dets.insert(table, {{:thread_checkpoint, item}, checkpoint})
+      :ok = :dets.sync(table)
+    end)
+  end
+
+  defp checked_write(nil, _operation), do: {:error, :operations_unavailable}
+
+  defp checked_write(_table, operation) do
+    operation.()
+  rescue
+    error -> {:error, {:operations_write_failed, Exception.message(error)}}
+  catch
+    :exit, reason -> {:error, {:operations_write_failed, reason}}
+  end
+
+  defp lookup(table, key, default) do
+    case :dets.lookup(table, key) do
+      [{^key, value}] -> value
+      _ -> default
+    end
+  rescue
+    ArgumentError -> default
+  catch
+    :exit, _ -> default
+  end
+
+  # ponytail: derive aggregates from atomic thread records; add a rebuildable index if reads become costly.
+  defp usage_rows(table) do
+    :dets.foldl(
+      fn
+        {{:usage, run, date, model}, value}, acc -> [{{run, date, model, nil}, value} | acc]
+        {{:thread_usage, _}, %{allocations: allocations}}, acc -> Map.to_list(allocations) ++ acc
+        _, acc -> acc
+      end,
+      [],
+      table
+    )
+  end
+
   @doc "Recorded usage for one run, summed across its dates and models."
   @spec run_usage(handle(), String.t() | nil) :: map()
   def run_usage(nil, _run_id), do: empty_cost()
@@ -149,7 +395,8 @@ defmodule SymphonyElixir.Operations do
 
   def run_usage(table, run_id) do
     table
-    |> :dets.match_object({{:usage, run_id, :_, :_}, :_})
+    |> usage_rows()
+    |> Enum.filter(fn {{run, _, _, _}, _} -> run == run_id end)
     |> Enum.reduce(empty_cost(), fn {_key, value}, acc ->
       %{
         usd_micro: acc.usd_micro + value.usd_micro,
@@ -172,10 +419,28 @@ defmodule SymphonyElixir.Operations do
   def item_usage(_table, nil), do: empty_item_usage()
 
   def item_usage(table, item) do
-    case :dets.lookup(table, {:item_usage, item}) do
-      [{_key, value}] -> value |> Map.delete(:usd_numerator) |> Map.put(:runs, MapSet.size(value.runs))
-      _ -> empty_item_usage()
-    end
+    previous =
+      lookup(table, {:item_usage, item}, %{
+        usd_micro: 0,
+        total_tokens: 0,
+        unpriced_tokens: 0,
+        runs: MapSet.new(),
+        since: nil
+      })
+
+    rows = Enum.filter(usage_rows(table), fn {{_, _, _, owner}, _} -> owner == item end)
+
+    Enum.reduce(rows, Map.delete(previous, :usd_numerator), fn {{run, date, _, _}, value}, acc ->
+      %{
+        acc
+        | usd_micro: acc.usd_micro + value.usd_micro,
+          total_tokens: acc.total_tokens + value.total_tokens,
+          unpriced_tokens: acc.unpriced_tokens + value.unpriced_tokens,
+          runs: MapSet.put(acc.runs, run),
+          since: if(acc.since, do: min(acc.since, date), else: date)
+      }
+    end)
+    |> Map.update!(:runs, &MapSet.size/1)
   rescue
     ArgumentError -> empty_item_usage()
   catch
@@ -187,11 +452,26 @@ defmodule SymphonyElixir.Operations do
 
     previous =
       case :dets.lookup(table, key) do
-        [{^key, value}] -> value
-        _ -> %{usd_micro: 0, usd_numerator: 0, total_tokens: 0, unpriced_tokens: 0, runs: MapSet.new(), since: Date.utc_today() |> Date.to_iso8601()}
+        [{^key, value}] ->
+          value
+
+        _ ->
+          %{
+            usd_micro: 0,
+            usd_numerator: 0,
+            total_tokens: 0,
+            unpriced_tokens: 0,
+            runs: MapSet.new(),
+            since: Date.utc_today() |> Date.to_iso8601()
+          }
       end
 
-    total = max(Map.get(delta, :input_tokens, 0) + Map.get(delta, :output_tokens, 0), Map.get(delta, :total_tokens, 0))
+    total =
+      max(
+        Map.get(delta, :input_tokens, 0) + Map.get(delta, :output_tokens, 0),
+        Map.get(delta, :total_tokens, 0)
+      )
+
     numerator = previous.usd_numerator + (price || 0)
 
     :dets.insert(
@@ -221,25 +501,49 @@ defmodule SymphonyElixir.Operations do
         _ -> empty_usage()
       end
 
+    value = priced_usage(previous, delta, rates, model)
+    :ok = :dets.insert(table, {key, value})
+
+    if value.price_rates,
+      do: value.usd_numerator - Map.get(previous, :usd_numerator, previous.usd_micro * 1_000_000)
+  end
+
+  defp priced_usage(previous, delta, rates, model) do
     input = max(0, Map.get(delta, :input_tokens, 0))
-    cached = min(input, max(0, Map.get(delta, :cached_input_tokens, 0)))
+
+    cached_total =
+      min(
+        previous.input_tokens + input,
+        previous.cached_input_tokens + max(0, Map.get(delta, :cached_input_tokens, 0))
+      )
+
+    cached = cached_total - previous.cached_input_tokens
     output = max(0, Map.get(delta, :output_tokens, 0))
     total = max(input + output, Map.get(delta, :total_tokens, 0))
-    price = price_numerator(rates, model, input, cached, output)
+
+    price_rates =
+      case Map.fetch(previous, :price_rates) do
+        {:ok, recorded} -> recorded
+        :error -> Map.get(rates, model)
+      end
+
+    price = price_numerator(%{model => price_rates}, model, input, cached, output)
     price_total = Map.get(previous, :usd_numerator, previous.usd_micro * 1_000_000) + (price || 0)
 
     value = %{
       input_tokens: previous.input_tokens + input,
-      cached_input_tokens: previous.cached_input_tokens + cached,
+      cached_input_tokens: cached_total,
+      cache_write_input_tokens: Map.get(previous, :cache_write_input_tokens, 0) + max(0, Map.get(delta, :cache_write_input_tokens, 0)),
       output_tokens: previous.output_tokens + output,
+      reasoning_output_tokens: Map.get(previous, :reasoning_output_tokens, 0) + max(0, Map.get(delta, :reasoning_output_tokens, 0)),
       total_tokens: previous.total_tokens + total,
       usd_micro: div(price_total, 1_000_000),
       usd_numerator: price_total,
+      price_rates: price_rates,
       unpriced_tokens: previous.unpriced_tokens + if(is_nil(price), do: total, else: 0)
     }
 
-    :ok = :dets.insert(table, {key, value})
-    price
+    value
   end
 
   @spec event(handle(), String.t(), map()) :: :ok
@@ -290,7 +594,8 @@ defmodule SymphonyElixir.Operations do
     end
   end
 
-  defp pull_transition(table, kind, %{pr_number: number}) when kind in ["pr_opened", "pr_closed", "pr_merged"] do
+  defp pull_transition(table, kind, %{pr_number: number})
+       when kind in ["pr_opened", "pr_closed", "pr_merged"] do
     previous = :dets.lookup(table, {:pull_transition, number})
     :ok = :dets.insert(table, {{:pull_transition, number}, kind})
 
@@ -359,7 +664,11 @@ defmodule SymphonyElixir.Operations do
           _ -> 1
         end
 
-      entry = image |> Map.take([:src, :issue_identifier, :issue_url, :title]) |> Map.put(:at, DateTime.utc_now() |> DateTime.to_iso8601())
+      entry =
+        image
+        |> Map.take([:src, :issue_identifier, :issue_url, :title])
+        |> Map.put(:at, DateTime.utc_now() |> DateTime.to_iso8601())
+
       :ok = :dets.insert(table, [{:image_sequence, sequence}, {{:image, sequence}, entry}])
       :dets.delete(table, {:image, sequence - @image_limit})
     end)
@@ -420,10 +729,9 @@ defmodule SymphonyElixir.Operations do
   def spend_today(table) do
     today = Date.utc_today() |> Date.to_iso8601()
 
-    case :dets.select(table, [{{{:usage, :_, today, :_}, :"$1"}, [], [:"$1"]}]) do
-      values when is_list(values) -> Enum.reduce(values, 0, &(&1.usd_micro + &2))
-      {:error, _reason} -> 0
-    end
+    usage_rows(table)
+    |> Enum.filter(fn {{_, date, _, _}, _} -> date == today end)
+    |> Enum.reduce(0, fn {_, value}, acc -> value.usd_micro + acc end)
   rescue
     ArgumentError -> 0
   catch
@@ -456,7 +764,24 @@ defmodule SymphonyElixir.Operations do
         _ -> 1
       end
 
-    entry = details |> Map.take([:issue_identifier, :issue_url, :pr_number, :pr_url, :summary, :model, :title, :category, :seconds, :usd_micro, :run_id, :item_attempt, :disposition])
+    entry =
+      details
+      |> Map.take([
+        :issue_identifier,
+        :issue_url,
+        :pr_number,
+        :pr_url,
+        :summary,
+        :model,
+        :title,
+        :category,
+        :seconds,
+        :usd_micro,
+        :run_id,
+        :item_attempt,
+        :disposition
+      ])
+
     entry = Map.merge(entry, %{kind: kind, at: DateTime.utc_now() |> DateTime.to_iso8601()})
     records = [{:sequence, sequence}, {{:event, sequence}, entry}]
     :ok = :dets.insert(table, if(key, do: [{key, true} | records], else: records))
@@ -471,6 +796,9 @@ defmodule SymphonyElixir.Operations do
     %{
       status: "unavailable",
       pricing_as_of: @price_date,
+      cost_basis: "api_equivalent_estimate",
+      account_usage: empty_account(),
+      delivery_metrics: empty_delivery_metrics(),
       today: empty_usage(),
       recorded: empty_usage(),
       by_model: [],
@@ -501,18 +829,22 @@ defmodule SymphonyElixir.Operations do
     {recorded, daily, by_model, model_runs, events, spend, samples} =
       :dets.foldl(
         fn
-          {{:task, _run}, task}, {all, day, models, runs, events, spend, samples} ->
-            {all, day, models, runs, events, spend, [{:task, task} | samples]}
+          {{:task, run}, task}, {all, day, models, runs, events, spend, samples} ->
+            {all, day, models, runs, events, spend, [{:task, {run, task}} | samples]}
 
           {{:image, sequence}, image}, {all, day, models, runs, events, spend, samples} ->
             {all, day, models, runs, events, spend, [{:image, sequence, image} | samples]}
 
           {{:usage, run, date, model}, value}, {all, day, models, runs, events, spend, samples} ->
-            models = Map.update(models, model, Map.take(value, Map.keys(empty_usage())), &add_usage(&1, value))
-            runs = Map.update(runs, model, MapSet.new([run]), &MapSet.put(&1, run))
-            spend = Map.update(spend, {date, model}, value.usd_micro, &(&1 + value.usd_micro))
-            day = if date == today, do: add_usage(day, value), else: day
-            {add_usage(all, value), day, models, runs, events, spend, samples}
+            fold_usage(
+              {run, date, model, nil},
+              value,
+              {all, day, models, runs, events, spend, samples},
+              today
+            )
+
+          {{:thread_usage, _}, %{allocations: allocations}}, acc ->
+            Enum.reduce(allocations, acc, fn {key, value}, acc -> fold_usage(key, value, acc, today) end)
 
           {{:event, sequence}, entry}, {all, day, models, runs, events, spend, samples} ->
             {all, day, models, runs, [{sequence, entry} | events], spend, samples}
@@ -528,7 +860,11 @@ defmodule SymphonyElixir.Operations do
       )
 
     ordered_events =
-      events |> Enum.sort_by(fn {sequence, _} -> sequence end) |> Enum.map(fn {_sequence, event} -> Map.put(event, :attribution, if(event[:run_id], do: "recorded", else: "unknown")) end)
+      events
+      |> Enum.sort_by(fn {sequence, _} -> sequence end)
+      |> Enum.map(fn {_sequence, event} ->
+        Map.put(event, :attribution, if(event[:run_id], do: "recorded", else: "unknown"))
+      end)
 
     # Task and image records ride in the samples accumulator, tagged (sample buckets are integers).
     {tasks, samples} = Enum.split_with(samples, &match?({:task, _}, &1))
@@ -537,16 +873,115 @@ defmodule SymphonyElixir.Operations do
     %{
       status: "ok",
       pricing_as_of: @price_date,
+      cost_basis: "api_equivalent_estimate",
+      account_usage: account_snapshot(table),
+      delivery_metrics: delivery_snapshot(table),
       today: daily,
       recorded: recorded,
-      by_model: by_model |> Enum.map(fn {model, usage} -> usage |> Map.put(:model, model) |> Map.put(:runs, model_runs |> Map.fetch!(model) |> MapSet.size()) end) |> Enum.sort_by(& &1.model),
+      by_model:
+        by_model
+        |> Enum.map(fn {model, usage} ->
+          usage |> Map.put(:model, model) |> Map.put(:runs, model_runs |> Map.fetch!(model) |> MapSet.size())
+        end)
+        |> Enum.sort_by(& &1.model),
       activity: ordered_events |> Enum.reverse() |> Enum.take(if(opts[:history], do: @event_limit, else: 100)),
       daily: daily_series(spend, ordered_events),
-      samples: recent_samples(samples, if(opts[:history], do: @sample_retention_buckets, else: @sample_window_buckets)),
+      samples:
+        recent_samples(
+          samples,
+          if(opts[:history], do: @sample_retention_buckets, else: @sample_window_buckets)
+        ),
       median_run_seconds: median_run_seconds(ordered_events),
-      by_task: by_task(Enum.map(tasks, &elem(&1, 1))),
+      by_task: by_task(tasks_with_current_cost(table, tasks)),
       images: recent_images(images)
     }
+  end
+
+  defp tasks_with_current_cost(table, tasks) do
+    costs =
+      Enum.reduce(usage_rows(table), %{}, fn {{run, _, _, _}, value}, acc ->
+        Map.update(acc, run, value.usd_micro, &(&1 + value.usd_micro))
+      end)
+
+    Enum.map(tasks, fn {:task, {run, task}} ->
+      Map.put(task, :usd_micro, Map.get(costs, run, task.usd_micro))
+    end)
+  end
+
+  defp fold_usage({run, date, model, _}, value, {all, day, models, runs, events, spend, samples}, today) do
+    models = Map.update(models, model, add_usage(empty_usage(), value), &add_usage(&1, value))
+    runs = Map.update(runs, model, MapSet.new([run]), &MapSet.put(&1, run))
+    spend = Map.update(spend, {date, model}, value.usd_micro, &(&1 + value.usd_micro))
+    day = if date == today, do: add_usage(day, value), else: day
+    {add_usage(all, value), day, models, runs, events, spend, samples}
+  end
+
+  defp empty_account,
+    do: %{
+      coverage: "incomplete",
+      threads_recorded: 0,
+      threads_observed: 0,
+      threads_covered: 0,
+      estimated_credits_micros: nil,
+      estimated_usd_micros: nil
+    }
+
+  defp account_snapshot(table) do
+    records = :dets.match_object(table, {{:account_usage, :_}, :_})
+    known = for {_, %{usage: usage}} <- records, is_map(usage), do: usage
+    observed = for {{:account_usage, id}, _} <- records, do: id
+    threads = for {{:thread_context, id}, _} <- :dets.match_object(table, {{:thread_context, :_}, :_}), do: id
+    count = length(Enum.uniq(threads ++ observed))
+
+    %{
+      coverage: if(count > 0 and count == length(known), do: "complete", else: "incomplete"),
+      threads_recorded: count,
+      threads_observed: length(records),
+      threads_covered: length(known),
+      estimated_credits_micros: if(known == [], do: nil, else: Enum.sum(Enum.map(known, & &1["estimatedUsageCreditsMicros"]))),
+      estimated_usd_micros: known_usd(known)
+    }
+  end
+
+  defp known_usd([]), do: nil
+
+  defp known_usd(known) do
+    if Enum.all?(known, &(is_integer(&1["estimatedUsageUsdMicros"]) and &1["estimatedUsageUsdMicros"] >= 0)),
+      do: Enum.sum(Enum.map(known, & &1["estimatedUsageUsdMicros"]))
+  end
+
+  defp empty_delivery_metrics,
+    do: %{
+      status: "incomplete_delivery_lineage",
+      accepted_delivery_cost: nil,
+      accepted_delivery_latency: nil,
+      verified_deliveries: nil,
+      runs_recorded: 0,
+      review_heads_recorded: 0,
+      thread_links: 0,
+      helper_usage_coverage: "unknown"
+    }
+
+  defp delivery_snapshot(table) do
+    runs = for {_, run} <- :dets.match_object(table, {{:lineage_run, :_}, :_}), do: run
+    threads = for {_, thread} <- :dets.match_object(table, {{:thread_context, :_}, :_}), do: thread
+    evidence = :dets.match_object(table, {{:lineage_evidence, :_, :_}, :_})
+
+    merges =
+      Enum.count(evidence, fn {key, value} ->
+        elem(key, 1) == "pull_request" and value[:status] == "merged"
+      end)
+
+    research = Enum.count(evidence, fn {key, _} -> elem(key, 1) == "research" end)
+
+    empty_delivery_metrics()
+    |> Map.merge(%{
+      runs_recorded: length(runs),
+      review_heads_recorded: Enum.count(runs, &is_binary(&1[:review_head])),
+      thread_links: Enum.sum(Enum.map(threads, &MapSet.size(&1.runs))),
+      merge_observations: merges,
+      research_associations: research
+    })
   end
 
   # Newest first; ISO 8601 UTC times compare as strings.
@@ -587,7 +1022,9 @@ defmodule SymphonyElixir.Operations do
     samples
     |> Enum.filter(fn {bucket, _sample} -> bucket > newest - window_buckets end)
     |> Enum.sort_by(&elem(&1, 0))
-    |> Enum.map(fn {bucket, sample} -> Map.put(sample, :at, DateTime.from_unix!(bucket * @sample_seconds) |> DateTime.to_iso8601()) end)
+    |> Enum.map(fn {bucket, sample} ->
+      Map.put(sample, :at, DateTime.from_unix!(bucket * @sample_seconds) |> DateTime.to_iso8601())
+    end)
   end
 
   @finish_kinds ["completed", "failed", "stopped", "interrupted"]
@@ -609,18 +1046,21 @@ defmodule SymphonyElixir.Operations do
     end
   end
 
-  defp pair_event("dispatch", identifier, at, {durations, open}, _cutoff), do: {durations, Map.put(open, identifier, at)}
+  defp pair_event("dispatch", identifier, at, {durations, open}, _cutoff),
+    do: {durations, Map.put(open, identifier, at)}
 
   defp pair_event(kind, identifier, at, {durations, open}, cutoff)
        when kind in @finish_kinds and is_map_key(open, identifier) do
     seconds = DateTime.diff(at, Map.fetch!(open, identifier))
     recent? = DateTime.compare(at, cutoff) == :gt
+
     {if(recent?, do: add_duration(durations, identifier, seconds), else: durations), Map.delete(open, identifier)}
   end
 
   defp pair_event(_kind, _identifier, _at, acc, _cutoff), do: acc
 
-  defp add_duration(durations, identifier, seconds), do: Map.update(durations, item_kind(identifier), [seconds], &[seconds | &1])
+  defp add_duration(durations, identifier, seconds),
+    do: Map.update(durations, item_kind(identifier), [seconds], &[seconds | &1])
 
   defp item_kind("PR-" <> _), do: "pull_request"
   defp item_kind("research" <> _), do: "research"
@@ -701,11 +1141,26 @@ defmodule SymphonyElixir.Operations do
       )
 
     Enum.each(active, fn {id, run} ->
-      finish_run(table, id, "interrupted", Map.put(run, :summary, "Worker interrupted by a Crescendo restart"))
+      finish_run(
+        table,
+        id,
+        "interrupted",
+        Map.put(run, :summary, "Worker interrupted by a Crescendo restart")
+      )
     end)
   end
 
-  defp empty_usage, do: %{input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, total_tokens: 0, usd_micro: 0, unpriced_tokens: 0}
+  defp empty_usage,
+    do: %{
+      input_tokens: 0,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 0,
+      reasoning_output_tokens: 0,
+      total_tokens: 0,
+      usd_micro: 0,
+      unpriced_tokens: 0
+    }
 
   defp add_usage(left, right) do
     Map.new(left, fn {key, value} -> {key, value + Map.get(right, key, 0)} end)

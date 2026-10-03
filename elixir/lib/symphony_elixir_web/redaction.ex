@@ -64,6 +64,7 @@ defmodule SymphonyElixirWeb.Redaction do
       workspace_path: nil,
       session_id: nil,
       run_id: nil,
+      codex_provenance: %{},
       last_message: nil,
       recent_events: [],
       pull_request: nil,

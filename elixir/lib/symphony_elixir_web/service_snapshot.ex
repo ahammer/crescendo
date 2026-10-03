@@ -50,7 +50,9 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
   end
 
   defp available_slots(%{slots: slots, busy: busy}, _upcomings), do: max(slots - busy, 0)
-  defp available_slots(_governor, upcomings), do: upcomings |> Enum.map(fn {_id, upcoming} -> upcoming.available_slots || 0 end) |> Enum.sum()
+
+  defp available_slots(_governor, upcomings),
+    do: upcomings |> Enum.map(fn {_id, upcoming} -> upcoming.available_slots || 0 end) |> Enum.sum()
 
   defp interleave(lists) do
     case Enum.reject(lists, &(&1 == [])) do
@@ -63,8 +65,14 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
   # `project/channel`, backlogs add up, and the soonest next round shows.
   defp autopilot(snapshots) do
     autopilots = for {id, snapshot} <- snapshots, autopilot = snapshot[:autopilot], do: {id, autopilot}
-    named = fn key -> for {id, autopilot} <- autopilots, channel <- Map.get(autopilot, key) || [], do: "#{id}/#{channel}" end
-    total = fn key -> autopilots |> Enum.map(fn {_id, autopilot} -> Map.get(autopilot, key) || 0 end) |> Enum.sum() end
+
+    named = fn key ->
+      for {id, autopilot} <- autopilots, channel <- Map.get(autopilot, key) || [], do: "#{id}/#{channel}"
+    end
+
+    total = fn key ->
+      autopilots |> Enum.map(fn {_id, autopilot} -> Map.get(autopilot, key) || 0 end) |> Enum.sum()
+    end
 
     %{
       enabled: Enum.any?(autopilots, fn {_id, autopilot} -> autopilot[:enabled] == true end),
@@ -75,7 +83,12 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
       max_open_issues: total.(:max_open_issues),
       research_finished_at: nil,
       next_research_at: autopilots |> Enum.map(fn {_id, autopilot} -> autopilot[:next_research_at] end) |> oldest(),
-      tasks: for({id, autopilot} <- autopilots, task <- Map.get(autopilot, :tasks) || [], do: Map.put(task, :project, id)),
+      tasks:
+        for(
+          {id, autopilot} <- autopilots,
+          task <- Map.get(autopilot, :tasks) || [],
+          do: Map.put(task, :project, id)
+        ),
       repos: for({id, autopilot} <- autopilots, repo = autopilot[:repo], into: %{}, do: {id, repo})
     }
   end
@@ -102,7 +115,9 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
   end
 
   # The Governor's policy plus the service's slot use.
-  defp throttle(%{throttle: throttle, slots: slots, busy: busy}), do: Map.merge(throttle, %{service_slots: slots, busy: busy})
+  defp throttle(%{throttle: throttle, slots: slots, busy: busy}),
+    do: Map.merge(throttle, %{service_slots: slots, busy: busy})
+
   defp throttle(_governor), do: nil
 
   defp newest_quota(snapshots) do
@@ -119,6 +134,9 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
     %{
       status: if(all != [] and Enum.all?(all, &(&1.status == "ok")), do: "ok", else: "unavailable"),
       pricing_as_of: all |> Enum.map(& &1[:pricing_as_of]) |> Enum.find(& &1),
+      cost_basis: "api_equivalent_estimate",
+      account_usage: account_usage(all),
+      delivery_metrics: delivery_metrics(all),
       today: all |> Enum.map(&(&1[:today] || %{})) |> sum(),
       recorded: all |> Enum.map(&(&1[:recorded] || %{})) |> sum(),
       by_model: by_model(all),
@@ -130,6 +148,55 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
       images: images(ops),
       by_project: Enum.map(ops, fn {id, operations} -> project_spend(id, operations) end)
     }
+  end
+
+  defp account_usage(all) do
+    records = Enum.map(all, &Map.get(&1, :account_usage, %{}))
+    counts = sum(Enum.map(records, &Map.take(&1, [:threads_recorded, :threads_observed, :threads_covered])))
+
+    Map.merge(%{threads_recorded: 0, threads_observed: 0, threads_covered: 0}, counts)
+    |> Map.put(
+      :coverage,
+      if(records != [] and Enum.all?(records, &(&1[:coverage] == "complete")),
+        do: "complete",
+        else: "incomplete"
+      )
+    )
+    |> Map.put(:estimated_credits_micros, known_sum(records, :estimated_credits_micros))
+    |> Map.put(:estimated_usd_micros, known_sum(records, :estimated_usd_micros))
+  end
+
+  defp known_sum(records, field) do
+    known =
+      Enum.flat_map(records, fn record -> if is_integer(record[field]), do: [record[field]], else: [] end)
+
+    if known != [], do: Enum.sum(known)
+  end
+
+  defp delivery_metrics(all) do
+    counts =
+      all
+      |> Enum.map(
+        &Map.take(Map.get(&1, :delivery_metrics, %{}), [
+          :runs_recorded,
+          :review_heads_recorded,
+          :thread_links,
+          :merge_observations,
+          :research_associations
+        ])
+      )
+      |> sum()
+
+    Map.merge(
+      %{
+        status: "incomplete_delivery_lineage",
+        accepted_delivery_cost: nil,
+        accepted_delivery_latency: nil,
+        verified_deliveries: nil,
+        helper_usage_coverage: "unknown"
+      },
+      counts
+    )
   end
 
   defp by_model(all) do
@@ -150,7 +217,9 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
 
   defp images(ops) do
     ops
-    |> Enum.flat_map(fn {id, operations} -> Enum.map(operations[:images] || [], &Map.put(&1, :project, id)) end)
+    |> Enum.flat_map(fn {id, operations} ->
+      Enum.map(operations[:images] || [], &Map.put(&1, :project, id))
+    end)
     |> Enum.sort_by(&to_string(&1[:at]), :desc)
     |> Enum.take(120)
   end
@@ -158,7 +227,9 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
   defp activity(ops, opts) do
     events =
       ops
-      |> Enum.flat_map(fn {id, operations} -> Enum.map(operations[:activity] || [], &Map.put(&1, :project, id)) end)
+      |> Enum.flat_map(fn {id, operations} ->
+        Enum.map(operations[:activity] || [], &Map.put(&1, :project, id))
+      end)
       |> Enum.sort_by(&to_string(&1[:at]), :desc)
 
     if opts[:history], do: events, else: Enum.take(events, 100)
@@ -168,7 +239,9 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
     all
     |> Enum.flat_map(&(&1[:daily] || []))
     |> Enum.group_by(& &1.date)
-    |> Enum.map(fn {_date, days} -> %{sum(days) | spend_by_model: days |> Enum.map(& &1.spend_by_model) |> sum()} end)
+    |> Enum.map(fn {_date, days} ->
+      %{sum(days) | spend_by_model: days |> Enum.map(& &1.spend_by_model) |> sum()}
+    end)
     |> Enum.sort_by(& &1.date)
   end
 

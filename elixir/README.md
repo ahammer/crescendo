@@ -110,6 +110,32 @@ chmod +x ./symphony-v0.0.1-macos_arm64
 
 ## Configuration
 
+Token accounting keeps one durable watermark and run allocations per native thread. Canonical
+usage takes precedence over legacy notifications; input plus output determines spend tokens,
+while cached input, cache writes, reasoning output and reported context figures remain separate.
+The dashboard labels USD as an API-equivalent estimate. `usage.account_usage` reports native
+estimate coverage; missing account billing, independent acceptance evidence and helper usage stay
+unknown in `usage.delivery_metrics`.
+
+Two optional per-project settings support the [token-cache plan](docs/token_cache_optimization_plan.md):
+`codex.resume_threads: false` and `codex.developer_instructions: null`. Their defaults preserve fresh
+worker threads and existing instruction channels. Only local issue work within one logical attempt
+can resume after an accounted, successful native turn; research and reviews always start fresh.
+Changed task contracts, files, tools, policies, routes, storage, dates or native versions force a
+fresh thread. Persistence failures prevent reuse. The supported schemas were checked for Codex
+0.156.1 and 0.160.0; native wire/resume probes used 0.160.0 with fake credentials and a loopback
+provider. SSH resumption remains disabled until remote checkout identity can be verified.
+
+`developer_instructions` appends explicitly reviewed service-owned rules to existing configured
+developer instructions. It preserves native base instructions. Do not move repository guidelines
+or work-item content into this channel. No provider cache-key or boundary override is exposed.
+Neither control is enabled by this deployment: deployed ChatGPT request traces, complete delivery
+lineage and billing reconciliation are still needed before a live savings experiment.
+
+New project templates include disabled defaults. Existing local workflows require a separate
+reviewed migration; updating the generator does not change them. Controls are captured when a
+worker starts so a workflow reload cannot change reuse behavior halfway through its run.
+
 Pass a custom workflow file path to `./bin/crescendo` when starting the service:
 
 ```bash

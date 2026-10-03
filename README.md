@@ -18,6 +18,9 @@ implements its [specification](SPEC.md). On top of the Symphony reference implem
   configurable channel.
 - **A read-only dashboard** across projects, with a filter per project and a
   [bounded history API](docs/crescendo.md#dashboard-and-api) for retrospectives.
+- **Thread usage accounting** that survives worker restarts, with native billing coverage and
+  conservative, opt-in issue-thread resumption. API estimates remain distinct from verified costs.
+  See the [token-cache plan and rollout gates](elixir/docs/token_cache_optimization_plan.md).
 
 All configuration is local: [docs/crescendo.md](docs/crescendo.md) covers the service file, and
 [elixir/README.md](elixir/README.md) covers setup and the per-project `WORKFLOW.md`.

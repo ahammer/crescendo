@@ -40,7 +40,7 @@ defmodule SymphonyElixir.AgentRunner do
 
     case Workspace.create_for_issue(issue, worker_host) do
       {:ok, workspace} ->
-        send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
+        send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace, opts)
 
         try do
           with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
@@ -63,59 +63,95 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_worker_phase(_recipient, _issue, _phase), do: :ok
 
-  defp codex_message_handler(recipient, issue) do
+  defp codex_message_handler(recipient, issue, opts) do
     fn message ->
-      send_codex_update(recipient, issue, message)
+      send_worker_message(recipient, issue, :codex_worker_update, message, opts)
     end
   end
 
-  defp send_codex_update(recipient, %Issue{id: issue_id}, message)
+  defp send_worker_message(recipient, %Issue{id: issue_id}, type, message, opts)
        when is_binary(issue_id) and is_pid(recipient) do
-    send(recipient, {:codex_worker_update, issue_id, message})
+    case Keyword.get(opts, :run_id) do
+      nil -> send(recipient, {type, issue_id, message})
+      run_id -> send(recipient, {type, issue_id, run_id, message})
+    end
+
     :ok
   end
 
-  defp send_codex_update(_recipient, _issue, _message), do: :ok
+  defp send_worker_message(_recipient, _issue, _type, _message, _opts), do: :ok
 
-  defp send_worker_runtime_info(recipient, %Issue{id: issue_id}, worker_host, workspace)
-       when is_binary(issue_id) and is_pid(recipient) and is_binary(workspace) do
-    send(
+  defp send_worker_runtime_info(recipient, issue, worker_host, workspace, opts) do
+    send_worker_message(
       recipient,
-      {:worker_runtime_info, issue_id,
-       %{
-         worker_host: worker_host,
-         workspace_path: workspace
-       }}
+      issue,
+      :worker_runtime_info,
+      %{worker_host: worker_host, workspace_path: workspace},
+      opts
     )
-
-    :ok
   end
-
-  defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     send_worker_phase(codex_update_recipient, issue, :codex)
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
 
-    session_opts = [worker_host: worker_host, work_item: issue.identifier]
+    codex = Keyword.get(opts, :codex_settings, Config.settings!().codex)
+    prompt = PromptBuilder.build_prompt(issue, opts)
+    opts = Keyword.merge(opts, initial_prompt: prompt, codex_settings: codex)
+    on_message = codex_message_handler(codex_update_recipient, issue, opts)
+
+    session_opts = [
+      worker_host: worker_host,
+      work_item: issue.identifier,
+      kind: issue.kind,
+      codex_settings: codex,
+      checkpoint: Keyword.get(opts, :checkpoint),
+      contract_hash: contract_hash(issue, opts),
+      on_message: on_message
+    ]
 
     with {:ok, route} <- model_route(issue, opts),
          :ok <- log_route(issue, route),
-         :ok <- send_model_route(codex_update_recipient, issue, route),
+         :ok <- send_worker_message(codex_update_recipient, issue, :worker_model_route, route, opts),
          {:ok, session} <- AppServer.start_session(workspace, [model_route: route] ++ session_opts) do
       try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        do_run_codex_turns(
+          session,
+          workspace,
+          issue,
+          codex_update_recipient,
+          Keyword.put(opts, :resumed, session.resumed),
+          issue_state_fetcher,
+          1,
+          max_turns
+        )
       after
-        AppServer.stop_session(session)
+        try do
+          AppServer.read_account_usage(session, on_message: on_message)
+        after
+          AppServer.stop_session(session)
+        end
       end
     end
+  end
+
+  defp contract_hash(issue, opts) do
+    # Transport retry counters and tracker timestamps are not the task contract.
+    # Template/source changes, task content, routing labels and bindings are.
+    contract =
+      {SymphonyElixir.Workflow.current(), Config.settings!().tracker, Map.take(Map.from_struct(issue), [:id, :identifier, :title, :description, :labels, :kind, :branch_name]),
+       Keyword.get(opts, :item_attempt, 1), Keyword.get(opts, :final_attempt, false)}
+
+    :crypto.hash(:sha256, :erlang.term_to_binary(contract)) |> Base.encode16(case: :lower)
   end
 
   # The orchestrator selects the route at dispatch (with quota back-off);
   # direct callers get the plain label route.
   defp model_route(issue, opts) do
-    case Keyword.get_lazy(opts, :model_route, fn -> select_route(issue, Keyword.get(opts, :item_attempt, 1)) end) do
+    case Keyword.get_lazy(opts, :model_route, fn ->
+           select_route(issue, Keyword.get(opts, :item_attempt, 1))
+         end) do
       {:wait, reason} -> {:error, {:model_route_waiting, reason}}
       result -> result
     end
@@ -123,34 +159,47 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp select_route(issue, item_attempt) do
     settings = Config.settings!()
-    fixed_routes = %{research: settings.autopilot.research_route, pull_request: settings.autopilot.review_route}
+
+    fixed_routes = %{
+      research: settings.autopilot.research_route,
+      pull_request: settings.autopilot.review_route
+    }
+
     ModelRouting.select_for_run(settings.codex.routing, fixed_routes, issue, item_attempt)
   end
 
   defp log_route(_issue, nil), do: :ok
 
   defp log_route(issue, route) do
-    backoff = if route["backoff"], do: " backed_off_from=#{route["backoff"]["from"]} reason=#{route["backoff"]["reason"]}", else: ""
+    backoff =
+      if route["backoff"],
+        do: " backed_off_from=#{route["backoff"]["from"]} reason=#{route["backoff"]["reason"]}",
+        else: ""
+
     Logger.info("Selected model route for #{issue_context(issue)} label=#{route["label"]} model=#{route["model"]} effort=#{route["effort"]} tier=#{route["tier"] || "none"}#{backoff}")
   end
 
-  defp send_model_route(recipient, %Issue{id: issue_id}, route) when is_pid(recipient) do
-    send(recipient, {:worker_model_route, issue_id, route})
-    :ok
-  end
-
-  defp send_model_route(_recipient, _issue, _route), do: :ok
-
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+  defp do_run_codex_turns(
+         app_session,
+         workspace,
+         issue,
+         codex_update_recipient,
+         opts,
+         issue_state_fetcher,
+         turn_number,
+         max_turns
+       ) do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
 
-    with {:ok, turn_session} <-
+    with :ok <- persist_checkpoint(app_session, issue, codex_update_recipient, opts, %{eligible: false}),
+         {:ok, turn_session} <-
            AppServer.run_turn(
              app_session,
              prompt,
              issue,
-             on_message: codex_message_handler(codex_update_recipient, issue)
-           ) do
+             on_message: codex_message_handler(codex_update_recipient, issue, opts)
+           ),
+         :ok <- persist_completed_checkpoint(app_session, turn_session, issue, codex_update_recipient, opts) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
       case continue_with_issue?(issue, issue_state_fetcher) do
@@ -182,9 +231,17 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
+  defp build_turn_prompt(issue, opts, 1, max_turns) do
+    if Keyword.get(opts, :resumed, false),
+      do: continuation_prompt(1, max_turns),
+      else: Keyword.get_lazy(opts, :initial_prompt, fn -> PromptBuilder.build_prompt(issue, opts) end)
+  end
 
   defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
+    continuation_prompt(turn_number, max_turns)
+  end
+
+  defp continuation_prompt(turn_number, max_turns) do
     """
     Continuation guidance:
 
@@ -196,9 +253,44 @@ defmodule SymphonyElixir.AgentRunner do
     """
   end
 
+  defp persist_completed_checkpoint(session, turn, issue, recipient, opts) do
+    checkpoint =
+      if Keyword.fetch!(opts, :codex_settings).resume_threads and issue.kind == :issue,
+        do:
+          AppServer.checkpoint(
+            session,
+            turn,
+            Keyword.put(opts, :on_message, codex_message_handler(recipient, issue, opts))
+          )
+
+    persist_checkpoint(session, issue, recipient, opts, checkpoint || %{eligible: false})
+  end
+
+  defp persist_checkpoint(session, issue, recipient, opts, checkpoint) do
+    if Keyword.fetch!(opts, :codex_settings).resume_threads and issue.kind == :issue do
+      run_id = Keyword.get(opts, :run_id)
+
+      if is_pid(recipient) and is_binary(run_id) do
+        checkpoint =
+          Map.merge(checkpoint, %{
+            run_id: run_id,
+            thread_id: session.thread_id,
+            thread_key: session.metadata.thread_key
+          })
+
+        GenServer.call(recipient, {:thread_checkpoint, issue.id, run_id, checkpoint})
+      else
+        {:error, :checkpoint_owner_unavailable}
+      end
+    else
+      :ok
+    end
+  end
+
   # Pull request reviews and research runs are single passes; only tracker
   # issues continue while they stay active.
-  defp continue_with_issue?(%Issue{kind: kind} = issue, _issue_state_fetcher) when kind != :issue, do: {:done, issue}
+  defp continue_with_issue?(%Issue{kind: kind} = issue, _issue_state_fetcher) when kind != :issue,
+    do: {:done, issue}
 
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do

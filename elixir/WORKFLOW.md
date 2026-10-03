@@ -31,6 +31,9 @@ agent:
   max_concurrent_agents: 10
   max_turns: 20
 codex:
+  # Reuse controls are opt-in; enable only after the token-cache verification gates pass.
+  resume_threads: false
+  developer_instructions: null
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   # Optional: routing selects model and effort from explicit issue labels. See README.md.
   approval_policy: never

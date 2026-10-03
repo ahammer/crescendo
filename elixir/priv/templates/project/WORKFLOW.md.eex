@@ -30,6 +30,10 @@ agent:
   max_turns: 20
   max_attempts: 3
 codex:
+  # Generated defaults do not migrate existing project workflows.
+  # Enable reuse only after the token-cache verification gates pass.
+  resume_threads: false
+  developer_instructions: null
   # Toolchains the project needs go in front of codex, e.g. `mise exec java@21 -- codex ...`,
   # so the agent and everything it runs have them on PATH.
   command: <%= @codex_command %>

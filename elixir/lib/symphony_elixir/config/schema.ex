@@ -186,6 +186,8 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:command, :string, default: "codex app-server")
+      field(:developer_instructions, :string)
+      field(:resume_threads, :boolean, default: false)
       field(:routing, :map)
 
       field(:approval_policy, StringOrMap,
@@ -212,6 +214,8 @@ defmodule SymphonyElixir.Config.Schema do
         attrs,
         [
           :command,
+          :developer_instructions,
+          :resume_threads,
           :routing,
           :approval_policy,
           :thread_sandbox,

@@ -248,7 +248,7 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
         *'"method":"thread/start"'*) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-deadline"}}}' ;;
         *'"method":"turn/start"'*)
           printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-deadline"}}}'
-          if [ '#{mode}' = complete ]; then printf '%s\\n' '{"method":"turn/completed"}'; fi ;;
+          if [ '#{mode}' = complete ]; then printf '%s\\n' '{"method":"turn/completed","params":{"turn":{"status":"completed"}}}'; fi ;;
       esac
     done
     """)

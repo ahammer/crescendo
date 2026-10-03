@@ -113,7 +113,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             title="Runs that finished normally, of all finished runs, over 14 days"
           />
           <.stat
-            label="Spend today"
+            label="API estimate today"
             value={if @payload.usage.status == "ok", do: format_usd(@payload.usage.today[:usd_micro]), else: "n/a"}
             detail={budget_detail(@payload)}
             values={@payload.history.spend_micro}
@@ -409,7 +409,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <div><dt>14 days</dt><dd class="numeric"><%= format_usd(@total) %></dd></div>
         <div title="Average over days with spend"><dt>Per day</dt><dd class="numeric"><%= per(@total, @active) %></dd></div>
         <div title="Spend per finished run"><dt>Per run</dt><dd class="numeric"><%= per(@total, @stats.total) %></dd></div>
-        <div title="Spend per merged pull request"><dt>Per merge</dt><dd class="numeric"><%= per(@total, @stats.merged) %></dd></div>
+        <div title="API-equivalent spend divided by observed merges; accepted-delivery cost is not verified"><dt>Per observed merge</dt><dd class="numeric"><%= per(@total, @stats.merged) %></dd></div>
       </dl>
       <p :if={@usage.status != "ok"} class="error-copy">History unavailable<%= if @usage_error do %>: <%= @usage_error %><% end %>.</p>
       <Charts.columns id="spend-chart" title="Estimated worker spend per day by model, last 14 days" series={spend_series(@usage)} columns={spend_columns(@usage)} format={&format_usd_axis/1} />
@@ -521,8 +521,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp budget_alert_title(payload) do
     if over_budget?(payload),
-      do: "Worker usage alert: estimated worker usage today (UTC) passed the daily budget. Planning and independent review usage are not included.",
-      else: "Estimated worker usage today (UTC). Planning and independent review usage are not included."
+      do: "API-equivalent worker usage today (UTC) passed the daily budget. Account billing and accepted-delivery cost are unverified.",
+      else: "API-equivalent worker usage today (UTC). Account billing and accepted-delivery cost are unverified."
   end
 
   defp section_count(payload, "timeline"), do: payload.counts.ready

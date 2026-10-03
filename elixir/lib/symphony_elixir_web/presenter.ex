@@ -294,6 +294,7 @@ defmodule SymphonyElixirWeb.Presenter do
       turn_count: Map.get(entry, :turn_count, 0),
       model: Map.get(entry, :model),
       route: Map.get(entry, :route),
+      codex_provenance: Map.get(entry, :codex_provenance, %{}),
       title: Map.get(entry, :title),
       labels: Map.get(entry, :labels, []),
       kind: Map.get(entry, :kind, :issue),
@@ -311,6 +312,10 @@ defmodule SymphonyElixirWeb.Presenter do
       tokens: %{
         input_tokens: entry.codex_input_tokens,
         cached_input_tokens: Map.get(entry, :codex_cached_input_tokens, 0),
+        cache_write_input_tokens: Map.get(entry, :codex_cache_write_input_tokens, 0),
+        reasoning_output_tokens: Map.get(entry, :codex_reasoning_output_tokens, 0),
+        reported_total_tokens: Map.get(entry, :codex_reported_total_tokens),
+        model_context_window: Map.get(entry, :codex_model_context_window),
         output_tokens: entry.codex_output_tokens,
         total_tokens: entry.codex_total_tokens
       }

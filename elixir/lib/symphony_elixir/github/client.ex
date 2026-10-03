@@ -156,8 +156,7 @@ defmodule SymphonyElixir.GitHub.Client do
   Counts the issues and pull requests carrying `label` that were opened at or
   after `since`: what an autopilot task run delivered.
   """
-  @spec fetch_task_deliveries(String.t(), DateTime.t(), keyword()) ::
-          {:ok, %{issues: non_neg_integer(), pull_requests: non_neg_integer()}} | {:error, term()}
+  @spec fetch_task_deliveries(String.t(), DateTime.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def fetch_task_deliveries(label, %DateTime{} = since, opts \\ []) do
     tracker_settings = Keyword.get_lazy(opts, :tracker_settings, fn -> Config.settings!().tracker end)
     request_fun = Keyword.get(opts, :request_fun, &perform_request/5)
@@ -167,11 +166,16 @@ defmodule SymphonyElixir.GitHub.Client do
          {:ok, items} when is_list(items) <- request_with_settings("GET", "/repos/#{encoded_repo(settings.repo)}/issues", params, nil, settings, request_fun, false) do
       opened = Enum.filter(items, &opened_since?(&1, since))
       {prs, issues} = Enum.split_with(opened, &Map.has_key?(&1, "pull_request"))
-      {:ok, %{issues: length(issues), pull_requests: length(prs)}}
+      outputs = Enum.map(opened, &research_output/1)
+      {:ok, %{issues: length(issues), pull_requests: length(prs), outputs: outputs, association: "channel_label_and_creation_window"}}
     else
       {:ok, _payload} -> {:error, :github_unknown_payload}
       error -> error
     end
+  end
+
+  defp research_output(item) do
+    %{number: item["number"], url: item["html_url"], created_at: item["created_at"], kind: if(item["pull_request"], do: "pull_request", else: "issue")}
   end
 
   defp opened_since?(%{"created_at" => created_at}, since) do
@@ -194,6 +198,28 @@ defmodule SymphonyElixir.GitHub.Client do
          {:ok, payload} <- request_with_settings("GET", "/repos/#{encoded_repo(settings.repo)}/pulls/#{number}", %{}, nil, settings, &perform_request/5, false),
          true <- is_map(payload) or {:error, :github_unknown_payload} do
       {:ok, if(payload["merged_at"], do: "merged", else: payload["state"] || "unknown")}
+    end
+  end
+
+  @doc "Head and merge evidence observed from GitHub; does not assert review acceptance."
+  @spec fetch_pull_observation(pos_integer(), keyword()) :: {:ok, map()} | {:error, term()}
+  def fetch_pull_observation(number, opts \\ []) do
+    tracker = Keyword.get_lazy(opts, :tracker_settings, fn -> Config.settings!().tracker end)
+    request_fun = Keyword.get(opts, :request_fun, &perform_request/5)
+
+    with {:ok, settings} <- settings(tracker),
+         {:ok, payload} <- request_with_settings("GET", "/repos/#{encoded_repo(settings.repo)}/pulls/#{number}", %{}, nil, settings, request_fun, false),
+         true <- is_map(payload) or {:error, :github_unknown_payload} do
+      {:ok,
+       %{
+         status: if(payload["merged_at"], do: "merged", else: payload["state"] || "unknown"),
+         head_sha: get_in(payload, ["head", "sha"]),
+         merged_at: payload["merged_at"],
+         merge_commit_sha: payload["merge_commit_sha"],
+         author: get_in(payload, ["user", "login"]),
+         pr_number: number,
+         pr_url: payload["html_url"]
+       }}
     end
   end
 

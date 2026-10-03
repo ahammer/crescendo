@@ -201,7 +201,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert is_integer(completed_state.codex_totals.seconds_running)
   end
 
-  test "orchestrator snapshot tracks turn completed usage when present" do
+  test "orchestrator ignores generic turn completion usage" do
     issue_id = "issue-turn-completed-usage"
 
     issue = %Issue{
@@ -265,15 +265,15 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     snapshot = GenServer.call(pid, :snapshot)
     assert %{running: [snapshot_entry]} = snapshot
-    assert snapshot_entry.codex_input_tokens == 12
-    assert snapshot_entry.codex_output_tokens == 4
-    assert snapshot_entry.codex_total_tokens == 16
+    assert snapshot_entry.codex_input_tokens == 0
+    assert snapshot_entry.codex_output_tokens == 0
+    assert snapshot_entry.codex_total_tokens == 0
 
     send(pid, {:DOWN, process_ref, :process, self(), :normal})
     completed_state = :sys.get_state(pid)
-    assert completed_state.codex_totals.input_tokens == 12
-    assert completed_state.codex_totals.output_tokens == 4
-    assert completed_state.codex_totals.total_tokens == 16
+    assert completed_state.codex_totals.input_tokens == 0
+    assert completed_state.codex_totals.output_tokens == 0
+    assert completed_state.codex_totals.total_tokens == 0
   end
 
   test "orchestrator snapshot tracks codex token-count cumulative usage payloads" do

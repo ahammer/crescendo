@@ -202,6 +202,30 @@ So `total_tokens` can reflect context-window normalization behavior, not just a 
 
 For Symphony, `model_context_window` should be displayed or logged separately from spend.
 
+## Crescendo implementation
+
+Crescendo normalizes only event-specific cumulative envelopes through `Codex.Usage`.
+Spend tokens are input plus output; the provider's reported total and context limit
+are separate diagnostics. Native `cacheWriteInputTokens` and reasoning output are
+subsets, not additional parent tokens. Canonical notifications take precedence over
+legacy token-count events for the entire thread.
+
+Operations stores the watermark, observed terminal-turn identity, original price
+rates and every run/date/model allocation together in one scoped DETS thread record.
+Duplicate or lower snapshots add no parent tokens. Late subset classification can
+correct an earlier allocation and its finished-run summary without charging input
+again. Exact historical attribution of that classification can remain uncertain.
+Legacy run aggregates remain readable; they are not imported as new thread charges.
+
+Before resumption, restored usage is reconciled to the previous owner. A reusable
+checkpoint requires durable canonical input/output observations for its confirmed
+successful turn. A claimed, failed, interrupted, unaccounted or incompatible
+checkpoint cannot resume. Native account estimates are cumulative replacements;
+`threadUsage: null` remains unknown. API-equivalent prices, including the existing
+placeholder model rates, are separate from native credits and verified billing;
+cache-write pricing and helper-thread coverage are not reconciled by these estimates.
+See the [token-cache plan](token_cache_optimization_plan.md) for rollout gates.
+
 ## Recommended Accounting Strategy For Symphony
 
 Track usage per active Codex thread.
