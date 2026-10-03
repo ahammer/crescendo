@@ -388,6 +388,10 @@ The `SYMPHONY_*` names are kept for tools that predate the service.
 
 There are no write routes.
 
+Non-object Codex diagnostics remain in the worker's last-message summary. They do not stop the
+project or free its workers: model/turn bookkeeping and optional notification capture validate
+object envelopes and fields, then continue processing later valid notifications.
+
 
 ## Durable outcome facts
 

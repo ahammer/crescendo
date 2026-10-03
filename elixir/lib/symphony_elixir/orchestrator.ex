@@ -2479,7 +2479,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_capture_notification(running_entry, update) do
     with directory when is_binary(directory) and directory != "" <-
            System.get_env("SYMPHONY_NOTIFICATION_CAPTURE_DIR"),
-         method when method in @captured_methods <- get_in(update, [:payload, "method"]) do
+         {method, _params} when method in @captured_methods <- notification_fields(update) do
       file = "#{running_entry.identifier}-#{Map.get(running_entry, :run_id) || "run"}.jsonl"
       Transcript.capture(update, Path.join(directory, file))
     else
@@ -3127,10 +3127,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp pull_request_admission_reason(_issue), do: nil
 
   defp maybe_record_turn_event(table, entry, update) do
-    payload = Map.get(update, :payload) || %{}
-    method = Map.get(payload, "method") || Map.get(payload, :method)
+    {method, params} = notification_fields(update)
 
-    status = get_in(payload, ["params", "turn", "status"])
+    status =
+      case params do
+        %{"turn" => %{"status" => status}} -> status
+        _ -> nil
+      end
 
     if update[:event] == :turn_completed or (method == "turn/completed" and status == "completed") do
       Operations.event(table, "turn_completed", %{
@@ -3156,15 +3159,25 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp model_for_update(existing, update) do
-    payload = Map.get(update, :payload) || %{}
-    params = Map.get(payload, "params") || Map.get(payload, :params) || %{}
+    case notification_fields(update) do
+      {"model/rerouted", params} when is_map(params) ->
+        case Map.get(params, "toModel") || Map.get(params, :toModel) do
+          model when is_binary(model) -> model
+          _ -> existing
+        end
 
-    if (Map.get(payload, "method") || Map.get(payload, :method)) == "model/rerouted" do
-      Map.get(params, "toModel") || Map.get(params, :toModel) || existing
-    else
-      update[:model] || existing
+      _ ->
+        update[:model] || existing
     end
   end
+
+  defp notification_fields(%{payload: payload}) when is_map(payload) do
+    method = Map.get(payload, "method") || Map.get(payload, :method)
+    params = Map.get(payload, "params") || Map.get(payload, :params)
+    {method, params}
+  end
+
+  defp notification_fields(_update), do: {nil, nil}
 
   defp safe_pull_error({:github_api_status, status}) when is_integer(status), do: "GitHub HTTP #{status}"
   defp safe_pull_error(_), do: "GitHub fetch failed"

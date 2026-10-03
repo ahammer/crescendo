@@ -102,6 +102,67 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            }
   end
 
+  test "non-object Codex messages preserve the worker and allow subsequent accounting" do
+    issue = %Issue{id: "non-object", identifier: "MT-189", title: "Protocol recovery", state: "In Progress"}
+    capture_dir = Path.join(System.tmp_dir!(), "codex-capture-#{System.unique_integer([:positive])}")
+
+    pid =
+      start_supervised!({Orchestrator, name: __MODULE__.NonObjectMessages, operations_path: Path.join(capture_dir, "operations.dets"), operations_table: :non_object_codex_test})
+
+    previous_capture_dir = System.get_env("SYMPHONY_NOTIFICATION_CAPTURE_DIR")
+    System.put_env("SYMPHONY_NOTIFICATION_CAPTURE_DIR", capture_dir)
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_NOTIFICATION_CAPTURE_DIR", previous_capture_dir)
+      File.rm_rf!(capture_dir)
+    end)
+
+    entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      started_at: DateTime.utc_now(),
+      model: "gpt-6.1-sol"
+    }
+
+    :sys.replace_state(pid, &%{&1 | running: %{issue.id => entry}})
+
+    update = fn payload ->
+      send(pid, {:codex_worker_update, issue.id, %{event: :notification, timestamp: DateTime.utc_now(), payload: payload}})
+      GenServer.call(pid, :snapshot)
+    end
+
+    for payload <- ["{manifest}\n[dependencies]\nengine = {{ path = '../../crates/engine' }}\n", [], 42, true, nil] do
+      assert %{running: [worker], codex_totals: %{total_tokens: 0}} = update.(payload)
+      assert worker.model == "gpt-6.1-sol"
+      assert worker.last_codex_message.message == payload
+    end
+
+    for params <- ["bad", [], %{}, %{"turn" => "bad"}, %{"toModel" => 42}, %{"toModel" => %{}}] do
+      assert %{running: [%{model: "gpt-6.1-sol"}]} = update.(%{"method" => "model/rerouted", "params" => params})
+    end
+
+    assert %{running: [%{model: "gpt-6-sol"}]} =
+             update.(%{"method" => "model/rerouted", "params" => %{"toModel" => "gpt-6-sol"}})
+
+    assert %{running: [%{model: "gpt-6.1-sol"}]} =
+             update.(%{method: "model/rerouted", params: %{toModel: "gpt-6.1-sol"}})
+
+    assert %{codex_totals: %{total_tokens: 120}} =
+             update.(%{"method" => "thread/tokenUsage/updated", "params" => %{"tokenUsage" => %{"total" => %{"inputTokens" => 100, "outputTokens" => 20}}}})
+
+    for params <- ["bad", %{"turn" => "bad"}, %{"turn" => %{"status" => "failed"}}] do
+      snapshot = update.(%{"method" => "turn/completed", "params" => params})
+      refute Enum.any?(snapshot.operations.activity, &(&1.kind == "turn_completed"))
+    end
+
+    snapshot = update.(%{"method" => "turn/completed", "params" => %{"turn" => %{"status" => "completed"}}})
+    assert [%{issue_identifier: "MT-189", model: "gpt-6.1-sol"}] = Enum.filter(snapshot.operations.activity, &(&1.kind == "turn_completed"))
+    assert File.read!(Path.join(capture_dir, "MT-189-run.jsonl")) =~ "turn/completed"
+  end
+
   test "orchestrator snapshot tracks codex thread totals and app-server pid" do
     issue_id = "issue-usage-snapshot"
 
