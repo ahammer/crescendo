@@ -5,7 +5,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, ModelRouting, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, Governor, ModelRouting, Project, PromptBuilder, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @type worker_host :: String.t() | nil
@@ -28,6 +28,9 @@ defmodule SymphonyElixir.AgentRunner do
     case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
       :ok ->
         :ok
+
+      {:yield, :deployment_drain} ->
+        exit({:shutdown, :deployment_drain})
 
       {:error, reason} ->
         Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
@@ -202,7 +205,11 @@ defmodule SymphonyElixir.AgentRunner do
          :ok <- persist_completed_checkpoint(app_session, turn_session, issue, codex_update_recipient, opts) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
-      case continue_with_issue?(issue, issue_state_fetcher) do
+      case continuation_at_boundary(issue, issue_state_fetcher) do
+        {:yield, refreshed_issue} ->
+          Logger.info("Yielding agent run for #{issue_context(refreshed_issue)} session_id=#{turn_session[:session_id]} reason=deployment_drain turn=#{turn_number}/#{max_turns}")
+          {:yield, :deployment_drain}
+
         {:continue, refreshed_issue} when turn_number < max_turns ->
           Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
@@ -228,6 +235,14 @@ defmodule SymphonyElixir.AgentRunner do
         {:error, reason} ->
           {:error, reason}
       end
+    end
+  end
+
+  defp continuation_at_boundary(issue, issue_state_fetcher) do
+    with {:continue, refreshed_issue} <- continue_with_issue?(issue, issue_state_fetcher) do
+      if Project.current() != nil and Governor.draining?(),
+        do: {:yield, refreshed_issue},
+        else: {:continue, refreshed_issue}
     end
   end
 

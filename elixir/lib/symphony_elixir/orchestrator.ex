@@ -402,16 +402,19 @@ defmodule SymphonyElixir.Orchestrator do
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
 
+        {outcome, summary, interruption} = worker_outcome(reason)
+
         Operations.finish_run(
           state.operations,
           Map.get(running_entry, :run_id),
-          if(reason == :normal, do: "completed", else: "failed"),
+          outcome,
           %{
             issue_identifier: running_entry.identifier,
             issue_url: running_entry.issue.url,
             title: running_entry.issue.title,
             model: Map.get(running_entry, :model),
-            summary: if(reason == :normal, do: "Worker finished", else: "Worker failed")
+            summary: summary,
+            reason: interruption
           }
         )
 
@@ -422,6 +425,23 @@ defmodule SymphonyElixir.Orchestrator do
         notify_dashboard()
         {:noreply, state}
     end
+  end
+
+  defp worker_outcome(:normal), do: {"completed", "Worker finished", nil}
+
+  defp worker_outcome({:shutdown, :deployment_drain}),
+    do: {"interrupted", "Worker yielded for deployment drain", "deployment_drain"}
+
+  defp worker_outcome(_reason), do: {"failed", "Worker failed", nil}
+
+  defp handle_agent_down({:shutdown, :deployment_drain}, state, issue_id, running_entry, _session_id) do
+    schedule_issue_retry(state, issue_id, max(Map.get(running_entry, :retry_attempt, 0), 1), %{
+      identifier: running_entry.identifier,
+      issue_url: running_entry.issue.url,
+      delay_type: :continuation,
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path)
+    })
   end
 
   # Research runs are one-shot: their deliveries are checked, and the task is
@@ -1808,7 +1828,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
     case metadata[:delay_type] do
       :held -> @held_retry_delay_ms
-      :continuation when attempt == 1 -> @continuation_retry_delay_ms
+      :continuation -> @continuation_retry_delay_ms
       _failure -> failure_retry_delay(attempt)
     end
   end

@@ -1474,6 +1474,16 @@ without attributing every unused slot to deployment. Unknown observations MUST N
 Gate failures precede the hold; postponement, cancellation, failed swap, health rollback and
 success MUST release the deployment's own hold while preserving a manual hold.
 
+Under a service Governor drain, an active issue worker MUST yield at a successfully completed
+native turn boundary before starting another turn, after persisting any enabled checkpoint and
+running normal cleanup. The orchestrator MUST release its slot once and record an `interrupted`
+outcome with reason `deployment_drain`, retaining source/workpad, logical item attempt and retry
+lineage without claiming failure, retirement or delivery. Existing weighted scheduling resumes
+the issue when the drain ends; native thread reuse is optional. Failed turns and checkpoint failures retain normal retry semantics.
+Standalone workflows, reconciliation, reload and shutdown retain their existing behavior. In-progress
+turns remain bounded by their existing execution deadlines: this cannot guarantee deployment within
+one five-minute drain window, and long turns or unavailable observations MUST remain explicit waits.
+
 ### 13.4 OPTIONAL Human-Readable Status Surface
 
 A human-readable status surface (terminal output, dashboard, etc.) is OPTIONAL and
