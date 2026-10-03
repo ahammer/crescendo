@@ -2,7 +2,7 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.Codex.Usage
-  alias SymphonyElixir.Operations
+  alias SymphonyElixir.{Governor, Operations, Project, Service}
 
   test "startup notifications survive RPC waits and terminal success requires the matching native turn" do
     fixture = native_fixture()
@@ -265,6 +265,13 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     Operations.thread_usage(table, key, "one", nil, snapshot, "GH-1", Operations.rates(nil))
     :ok = Operations.save_checkpoint(table, "item", checkpoint)
     assert Operations.checkpoint(table, "item").eligible
+    Operations.finish_run(table, "one", "interrupted", %{issue_identifier: "GH-1", reason: "deployment_drain"})
+    assert Operations.checkpoint(table, "item").eligible
+    Operations.close(table)
+    {:ok, ^table} = Operations.open(path, table)
+    assert Operations.checkpoint(table, "item").eligible
+    Operations.start_run(table, "two", %{issue_id: "item", issue_identifier: "GH-1"})
+    :ok = Operations.save_checkpoint(table, "item", Map.put(checkpoint, :run_id, "two"))
     Operations.close(table)
     {:ok, ^table} = Operations.open(path, table)
     refute Operations.checkpoint(table, "item").eligible
@@ -478,6 +485,173 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     assert :dets.lookup(:token_cache_eligibility_test, {:eligible, busy.id}) == []
   end
 
+  test "standalone turns ignore a service drain, and failed native turns keep failing" do
+    fixture = native_fixture()
+    {:ok, service} = Service.parse(%{"paths" => %{"state" => "service-state"}, "projects" => %{"other" => %{}}}, Path.join(fixture.root, "service.yml"))
+    start_supervised!({Governor, service})
+    drain = Path.join(Service.state_root(service), "drain")
+    File.mkdir_p!(Path.dirname(drain))
+    File.write!(drain, "test")
+    issue = %{fixture.issue | state: "In Progress", dispatchable: true}
+    fetcher = fn _ -> {:ok, [issue]} end
+    assert :ok = AgentRunner.run(issue, nil, max_turns: 2, issue_state_fetcher: fetcher)
+    assert Enum.count(requests(fixture), &(&1["method"] == "turn/start")) == 2
+    start_supervised!({WorkflowStore, name: Project.via("other", :workflow_store), project: "other", path: Workflow.workflow_file_path()})
+    change_fixture(fixture, %{"terminal_status" => "failed"})
+
+    Project.with_project("other", fn ->
+      assert_raise RuntimeError, ~r/turn_not_completed/, fn ->
+        AgentRunner.run(issue, nil, max_turns: 2, issue_state_fetcher: fetcher)
+      end
+
+      codex = %{Config.settings!().codex | resume_threads: true}
+
+      assert_raise RuntimeError, ~r/checkpoint_owner_unavailable/, fn ->
+        AgentRunner.run(issue, nil, codex_settings: codex, issue_state_fetcher: fetcher)
+      end
+    end)
+
+    assert Enum.count(requests(fixture), &(&1["method"] == "turn/start")) == 3
+  end
+
+  test "a real service worker yields at a completed turn and resumes the same logical attempt" do
+    fixture = native_fixture()
+    issue = %{fixture.issue | state: "In Progress", dispatchable: true, description: "Keep the workpad"}
+    change_fixture(fixture, %{"wait_turn" => true})
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.join(fixture.root, "workspaces"),
+      codex_command: "python3 #{Path.join(fixture.root, "server.py")}",
+      hook_after_run: "echo cleanup >> #{Path.join(fixture.root, "cleanup")}",
+      max_turns: 3
+    )
+
+    start_supervised!({WorkflowStore, name: Project.via("drain-test", :workflow_store), project: "drain-test", path: Workflow.workflow_file_path()})
+    {:ok, service} = Service.parse(%{"paths" => %{"state" => "service-state"}, "projects" => %{"drain-test" => %{}}}, Path.join(fixture.root, "service.yml"))
+    start_supervised!({Governor, service})
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    task_supervisor = start_supervised!(Task.Supervisor)
+
+    pid =
+      start_supervised!(
+        {Orchestrator,
+         task_supervisor: task_supervisor,
+         name: Project.via("drain-test", :orchestrator),
+         project: "drain-test",
+         operations_path: Path.join(fixture.root, "drain.dets"),
+         operations_table: :drain_worker_test}
+      )
+
+    eventually(fn -> File.exists?(Path.join(fixture.root, "turn-started")) end)
+    entry = :sys.get_state(pid).running[issue.id]
+    assert entry.item_attempt == 1
+    :sys.replace_state(pid, fn state -> put_in(state.running[issue.id].retry_attempt, 2) end)
+    File.write!(Path.join(fixture.workspace, "WORKPAD.md"), "progress")
+    assert Governor.snapshot().busy == 1
+    busy = deployment_observation(pid)
+    drain = Path.join(Service.state_root(service), "drain")
+    File.mkdir_p!(Path.dirname(drain))
+    File.write!(drain, "test")
+    assert Governor.draining?()
+    assert map_size(:sys.get_state(pid).running) == 1
+    File.write!(Path.join(fixture.root, "finish-turn"), "")
+
+    eventually(fn -> map_size(:sys.get_state(pid).running) == 0 end)
+    state = :sys.get_state(pid)
+    assert Governor.snapshot().busy == 0
+    assert state.retry_attempts[issue.id].attempt == 2
+    assert state.retry_attempts[issue.id].error == nil
+    refute MapSet.member?(state.completed, issue.id)
+    assert state.autopilot.item_attempts == %{}
+    assert File.read!(Path.join(fixture.root, "cleanup")) == "cleanup\n"
+    assert Enum.count(requests(fixture), &(&1["method"] == "turn/start")) == 1
+    assert [{_, %{status: "interrupted", reason: "deployment_drain", item_attempt: 1}}] = :dets.lookup(:drain_worker_test, {:lineage_run, entry.run_id})
+    daily = List.last(Operations.snapshot(:drain_worker_test).daily)
+    assert daily.interrupted == 1
+    assert daily.failed == 0
+    assert daily.completed == 0
+    assert daily.accepted_deliveries == 0
+
+    idle = deployment_observation(pid)
+    check_deployment_boundary(fixture, busy, idle)
+    # A duplicate/stale DOWN cannot release or finish the worker twice.
+    send(pid, {:DOWN, entry.ref, :process, entry.pid, {:shutdown, :deployment_drain}})
+    assert :sys.get_state(pid).retry_attempts[issue.id].attempt == 2
+    assert Governor.snapshot().busy == 0
+
+    File.rm!(drain)
+    assert Governor.draining?() == false
+    File.rm!(Path.join(fixture.root, "turn-started"))
+    File.rm!(Path.join(fixture.root, "finish-turn"))
+    retry = :sys.get_state(pid).retry_attempts[issue.id]
+    send(pid, {:retry_issue, issue.id, retry.retry_token})
+    eventually(fn -> File.exists?(Path.join(fixture.root, "turn-started")) end)
+    resumed = :sys.get_state(pid).running[issue.id]
+    assert resumed.item_attempt == entry.item_attempt
+    assert resumed.retry_attempt == 2
+    assert resumed.issue.description == issue.description
+    send(pid, {:DOWN, entry.ref, :process, entry.pid, {:shutdown, :deployment_drain}})
+    assert :sys.get_state(pid).running[issue.id].run_id == resumed.run_id
+    assert Governor.snapshot().busy == 1
+    change_fixture(fixture, %{"wait_turn" => false})
+    File.write!(Path.join(fixture.root, "finish-turn"), "")
+    eventually(fn -> Enum.count(requests(fixture), &(&1["method"] == "turn/start")) == 4 end)
+    assert Enum.all?(Operations.snapshot(:drain_worker_test).activity, &(&1[:kind] != "attempt_failed"))
+    assert File.exists?(Path.join(fixture.workspace, "AGENTS.md"))
+    assert File.read!(Path.join(fixture.workspace, "WORKPAD.md")) == "progress"
+  end
+
+  defp deployment_observation(pid) do
+    running = map_size(:sys.get_state(pid).running)
+
+    %{
+      snapshot_status: "complete",
+      project: nil,
+      projects: [%{started: true, failure: nil, snapshot_status: "ok", running: running, ready: 1}],
+      running: List.duplicate(%{}, running),
+      counts: %{running: running},
+      throttle: %{busy: Governor.snapshot().busy, service_slots: 1}
+    }
+  end
+
+  defp check_deployment_boundary(fixture, busy, idle) do
+    samples = Path.join(fixture.root, "deployment-samples.json")
+    File.write!(samples, Jason.encode!([busy, busy, idle]))
+    script = Path.expand("../ops/bin/deploy-state.py")
+
+    code = """
+    import importlib.util, json
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location('policy', #{inspect(script)})
+    policy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(policy)
+    samples = iter(json.loads(Path(#{inspect(samples)}).read_text()))
+    root = Path(#{inspect(Path.join(fixture.root, "deployment"))})
+    assert policy.drain(root, 'candidate', lambda: next(samples), 300, 1800, 'test', sleep=lambda _: None) == 0
+    history = policy.events(root)
+    assert [event['running'] for event in history if event['outcome'] == 'drain_sample'] == [1, 0]
+    policy.finish(root, 'candidate', 'test', 'deployed')
+    assert not (root / 'drain').exists()
+    """
+
+    assert {_, 0} = System.cmd("python3", ["-B", "-c", code])
+  end
+
+  defp eventually(fun, attempts \\ 200)
+
+  defp eventually(fun, attempts) when attempts > 0 do
+    if fun.() do
+      :ok
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
+    end
+  end
+
+  defp eventually(fun, 0), do: assert(fun.())
+
   defp ledger do
     path = Path.join(System.tmp_dir!(), "token-ledger-#{System.unique_integer([:positive])}.dets")
     table = :token_cache_ledger_test
@@ -563,6 +737,9 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
             result = {'thread':{'id':params['threadId'],'status':{'type':'idle'}}}
         elif method == 'turn/start':
             if 'title' in params: raise RuntimeError('unsupported title')
+            if cfg.get('wait_turn'):
+                (root/'turn-started').write_text('started')
+                while not (root/'finish-turn').exists(): time.sleep(0.01)
             state['turns'] = state.get('turns',0)+1
             turn = 'turn-'+str(state['turns'])
             state['last_turn'] = turn

@@ -25,6 +25,7 @@ defmodule SymphonyElixir.GovernorTest do
   test "check-ins share one budget across projects and return each project's slots", %{service: service} do
     start_supervised!({Governor, service})
     assert Governor.running?()
+    refute Governor.draining?()
 
     assert %{slots: 2, over_budget: nil, research_exclusive: "project", draining: false} = Governor.checkin("a", 6_000_000, 1)
     # Unknown quota restricts Astra until a run reports it.
@@ -73,6 +74,7 @@ defmodule SymphonyElixir.GovernorTest do
     File.write!(Path.join(state_root, "drain"), "")
 
     assert {:wait, "draining for a deploy"} = Governor.acquire("a", "GH-1", :pull_request)
+    assert Governor.draining?()
     assert %{slots: 0, draining: true} = Governor.checkin("a", 0, 1)
   end
 

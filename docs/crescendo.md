@@ -84,8 +84,9 @@ It never enables a unit or overwrites local configuration.
 - `bin/crescendo` runs a command (below) with the deployed release, from any directory.
 - `bin/deploy`, run by `crescendo-deploy.timer` every 10 minutes, deploys the newest `main`:
   1. It builds `releases/<sha>` and passes the full `make all` gate under the machine lease.
-  2. It drains, so no new runs start and running ones finish (it waits up to five minutes, then
-     postpones). A postponement leaves at least thirty minutes for dispatch before another busy
+  2. It drains, so no new runs start and active issue workers yield after a successful native turn
+     (it waits up to five minutes, then postpones). A postponement leaves at least thirty minutes
+     for dispatch before another busy
      drain, even for a newer candidate. Each invocation selects the newest `main`, coalescing
      superseded candidates. A fully idle service bypasses the pause and deploys immediately;
      the running count is checked again after acquiring the hold. Unknown or partial snapshots
@@ -102,7 +103,8 @@ It never enables a unit or overwrites local configuration.
   (default `300`) bounds each wait; `CRESCENDO_DISPATCH_PAUSE_SECONDS` (default `1800`) sets the
   minimum dispatch pause. Both must be positive. An explicit `CRESCENDO_DRAIN=0` retains the
   operator's immediate, interrupting deploy override; routine timer deployments never interrupt
-  workers to meet the drain deadline. Existing manual drains are preserved.
+  in-progress turns to meet the drain deadline. Long turns keep their existing execution deadlines,
+  so a deployment is not guaranteed within one five-minute window. Existing manual drains are preserved.
 
   The journal is also the retry-policy state: `drain_started` includes a conservative retry deadline,
   and `drain_finished` records the result, actual start/end timestamps, elapsed hold seconds and
@@ -150,8 +152,8 @@ crescendo autopilot check .crescendo/autopilot [--workflow ~/.config/crescendo/p
   the project's `labels.prefix` (run `labels sync` first). Old labels stay for history. Runs get
   the prefix as `CRESCENDO_LABEL_PREFIX`, so repository tooling can follow the switch. It exits with
   an error if GitHub cannot list items or add/remove a label.
-- `drain on` stops new runs; running work finishes. `drain off` releases it and reports an error if
-  its flag cannot be removed.
+- `drain on` stops new runs; active issue workers yield at successful completed-turn boundaries.
+  `drain off` releases it and reports an error if its flag cannot be removed.
 - `autopilot check` validates a repository's `.crescendo/autopilot/` folder: task front matter,
   schedules, deliveries and prompt templates. It prints one line per task. With `--workflow` it
   loads the folder exactly as the service would load it for that project, including task efforts
@@ -219,8 +221,15 @@ orchestrator and frees the slots of one that stops.
     research request that finds other runs in flight reserves the service, so nothing new starts
     elsewhere until the research gets its turn. A reservation that is not renewed within 90 seconds
     lapses.
-- **Drain.** While `<state>/drain` exists, nothing new starts; running work finishes normally. Deploys
-  use this.
+- **Drain.** While `<state>/drain` exists, nothing new starts. Service issue workers consult the
+  Governor after successful native turn completion and checkpoint persistence, yielding before
+  another turn. Normal cleanup runs and the orchestrator releases the slot once. The distinct
+  `deployment_drain` interruption reason preserves source/workpad, logical attempt and retry count,
+  including zero; it records no failed attempt, retirement or accepted delivery. Ordinary weighted scheduling
+  resumes the issue after the hold ends, without requiring native thread reuse. Failed turns and checkpoint failures
+  keep normal retry semantics. Standalone workflows, reload, stale-run updates, reconciliation and
+  shutdown keep their existing behavior. Deploys use this hold; long in-progress turns and unknown
+  observations continue waiting under the existing deadlines.
 
 Waiting for a slot, the throttle or a backed-off route is never a failed attempt: a held retry keeps
 its attempt number and checks again every 30 seconds.

@@ -1121,6 +1121,49 @@ defmodule SymphonyElixir.CoreTest do
     assert_due_in_range(due_at_ms, 0, 1_100)
   end
 
+  test "a deployment yield preserves the first worker's retry budget" do
+    write_workflow_file!(Workflow.workflow_file_path(), max_attempts: 1)
+    pid = start_supervised!({Orchestrator, name: Module.concat(__MODULE__, :DrainRetryOrchestrator)})
+    issue = %Issue{id: "issue-drain-retry", identifier: "MT-558", state: "In Progress"}
+    ref = make_ref()
+
+    entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      retry_attempt: 0,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn state ->
+      %{state | running: %{issue.id => entry}, claimed: MapSet.new([issue.id])}
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), {:shutdown, :deployment_drain}})
+    yielded = :sys.get_state(pid)
+    assert yielded.retry_attempts[issue.id].attempt == 0
+    refute MapSet.member?(yielded.completed, issue.id)
+
+    :sys.replace_state(pid, &%{&1 | max_concurrent_agents: 0})
+    send(pid, {:retry_issue, issue.id, yielded.retry_attempts[issue.id].retry_token})
+    held = :sys.get_state(pid)
+    assert held.retry_attempts[issue.id].attempt == 0
+    assert held.retry_attempts[issue.id].delay_type == :held
+
+    resumed_ref = make_ref()
+
+    :sys.replace_state(pid, fn state ->
+      resumed = %{entry | ref: resumed_ref, retry_attempt: yielded.retry_attempts[issue.id].attempt}
+      %{state | running: %{issue.id => resumed}, retry_attempts: %{}}
+    end)
+
+    send(pid, {:DOWN, resumed_ref, :process, self(), :boom})
+    failed = :sys.get_state(pid)
+    assert failed.retry_attempts[issue.id].attempt == 1
+    refute Map.has_key?(failed.blocked, issue.id)
+  end
+
   test "abnormal worker exit increments retry attempt progressively" do
     issue_id = "issue-crash"
     ref = make_ref()

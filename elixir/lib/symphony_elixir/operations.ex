@@ -109,7 +109,7 @@ defmodule SymphonyElixir.Operations do
     run = lookup(table, {:run, id}, %{})
     checkpoint = checkpoint(table, run[:issue_id])
 
-    if (kind != "completed" and checkpoint) && checkpoint[:run_id] == id do
+    if (not completed_boundary?(kind, details) and checkpoint) && checkpoint[:run_id] == id do
       :ok = :dets.insert(table, {{:thread_checkpoint, run.issue_id}, Map.put(checkpoint, :eligible, false)})
     end
 
@@ -139,7 +139,7 @@ defmodule SymphonyElixir.Operations do
     :ok =
       :dets.insert(
         table,
-        {{:lineage_run, id}, Map.merge(lookup(table, {:lineage_run, id}, run), %{status: kind, finished_s: now})}
+        {{:lineage_run, id}, Map.merge(lookup(table, {:lineage_run, id}, run), Map.merge(Map.take(details, [:reason]), %{status: kind, finished_s: now}))}
       )
 
     :dets.select_delete(table, [
@@ -153,6 +153,10 @@ defmodule SymphonyElixir.Operations do
     event(table, kind, Map.merge(details, %{category: category, seconds: seconds, usd_micro: cost.usd_micro}))
     sync(table)
   end
+
+  defp completed_boundary?("completed", _details), do: true
+  defp completed_boundary?("interrupted", %{reason: "deployment_drain"}), do: true
+  defp completed_boundary?(_kind, _details), do: false
 
   @doc "The kind of task a work item identifier names: review, research, marketing or delivery."
   @spec task_category(String.t() | nil) :: String.t()

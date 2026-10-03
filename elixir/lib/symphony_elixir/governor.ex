@@ -60,6 +60,10 @@ defmodule SymphonyElixir.Governor do
   @spec report_quota(Quota.t()) :: :ok
   def report_quota(quota), do: GenServer.cast(__MODULE__, {:quota, quota})
 
+  @doc "Whether a service drain is active at a completed-turn boundary."
+  @spec draining?() :: boolean()
+  def draining?, do: running?() and GenServer.call(__MODULE__, :draining)
+
   @spec snapshot() :: map()
   def snapshot, do: GenServer.call(__MODULE__, :snapshot)
 
@@ -107,6 +111,8 @@ defmodule SymphonyElixir.Governor do
         grant(state, project, item, class)
     end
   end
+
+  def handle_call(:draining, _from, state), do: {:reply, draining?(state), state}
 
   def handle_call(:snapshot, _from, state) do
     now = DateTime.utc_now()

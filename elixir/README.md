@@ -495,6 +495,14 @@ The observability UI now runs on a minimal Phoenix stack:
   Deployment validators reject partial, filtered, or unknown project observations and unknown
   Governor-held slot counts. Routine deployment drains wait at most five minutes, then leave at
   least thirty minutes for dispatch before retrying busy work; newer candidates share the pause.
+  Service issue workers yield after a successful native turn and checkpoint persistence when the
+  Governor is draining, before starting another turn. Cleanup and slot release happen normally;
+  an `interrupted` outcome with reason `deployment_drain` keeps source/workpad, logical attempt
+  and retry count (including zero) intact. Existing scheduling resumes the issue after the drain,
+  with native thread reuse still optional. Failed turns and checkpoint failures retain ordinary retry
+  behavior; standalone workflows do not yield.
+  Long in-progress turns keep their existing execution deadlines, so deployment is not guaranteed
+  within one five-minute window. Unavailable observations still wait.
   Fully idle services deploy immediately after rechecking under the hold. The deployment journal
   records hold start/end, elapsed and sampled idle time, ready work and quota/budget restrictions.
   See [deployment policy](../docs/crescendo.md#install-and-deploy) for overrides and recovery.
