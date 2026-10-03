@@ -435,7 +435,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp worker_outcome(_reason), do: {"failed", "Worker failed", nil}
 
   defp handle_agent_down({:shutdown, :deployment_drain}, state, issue_id, running_entry, _session_id) do
-    schedule_issue_retry(state, issue_id, max(Map.get(running_entry, :retry_attempt, 0), 1), %{
+    schedule_issue_retry(state, issue_id, Map.get(running_entry, :retry_attempt, 0), %{
       identifier: running_entry.identifier,
       issue_url: running_entry.issue.url,
       delay_type: :continuation,
@@ -1825,7 +1825,7 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
+  defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt >= 0 and is_map(metadata) do
     case metadata[:delay_type] do
       :held -> @held_retry_delay_ms
       :continuation -> @continuation_retry_delay_ms

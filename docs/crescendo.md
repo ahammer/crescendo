@@ -224,8 +224,8 @@ orchestrator and frees the slots of one that stops.
 - **Drain.** While `<state>/drain` exists, nothing new starts. Service issue workers consult the
   Governor after successful native turn completion and checkpoint persistence, yielding before
   another turn. Normal cleanup runs and the orchestrator releases the slot once. The distinct
-  `deployment_drain` interruption reason preserves source/workpad, logical attempt and retry lineage;
-  it records no failed attempt, retirement or accepted delivery. Ordinary weighted scheduling
+  `deployment_drain` interruption reason preserves source/workpad, logical attempt and retry count,
+  including zero; it records no failed attempt, retirement or accepted delivery. Ordinary weighted scheduling
   resumes the issue after the hold ends, without requiring native thread reuse. Failed turns and checkpoint failures
   keep normal retry semantics. Standalone workflows, reload, stale-run updates, reconciliation and
   shutdown keep their existing behavior. Deploys use this hold; long in-progress turns and unknown
