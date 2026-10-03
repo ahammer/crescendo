@@ -2437,7 +2437,15 @@ Extension config (`autopilot` object):
   - `every` is the channel's own interval (`30m`, `6h`, `1d`, `2w`; default
     `research_cooldown_ms`).
   - `at` (`HH:MM`, UTC, OPTIONAL) anchors a channel to a time of day. It first runs at the latest
-    past occurrence, then at the first occurrence at least half of `every` after it last finished.
+    occurrence at or before now. After completion, use the latest anchor at or before the finish
+    time plus `ceil(every / 1d)` UTC calendar days (minimum one). Thus daily tasks finishing late
+    still leave the next day's anchor due; sub-day intervals with `at` run once daily, and
+    fractional multi-day intervals round up. Delayed runs do not replay missed occurrences.
+    Without `at`, the interval remains measured from completion. Failed attempts retain the
+    30-minute retry backoff until the attempt cap ends the run cycle.
+  - A running task MUST NOT dispatch again. A task requiring at least one pull request MUST wait
+    while an open pull request carries its channel label, including drafts, so overdue schedules
+    and retries do not create duplicate report PRs. Closing or merging that PR releases the hold.
   - `when` is `idle` (default) or `anytime`.
   - `effort` names a rung of `codex.routing.ladder` for the `research_route` model.
   - `expectations` is a list of text the prompt must meet.

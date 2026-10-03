@@ -2049,7 +2049,9 @@ defmodule SymphonyElixir.Orchestrator do
          Throttle.admit(state.throttle, :research) == :ok do
       open_issues = open_issue_count(issues, config)
 
-      case Autopilot.next_research(state.autopilot, config.autopilot, open_issues, DateTime.utc_now(), idle: idle) do
+      opts = [idle: idle, open_pull_requests: state.polled_issues]
+
+      case Autopilot.next_research(state.autopilot, config.autopilot, open_issues, DateTime.utc_now(), opts) do
         {autopilot, nil} -> put_autopilot(state, autopilot)
         {autopilot, item} -> state |> put_autopilot(autopilot) |> dispatch_issue(item)
       end
@@ -2635,8 +2637,8 @@ defmodule SymphonyElixir.Orchestrator do
     open_issues = open_issue_count(state.polled_issues, config)
     idle = state.running == %{}
 
-    next =
-      Autopilot.next_research(state.autopilot, config.autopilot, open_issues, DateTime.utc_now(), idle: idle)
+    opts = [idle: idle, open_pull_requests: state.polled_issues]
+    next = Autopilot.next_research(state.autopilot, config.autopilot, open_issues, DateTime.utc_now(), opts)
 
     config.autopilot.enabled and not research_running?(state) and
       Throttle.admit(state.throttle, :research) == :ok and
