@@ -388,6 +388,13 @@ codex:
    `effort`, `expectations` and `delivers`, and a repository's `.crescendo/autopilot/` folder can
    replace them with its own tasks and guidelines (see `docs/crescendo.md`). The shared research prompt is
    optional when every channel names its own.
+   Without `at`, `every` is completion-based. With `at: "06:00"`, the next due time is the
+   latest UTC 06:00 at or before completion plus `every` rounded up to calendar days (minimum one).
+   A daily run finishing at 19:12 leaves tomorrow's 06:00 due; one finishing before 06:00 leaves
+   today's anchor due. Sub-day intervals become daily and `36h` becomes two days. The first run
+   is due at the latest anchor at or before now; delayed runs do not replay missed occurrences.
+   Failed attempts still retry after 30 minutes. Running tasks cannot dispatch again, and tasks
+   requiring a PR wait while an open PR (including drafts) carries their channel label.
 
 Nothing is parked waiting for an operator. A worker that hits a blocker records it and adds
 `symphony:blocked`; Symphony counts a failed attempt, clears the label, and retries the issue behind

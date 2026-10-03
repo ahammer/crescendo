@@ -276,12 +276,23 @@ channels:
     max_issues: 4
     route: {model: gpt-6.1-sol, effort: xhigh}
     every: 1d          # schedule: 30m, 6h, 1d, 2w (default research_cooldown_ms)
-    at: "06:00"        # optional time of day (UTC) the task runs at, every `every`
+    at: "06:00"        # optional UTC calendar anchor (interval rounds up to days)
     when: idle         # idle: only when nothing else runs or waits; anytime: whenever a slot is free
 ```
 
-Each channel (task) runs on its own schedule; the most overdue due task goes first. After a run,
-Crescendo counts the issues and pull requests it opened with its `<prefix>:channel:<name>` label.
+Each channel (task) runs on its own schedule; the most overdue due task goes first. Without `at`,
+`every` is measured from completion. With `at`, the first run is due at the latest UTC anchor at
+or before now. After completion, the next due time is the latest anchor at or before the finish
+plus `every` rounded up to whole UTC calendar days, with a minimum of one day. A daily 06:00 task
+finishing October 1 at 19:12 stays due October 2 at 06:00. Finishing before 06:00 leaves that day's
+06:00 due; finishing exactly at 06:00 leaves tomorrow due. Sub-day intervals with `at` run once
+daily; `36h` rounds up to two days. Delays do not replay a backlog of missed occurrences.
+
+A running task cannot dispatch again. Tasks requiring at least one PR also wait while an open PR
+(including a draft) has their `<prefix>:channel:<name>` label, until it closes or merges. The hold
+also applies to retries and does not mark the task completed or consume an attempt.
+
+After a run, Crescendo counts the issues and pull requests it opened with their channel label.
 A run that falls short of its minimums, or fails, is retried 30 minutes later behind other work.
 The last allowed attempt (`max_item_attempts`) ends the task until it is next due, so nothing is
 parked. The timeline shows each outcome as "delivered" or "fell short".

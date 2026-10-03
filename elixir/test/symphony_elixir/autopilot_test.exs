@@ -194,6 +194,71 @@ defmodule SymphonyElixir.AutopilotTest do
       assert Enum.map(["24:00", "6:00", "06:60", nil], &Autopilot.time_of_day/1) == [nil, nil, nil, nil]
     end
 
+    test "daily clock tasks retain the next anchor after a late completion" do
+      settings = %{@settings | channels: %{"retro" => %{"every" => "1d", "at" => "06:00", "when" => "anytime", "min_issues" => 0}}}
+      finished = ~U[2026-10-01 19:12:11.695107Z]
+      state = Autopilot.record_research_finished(@empty, "retro", :delivered, finished, settings)
+      assert [%{due_at: ~U[2026-10-02 06:00:00Z]}] = Autopilot.task_statuses(state, settings, finished)
+      assert {_, %Issue{}} = Autopilot.next_research(state, settings, 0, ~U[2026-10-02 06:00:00Z])
+    end
+
+    test "clock cadence uses the latest anchor, rounds intervals up to days, and never catches up" do
+      for {every, finished, due} <- [
+            {"1d", ~U[2026-10-01 05:59:59.999999Z], ~U[2026-10-01 06:00:00Z]},
+            {"1d", ~U[2026-10-01 06:00:00Z], ~U[2026-10-02 06:00:00Z]},
+            {"1d", ~U[2026-10-01 06:00:00.000001Z], ~U[2026-10-02 06:00:00Z]},
+            {"1d", ~U[2026-10-01 23:59:59.999999Z], ~U[2026-10-02 06:00:00Z]},
+            {"1d", ~U[2026-10-02 00:00:00Z], ~U[2026-10-02 06:00:00Z]},
+            {"1d", ~U[2026-10-04 19:00:00Z], ~U[2026-10-05 06:00:00Z]},
+            {"2d", ~U[2026-10-04 19:00:00Z], ~U[2026-10-06 06:00:00Z]},
+            {"36h", ~U[2026-10-04 05:00:00Z], ~U[2026-10-05 06:00:00Z]},
+            {"6h", ~U[2026-10-01 19:00:00Z], ~U[2026-10-02 06:00:00Z]}
+          ] do
+        settings = %{@settings | channels: %{"retro" => %{"every" => every, "at" => "06:00"}}}
+        state = Autopilot.record_research_finished(@empty, "retro", :delivered, finished, settings)
+        assert [%{due_at: ^due}] = Autopilot.task_statuses(state, settings, finished)
+        assert {_, nil} = Autopilot.next_research(state, settings, 0, DateTime.add(due, -1, :microsecond))
+        assert {_, %Issue{}} = Autopilot.next_research(state, settings, 0, due)
+        assert {_, nil} = Autopilot.next_research(state, settings, 0, DateTime.add(due, 3, :day), running: ["retro"])
+      end
+
+      settings = %{@settings | channels: %{"retro" => %{"every" => "1d", "at" => "00:00"}}}
+      assert [%{due_at: ~U[2026-10-02 00:00:00Z]}] = Autopilot.task_statuses(@empty, settings, ~U[2026-10-02 00:00:00Z])
+      state = Autopilot.record_research_finished(@empty, "retro", :delivered, ~U[2026-10-02 00:00:00Z], settings)
+      assert [%{due_at: ~U[2026-10-03 00:00:00Z]}] = Autopilot.task_statuses(state, settings, ~U[2026-10-02 00:00:00Z])
+    end
+
+    test "clock task failures retain backoff across the anchor and stop retrying at the attempt cap" do
+      settings = %{@settings | channels: %{"retro" => %{"every" => "1d", "at" => "06:00"}}}
+      finished = ~U[2026-10-01 05:50:00Z]
+      state = Autopilot.record_research_finished(@empty, "retro", :delivered, DateTime.add(finished, -1, :day), settings)
+      state = Autopilot.record_research_finished(state, "retro", :failed, finished, settings)
+      assert [%{due_at: ~U[2026-10-01 06:20:00.000Z], attempts: 1}] = Autopilot.task_statuses(state, settings, finished)
+      assert {_, nil} = Autopilot.next_research(state, settings, 0, ~U[2026-10-01 06:00:00Z])
+      assert {_, %Issue{}} = Autopilot.next_research(state, settings, 0, ~U[2026-10-01 06:20:00Z])
+      state = Autopilot.record_research_finished(state, "retro", :short, ~U[2026-10-01 06:20:00Z], settings)
+      state = Autopilot.record_research_finished(state, "retro", :failed, ~U[2026-10-01 19:12:11Z], settings)
+      assert [%{due_at: ~U[2026-10-02 06:00:00Z], attempts: 0, last: :gave_up}] = Autopilot.task_statuses(state, settings, finished)
+    end
+
+    test "required PR tasks wait for labelled open PRs even when overdue or retrying" do
+      now = ~U[2026-10-03 08:00:00Z]
+      spec = %{"every" => "1d", "at" => "06:00", "when" => "anytime", "delivers" => %{"issues" => %{"min" => 0}, "pull_requests" => %{"min" => 1}}}
+      settings = @settings |> Map.put(:channels, %{"retro" => spec}) |> Map.put(:label_prefix, "crescendo")
+      pr = %{pull_request("1", "sha") | labels: [" Crescendo:channel:retro "], dispatchable: false}
+      state = Autopilot.record_research_finished(@empty, "retro", :delivered, ~U[2026-10-01 19:12:11Z], settings)
+      assert {_, nil} = Autopilot.next_research(state, settings, 0, now, open_pull_requests: [pr])
+      state = Autopilot.record_research_finished(state, "retro", :failed, ~U[2026-10-02 23:50:00Z], settings)
+      assert {_, nil} = Autopilot.next_research(state, settings, 0, now, open_pull_requests: [pr])
+      assert {_, %Issue{}} = Autopilot.next_research(state, settings, 0, now, open_pull_requests: [%{pr | state: "closed"}])
+      unrelated = %{pr | labels: ["crescendo:channel:other"]}
+      issue = %{pr | kind: :issue}
+      assert {_, %Issue{}} = Autopilot.next_research(state, settings, 0, now, open_pull_requests: [unrelated])
+      assert {_, %Issue{}} = Autopilot.next_research(state, settings, 0, now, open_pull_requests: [issue])
+      settings = put_in(settings, [:channels, "retro", "delivers", "pull_requests", "min"], 0)
+      assert {_, %Issue{}} = Autopilot.next_research(state, settings, 0, now, open_pull_requests: [pr])
+    end
+
     test "schedules parse from short durations" do
       assert Enum.map(["30m", "6h", " 1d ", "2w", 90_000], &Autopilot.duration_ms/1) == [1_800_000, 21_600_000, 86_400_000, 1_209_600_000, 90_000]
       assert Enum.map(["0h", "1y", "", nil, -5], &Autopilot.duration_ms/1) == [nil, nil, nil, nil, nil]
@@ -643,6 +708,54 @@ defmodule SymphonyElixir.AutopilotTest do
       Application.put_env(:symphony_elixir, :task_deliveries_result, {:error, :boom})
       finish_running_research(pid, "research:cleanup")
       assert %{last: :unverified} = :sys.get_state(pid).autopilot.tasks["cleanup"]
+    end
+
+    test "a delayed daily report waits for its open PR and dispatches only once after it closes" do
+      write_autopilot_workflow!(
+        autopilot: %{
+          channels: %{"retro" => %{"focus" => "Retrospective", "every" => "1d", "at" => "00:00", "when" => "anytime", "delivers" => %{"issues" => %{"min" => 0}, "pull_requests" => %{"min" => 1}}}}
+        }
+      )
+
+      pr = pull_request("1", "sha")
+      draft = %{head_sha: "sha", draft: true}
+      pr = %{pr | labels: ["symphony:channel:retro"], dispatchable: false, pull_request: draft}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [pr])
+      deliveries = fn _label, _since -> {:ok, %{issues: 0, pull_requests: 1}} end
+      Application.put_env(:symphony_elixir, :task_deliveries_fun, deliveries)
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :task_deliveries_fun) end)
+      {pid, _name} = start_orchestrator!()
+
+      :sys.replace_state(pid, fn state ->
+        finished = DateTime.add(DateTime.utc_now(), -3, :day)
+        settings = Config.settings!().autopilot
+        autopilot = Autopilot.record_research_finished(state.autopilot, "retro", :delivered, finished, settings)
+        %{state | autopilot: autopilot}
+      end)
+
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).running == %{}
+
+      # A reviewed, non-draft PR still holds the report while waiting for its next review.
+      pr = %{pr | dispatchable: true, pull_request: %{head_sha: "sha", draft: false, trusted: true}}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [pr])
+
+      :sys.replace_state(pid, fn state ->
+        %{state | autopilot: Autopilot.record_pull_handled(state.autopilot, pr, "sha")}
+      end)
+
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).running == %{}
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+      send(pid, :run_poll_cycle)
+      assert %{"research:retro" => entry} = :sys.get_state(pid).running
+      send(pid, :run_poll_cycle)
+      assert %{"research:retro" => ^entry} = :sys.get_state(pid).running
+      finish_running_research(pid, "research:retro")
+      assert %{last: :delivered} = :sys.get_state(pid).autopilot.tasks["retro"]
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).running == %{}
     end
 
     test "an anytime task starts while other work runs, and a failed run is retried" do

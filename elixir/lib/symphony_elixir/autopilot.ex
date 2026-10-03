@@ -144,11 +144,13 @@ defmodule SymphonyElixir.Autopilot do
   (`idle: true`); `when: anytime` tasks start whenever a slot is free. The
   most overdue task goes first. Tasks that ask for issues wait while the open
   issue backlog is at its cap; `running` names tasks already in flight.
+  `open_pull_requests` holds tasks requiring a PR while a channel-labelled PR is open.
   """
   @spec next_research(state(), map(), non_neg_integer(), DateTime.t(), keyword()) :: {state(), Issue.t() | nil}
   def next_research(state, autopilot_settings, open_issue_count, now, opts \\ []) do
     idle = Keyword.get(opts, :idle, true)
     running = Keyword.get(opts, :running, [])
+    open_pulls = Keyword.get(opts, :open_pull_requests, [])
     capped = open_issue_count >= autopilot_settings.max_open_issues
 
     next =
@@ -156,6 +158,7 @@ defmodule SymphonyElixir.Autopilot do
         autopilot_settings
         |> research_items()
         |> Enum.filter(&startable?(&1.research, idle, running, capped))
+        |> Enum.reject(&pending_pull?(&1, open_pulls))
         |> Enum.map(&{&1, due_at(state, &1.research, now)})
         |> Enum.filter(fn {_item, due_at} -> DateTime.compare(due_at, now) != :gt end)
         |> Enum.min_by(&overdue_order/1, fn -> nil end)
@@ -166,6 +169,14 @@ defmodule SymphonyElixir.Autopilot do
 
   defp startable?(research, idle, running, capped) do
     research.channel not in running and (idle or research.when == "anytime") and not (capped and research.min_issues > 0)
+  end
+
+  defp pending_pull?(item, open_pulls) do
+    pulls = item.research.pull_requests
+    label = List.last(item.labels)
+
+    pulls != nil and pulls.min > 0 and
+      Enum.any?(open_pulls, &(&1.kind == :pull_request and &1.state == "open" and Issue.has_required_labels?(&1, [label])))
   end
 
   defp overdue_order({item, due_at}), do: {DateTime.to_unix(due_at, :microsecond), item.research.channel}
@@ -228,21 +239,31 @@ defmodule SymphonyElixir.Autopilot do
   defp tasks(state), do: Map.get(state, :tasks, %{})
 
   # A task with `at` runs at that time of day (UTC): first at the latest past
-  # occurrence, then at the first occurrence at least half its interval after
-  # it last finished, so a long run never skips a day.
+  # occurrence, then that anchor at completion plus the interval rounded up
+  # to calendar days. No missed occurrences are replayed.
   defp due_at(state, research, now) do
     case {Map.get(tasks(state), research.channel, %{}), time_of_day(research[:at])} do
-      {%{retry_at: %DateTime{} = retry_at}, _at} -> retry_at
-      {%{finished_at: %DateTime{} = finished_at}, nil} -> DateTime.add(finished_at, research.every_ms, :millisecond)
-      {%{finished_at: %DateTime{} = finished_at}, at} -> finished_at |> DateTime.add(div(research.every_ms, 2), :millisecond) |> next_occurrence(at)
-      {_never, nil} -> ~U[1970-01-01 00:00:00Z]
-      {_never, at} -> now |> next_occurrence(at) |> DateTime.add(-1, :day)
+      {%{retry_at: %DateTime{} = retry_at}, _at} ->
+        retry_at
+
+      {%{finished_at: %DateTime{} = finished_at}, nil} ->
+        DateTime.add(finished_at, research.every_ms, :millisecond)
+
+      {%{finished_at: %DateTime{} = finished_at}, at} ->
+        days = max(1, div(research.every_ms + 86_399_999, 86_400_000))
+        finished_at |> latest_occurrence(at) |> DateTime.add(days, :day)
+
+      {_never, nil} ->
+        ~U[1970-01-01 00:00:00Z]
+
+      {_never, at} ->
+        latest_occurrence(now, at)
     end
   end
 
-  defp next_occurrence(from, at) do
+  defp latest_occurrence(from, at) do
     candidate = DateTime.new!(DateTime.to_date(from), at)
-    if DateTime.compare(candidate, from) == :lt, do: DateTime.add(candidate, 1, :day), else: candidate
+    if DateTime.compare(candidate, from) == :gt, do: DateTime.add(candidate, -1, :day), else: candidate
   end
 
   @doc "Parses a UTC time of day such as `06:00`."
