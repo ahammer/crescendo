@@ -372,6 +372,20 @@ The `SYMPHONY_*` names are kept for tools that predate the service.
 
 ## Dashboard and API
 
+Crescendo's state responses include service-wide `service: {revision, commit_url}` metadata,
+including project-filtered, full-history and snapshot-error responses. `revision` is the full
+40-character source commit and `commit_url` links to that commit in `ahammer/crescendo`.
+The dashboard shows its short revision link, or "Revision unknown"; both metadata fields are
+`null` when identity is unknown.
+
+Source deployments archive the pinned commit into `releases/<sha>/source/elixir` and write an
+empty `.built` marker after passing the gate. At startup one owner validates the compiled source
+path and this marker, then retains only public commit metadata for the process lifetime.
+Later main merges, environment values and workspace HEAD cannot change it. Missing, malformed
+or unreadable build identities, development checkouts and Burrito packages report unknown;
+release directories, host paths and environment values are never exposed by this metadata.
+This adds no configuration, control or write endpoint.
+
 - `/` shows every project; `/?project=<id>` filters to one.
 - `/agents/<project>/<id>` is an agent's inspector. It omits the project's configured `labels.prefix`
   and every `<prefix>:` label before showing up to eight work labels. Single-workflow inspectors use

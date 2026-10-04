@@ -4,7 +4,7 @@ defmodule SymphonyElixir.ServiceWebTest do
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
-  alias SymphonyElixir.{Governor, Projects, Service}
+  alias SymphonyElixir.{Governor, Projects, Service, SourceRevision}
 
   @endpoint SymphonyElixirWeb.Endpoint
 
@@ -65,6 +65,63 @@ defmodule SymphonyElixir.ServiceWebTest do
 
     assert json_response(get(build_conn(), "/api/v1/alpha/MT-404"), 404)["error"]["code"] == "issue_not_found"
     assert json_response(get(build_conn(), "/api/v1/MT-404"), 404)["error"]["code"] == "issue_not_found"
+  end
+
+  test "service revision is shared across real snapshots, private filters and dashboard errors" do
+    revision = String.duplicate("c", 40)
+    root = Path.join(System.tmp_dir!(), "service-release-#{System.unique_integer([:positive])}")
+    release = Path.join([root, "releases", revision])
+    source = Path.join(release, "source/elixir")
+    File.mkdir_p!(source)
+    File.write!(Path.join(release, ".built"), "")
+    previous = SourceRevision.metadata()
+
+    on_exit(fn ->
+      :persistent_term.put({SourceRevision, :metadata}, previous)
+      File.rm_rf!(root)
+    end)
+
+    SourceRevision.initialize(source)
+    identity = %{"revision" => revision, "commit_url" => "https://github.com/ahammer/crescendo/commit/" <> revision}
+
+    for query <- ["", "?history=full", "?project=alpha", "?project=beta&history=full"] do
+      state = json_response(get(build_conn(), "/api/v1/state" <> query), 200)
+      assert state["service"] == identity
+      if query =~ "beta", do: assert(Enum.all?(state["upcoming"]["waiting"], &(&1["title"] == "Private work")))
+      refute Jason.encode!(state) =~ root
+    end
+
+    {:ok, view, html} = live(build_conn(), "/")
+    assert html =~ ~s(href="#{identity["commit_url"]}")
+    assert html =~ ~s(title="#{revision}">ccccccc</a>)
+    assert render_patch(view, "/?project=beta") =~ identity["commit_url"]
+
+    beta = GenServer.whereis(SymphonyElixir.Project.via("beta", :orchestrator))
+    :ok = :sys.suspend(beta)
+
+    try do
+      state = json_response(get(build_conn(), "/api/v1/state?project=beta"), 200)
+      assert state["snapshot_status"] == "partial"
+      assert state["service"] == identity
+      {:ok, _view, html} = live(build_conn(), "/?project=beta")
+      assert html =~ "Snapshot incomplete"
+      assert html =~ identity["commit_url"]
+    after
+      :ok = :sys.resume(beta)
+    end
+
+    unavailable = SymphonyElixirWeb.Presenter.state_payload(:missing_revision_orchestrator, 1)
+    assert unavailable.error.code == "snapshot_unavailable"
+    assert unavailable.service == SourceRevision.metadata()
+    html = render_component(&SymphonyElixirWeb.DashboardLive.render/1, payload: unavailable)
+    assert html =~ "Snapshot unavailable"
+    assert html =~ identity["commit_url"]
+
+    SourceRevision.initialize(__DIR__)
+    assert json_response(get(build_conn(), "/api/v1/state"), 200)["service"] == %{"revision" => nil, "commit_url" => nil}
+    {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ "Revision unknown"
+    refute html =~ "/commit/"
   end
 
   test "full history includes older work across projects with the usual privacy and filters" do

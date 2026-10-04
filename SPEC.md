@@ -1564,6 +1564,20 @@ Enablement (extension):
 
 #### 13.7.1 Human-Readable Dashboard (`/`)
 
+Crescendo's state responses include service-wide `service: {revision, commit_url}` metadata,
+including project-filtered, full-history and snapshot-error responses. `revision` is the full
+40-character source commit and `commit_url` links to that commit in `ahammer/crescendo`.
+The dashboard shows its short revision link, or "Revision unknown"; both metadata fields are
+`null` when identity is unknown.
+
+Source deployments archive the pinned commit into `releases/<sha>/source/elixir` and write an
+empty `.built` marker after passing the gate. At startup one owner validates the compiled source
+path and this marker, then retains only public commit metadata for the process lifetime.
+Later main merges, environment values and workspace HEAD cannot change it. Missing, malformed
+or unreadable build identities, development checkouts and Burrito packages report unknown;
+release directories, host paths and environment values are never exposed by this metadata.
+This adds no configuration, control or write endpoint.
+
 - Host a human-readable dashboard at `/`.
 - The returned document SHOULD depict the current state of the system (for example active sessions,
   retry delays, token consumption, runtime totals, recent events, and health/error indicators).

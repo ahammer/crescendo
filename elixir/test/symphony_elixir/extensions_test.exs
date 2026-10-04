@@ -274,6 +274,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
+             "service" => Jason.decode!(Jason.encode!(SymphonyElixir.SourceRevision.metadata())),
              "counts" => %{"running" => 1, "retrying" => 1, "blocked" => 1, "ready" => 0, "waiting" => 0, "open_prs" => 0},
              "running" => [
                %{
@@ -537,6 +538,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert state_payload ==
              %{
                "generated_at" => state_payload["generated_at"],
+               "service" => Jason.decode!(Jason.encode!(SymphonyElixir.SourceRevision.metadata())),
                "error" => %{"code" => "snapshot_unavailable", "message" => "Snapshot unavailable"}
              }
   end
@@ -551,6 +553,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert timeout_payload ==
              %{
                "generated_at" => timeout_payload["generated_at"],
+               "service" => Jason.decode!(Jason.encode!(SymphonyElixir.SourceRevision.metadata())),
                "error" => %{"code" => "snapshot_timeout", "message" => "Snapshot timed out"}
              }
   end
@@ -692,6 +695,10 @@ defmodule SymphonyElixir.ExtensionsTest do
   end
 
   test "dashboard liveview renders an unavailable state without crashing" do
+    previous = SymphonyElixir.SourceRevision.metadata()
+    SymphonyElixir.SourceRevision.initialize(__DIR__)
+    on_exit(fn -> :persistent_term.put({SymphonyElixir.SourceRevision, :metadata}, previous) end)
+
     start_test_endpoint(
       orchestrator: Module.concat(__MODULE__, :MissingDashboardOrchestrator),
       snapshot_timeout_ms: 5
@@ -700,6 +707,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     {:ok, _view, html} = live(build_conn(), "/")
     assert html =~ "Snapshot unavailable"
     assert html =~ "snapshot_unavailable"
+    assert html =~ "Revision unknown"
   end
 
   test "agent inspector shows the work item, route, costs, and recent activity" do

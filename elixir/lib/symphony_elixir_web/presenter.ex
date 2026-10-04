@@ -4,7 +4,7 @@ defmodule SymphonyElixirWeb.Presenter do
   """
 
   alias SymphonyElixir.{Config, Governor, Operations, Orchestrator, Project, Projects, Quota, Service}
-  alias SymphonyElixir.{StatusDashboard, Transcript, Workspace}
+  alias SymphonyElixir.{SourceRevision, StatusDashboard, Transcript, Workspace}
   alias SymphonyElixirWeb.{Redaction, ServiceSnapshot}
 
   # Quota older than this is shown as stale (throttling settings refine it).
@@ -25,10 +25,18 @@ defmodule SymphonyElixirWeb.Presenter do
         build(snapshot, settings(), runtime_context(), now, opts)
 
       :timeout ->
-        %{generated_at: generated_at(now), error: %{code: "snapshot_timeout", message: "Snapshot timed out"}}
+        %{
+          generated_at: generated_at(now),
+          service: SourceRevision.metadata(),
+          error: %{code: "snapshot_timeout", message: "Snapshot timed out"}
+        }
 
       :unavailable ->
-        %{generated_at: generated_at(now), error: %{code: "snapshot_unavailable", message: "Snapshot unavailable"}}
+        %{
+          generated_at: generated_at(now),
+          service: SourceRevision.metadata(),
+          error: %{code: "snapshot_unavailable", message: "Snapshot unavailable"}
+        }
     end
   end
 
@@ -126,6 +134,7 @@ defmodule SymphonyElixirWeb.Presenter do
 
     %{
       generated_at: generated_at(now),
+      service: SourceRevision.metadata(),
       counts: counts,
       running: Enum.map(snapshot.running, &running_entry_payload(&1, transcripts)),
       retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
