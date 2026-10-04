@@ -61,6 +61,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <div class="brand-text">
             <h1 class="brand-title">Crescendo</h1>
             <p class="brand-sub"><%= brand_line(@payload) %></p>
+            <p class="brand-sub" id="service-revision">
+              <%= if @payload.service.revision do %>
+                Revision <a href={@payload.service.commit_url} title={@payload.service.revision}><%= String.slice(@payload.service.revision, 0, 7) %></a>
+              <% else %>
+                Revision unknown
+              <% end %>
+            </p>
           </div>
           <.live_badge />
         </div>
