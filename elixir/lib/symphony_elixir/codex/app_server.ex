@@ -977,7 +977,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp refresh_native_model(port, %{"method" => "model/rerouted", "params" => %{"toModel" => model}}) do
+  defp refresh_native_model(port, %{"method" => "model/rerouted", "params" => %{"toModel" => model}})
+       when is_binary(model) do
     Process.put({port, :metadata}, Map.put(Process.get({port, :metadata}, %{}), :model, model))
   end
 
