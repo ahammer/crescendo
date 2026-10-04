@@ -1100,6 +1100,12 @@ Important emitted events include, for example:
 - `other_message`
 - `malformed`
 
+The orchestrator MUST tolerate non-object diagnostic payloads, including malformed protocol
+text. Model and turn bookkeeping MUST read only object envelopes and well-shaped fields;
+unrecognized content MUST NOT terminate the project or release its workers. Diagnostic content
+remains available in the last-message summary, and later valid notifications continue accounting
+and completion tracking. Optional protocol capture follows the same envelope validation.
+
 ### 10.5 Approval, Tool Calls, and User Input Policy
 
 Approval, sandbox, and user-input behavior is implementation-defined.

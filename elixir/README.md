@@ -117,6 +117,10 @@ The dashboard labels USD as an API-equivalent estimate. `usage.account_usage` re
 estimate coverage; missing account billing, independent acceptance evidence and helper usage stay
 unknown in `usage.delivery_metrics`.
 
+Non-object Codex messages remain diagnostic summaries. Model/turn bookkeeping and optional
+notification capture ignore malformed envelopes and fields without stopping project workers;
+subsequent valid notifications still update usage, model reroutes and completion facts.
+
 Two optional per-project settings support the [token-cache plan](docs/token_cache_optimization_plan.md):
 `codex.resume_threads: false` and `codex.developer_instructions: null`. Their defaults preserve fresh
 worker threads and existing instruction channels. Only local issue work within one logical attempt

@@ -36,6 +36,31 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     end
   end
 
+  test "malformed model reroutes preserve native metadata for later usage and completion" do
+    fixture = native_fixture()
+    parent = self()
+    handler = fn message -> send(parent, {:native, message}) end
+    {:ok, session} = AppServer.start_session(fixture.workspace)
+    on_exit(fn -> AppServer.stop_session(session) end)
+
+    for {rerouted, expected} <- [
+          {42, "resolved-model"},
+          {%{}, "resolved-model"},
+          {[], "resolved-model"},
+          {true, "resolved-model"},
+          {nil, "resolved-model"},
+          {"gpt-6-sol", "gpt-6-sol"},
+          {false, "gpt-6-sol"}
+        ] do
+      change_fixture(fixture, %{"rerouted_model" => rerouted})
+      assert {:ok, _turn} = AppServer.run_turn(session, "task", fixture.issue, on_message: handler)
+      assert_received {:native, %{payload: %{"method" => "model/rerouted", "params" => %{"toModel" => ^rerouted}}}}
+      assert_received {:native, %{payload: %{"method" => "thread/tokenUsage/updated"}} = update}
+      assert update.model == expected
+      assert_received {:native, %{event: :turn_completed, model: ^expected}}
+    end
+  end
+
   test "native resume requires a known completed boundary and reconciles restored usage before new work" do
     fixture = native_fixture()
     codex = %{Config.settings!().codex | resume_threads: true}
@@ -744,6 +769,8 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
             turn = 'turn-'+str(state['turns'])
             state['last_turn'] = turn
             result = {'turn':{'id':turn}}
+            if 'rerouted_model' in cfg:
+                emit({'method':'model/rerouted','params':{'toModel':cfg['rerouted_model']}})
             emit(usage(thread, state))
             emit({'method':'turn/completed','params':{'threadId':'foreign','turn':{'id':'foreign','status':'completed'}}})
             emit({'method':'turn/completed','params':{'threadId':thread,'turn':{'id':turn,'status':cfg.get('terminal_status','completed')}}})

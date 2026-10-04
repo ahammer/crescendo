@@ -37,6 +37,7 @@ defmodule SymphonyElixir.TestSupport do
         Workflow.set_workflow_file_path(workflow_file)
         if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
         stop_default_http_server()
+        SymphonyElixir.TestSupport.stop_default_orchestrator()
 
         on_exit(fn ->
           Application.delete_env(:symphony_elixir, :workflow_file_path)
@@ -85,6 +86,14 @@ defmodule SymphonyElixir.TestSupport do
       _ ->
         :ok
     end
+  end
+
+  def stop_default_orchestrator do
+    if runtime = Process.whereis(SymphonyElixir.AgentRuntimeSupervisor) do
+      Supervisor.terminate_child(runtime, SymphonyElixir.Orchestrator)
+    end
+
+    :ok
   end
 
   defp workflow_content(overrides) do
