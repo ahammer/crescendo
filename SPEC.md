@@ -2630,8 +2630,9 @@ verify this transport behavior.
 
 Operations owns cumulative usage after worker removal. Late supported events reconcile retained
 run/thread/item/model/date attribution exactly once, independently of active worker actions.
-Terminal observations and incomplete accounting remain explicit in persisted history and summaries;
-missing cache-write and separately launched helper/reviewer usage remain unknown. Run attribution
+Terminal observations and incomplete accounting remain explicit in persisted history and summaries.
+Stale or duplicate notifications cannot erase previously observed turn usage evidence.
+Missing cache-write and separately launched helper/reviewer usage remain unknown. Run attribution
 expires with the existing 90-day history. A resumed thread fences its previous run's late events.
 Codex 0.160.0 provides cumulative token-usage notifications, not a `thread/read` usage snapshot.
 No turn may be launched solely for telemetry. See [the bounded reconciliation procedure and

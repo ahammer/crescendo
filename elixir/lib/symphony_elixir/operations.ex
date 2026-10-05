@@ -304,7 +304,8 @@ defmodule SymphonyElixir.Operations do
     if match?({:ok, _}, result) do
       run = if snapshot[:cache_write_observed], do: Map.put(run, :cache_write_status, "observed"), else: run
       turn = complete_turn(snapshot)
-      run = if matching_turn?(run, turn), do: Map.put(run, :usage_turn, turn), else: run
+      # Stale notifications cannot erase usage observed before turn/start.
+      run = if turn, do: Map.update(run, :usage_turns, MapSet.new([turn]), &MapSet.put(&1, turn)), else: run
       save_accounting_observation(table, run_id, run)
     end
 
@@ -313,13 +314,9 @@ defmodule SymphonyElixir.Operations do
 
   defp observe_boundary(table, id, run, attribution, %{event: :session_started, thread_id: thread, turn_id: turn}, true)
        when thread == attribution.thread_id do
-    # Native usage may arrive before turn/start returns the new turn ID.
-    usage_turn = lookup(table, {:thread_usage, attribution.thread_key}, %{})[:last_turn]
-
     run =
       run
       |> Map.put(:active_turn, turn)
-      |> Map.put(:usage_turn, if(usage_turn == turn, do: turn))
       |> Map.delete(:terminal_turn)
 
     save_accounting_observation(table, id, run)
@@ -346,7 +343,7 @@ defmodule SymphonyElixir.Operations do
     do: is_binary(turn) and (is_nil(run[:active_turn]) or run[:active_turn] == turn)
 
   defp save_accounting_observation(table, run_id, run) do
-    status = if is_binary(run[:usage_turn]) and run[:usage_turn] == run[:terminal_turn], do: "terminal_observed", else: "incomplete"
+    status = if MapSet.member?(run[:usage_turns] || MapSet.new(), run[:terminal_turn]), do: "terminal_observed", else: "incomplete"
     :ok = :dets.insert(table, {{:lineage_run, run_id}, Map.put(run, :accounting_status, status)})
     :ok = :dets.sync(table)
   end

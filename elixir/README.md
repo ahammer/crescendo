@@ -713,6 +713,7 @@ cannot act on a replacement worker or grant checkpoint eligibility. Run history 
 summaries show corrected estimates and explicit `terminal_observed` / `incomplete` accounting.
 Terminal observation is evidence of a matching cumulative snapshot and terminal turn, not a
 promise of complete provider billing. Missing cache-write and helper/reviewer coverage stay unknown.
+Observed turn usage evidence survives older notifications, including before turn-start responses.
 
 The offline tests use the pinned Codex 0.160.0 schema and a synthetic sanitized reproduction of the
 reported aggregate gap. Graceful teardown flushes supported queued events; force termination can

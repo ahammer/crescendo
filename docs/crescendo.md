@@ -517,6 +517,8 @@ and a matching terminal turn were observed, including failed/interrupted turns. 
 promise provider billing completeness. Starting another turn makes terminal accounting
 incomplete until that turn's usage and terminal event are observed. Missing cache-write fields
 remain `unknown`; cached input and reasoning output remain subsets, never additional tokens.
+Observed turn usage evidence stays in bounded run history, so an older notification cannot erase
+it when cumulative usage precedes the turn-start response.
 
 The pinned Codex 0.160.0 generated schema exposes `thread/tokenUsage/updated.tokenUsage.total`.
 `last` is not cumulative, `turn/completed` contains terminal status but no usage snapshot, and

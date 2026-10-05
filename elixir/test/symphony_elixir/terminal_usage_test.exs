@@ -118,6 +118,28 @@ defmodule SymphonyElixir.TerminalUsageTest do
     assert Operations.snapshot(table).accounting.incomplete == 1
   end
 
+  test "stale usage cannot erase early continuation evidence", %{table: table} do
+    previous = %{"inputTokens" => 100, "outputTokens" => 20}
+
+    for {id, total} <- [{"advanced", %{"inputTokens" => 200, "outputTokens" => 40}}, {"unchanged", previous}] do
+      bind(table, id, id)
+      Operations.reconcile_usage(table, "issue", id, %{event: :session_started, thread_id: id, turn_id: "previous"}, true)
+      Operations.reconcile_usage(table, "issue", id, usage(id, previous, "previous"), true)
+      Operations.reconcile_usage(table, "issue", id, terminal(id, "previous", "completed"))
+      Operations.reconcile_usage(table, "issue", id, usage(id, total, "next"), true)
+      Operations.reconcile_usage(table, "issue", id, usage(id, previous, "previous"), true)
+      Operations.reconcile_usage(table, "issue", id, %{event: :session_started, thread_id: id, turn_id: "next"}, true)
+      Operations.reconcile_usage(table, "issue", id, terminal(id, "next", "completed"))
+
+      [{_, run}] = :dets.lookup(table, {:lineage_run, id})
+      assert run.accounting_status == "terminal_observed"
+      assert Operations.run_usage(table, id).total_tokens == total["inputTokens"] + total["outputTokens"]
+    end
+
+    assert Operations.snapshot(table).accounting.terminal_observed == 2
+    assert Operations.snapshot(table).recorded.total_tokens == 360
+  end
+
   test "OTP DOWN and redispatch preserve late accounting without changing the replacement worker", %{table: table, path: path} do
     Operations.close(table)
     {:ok, pid} = Orchestrator.start_link(name: __MODULE__.Orchestrator, operations_path: path, operations_table: table)

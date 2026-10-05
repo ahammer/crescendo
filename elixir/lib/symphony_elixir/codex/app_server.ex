@@ -178,7 +178,7 @@ defmodule SymphonyElixir.Codex.AppServer do
                   session_id: session_id,
                   reason: reason
                 },
-                metadata
+                Process.get({port, :metadata}, metadata)
               )
 
               {:error, reason}
@@ -186,7 +186,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
         {:error, reason} ->
           Logger.error("Codex session failed for #{issue_context(issue)}: #{inspect(reason)}")
-          emit_message(on_message, :startup_failed, %{reason: reason}, metadata)
+          emit_message(on_message, :startup_failed, %{reason: reason}, Process.get({port, :metadata}, metadata))
           {:error, reason}
       end
     after
@@ -214,7 +214,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         on_message,
         :account_usage,
         %{thread_id: session.thread_id, account_usage: usage},
-        session.metadata
+        Process.get({session.port, :metadata}, session.metadata)
       )
     end
 

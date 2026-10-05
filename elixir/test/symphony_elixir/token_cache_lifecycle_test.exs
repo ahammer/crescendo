@@ -108,6 +108,55 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     end
   end
 
+  for status <- ["failed", "interrupted"] do
+    @tag terminal_status: status
+    test "late usage after a rerouted #{status} turn retains the executed model and rates", %{terminal_status: status} do
+      fixture = native_fixture()
+      change_fixture(fixture, %{"rerouted_model" => "gpt-6-astra", "terminal_status" => status, "teardown_usage" => true})
+      {table, _path} = ledger()
+      {:ok, session} = AppServer.start_session(fixture.workspace)
+      on_exit(fn -> AppServer.stop_session(session) end)
+      key = session.metadata.thread_key
+      Operations.start_run(table, "run", %{issue_id: fixture.issue.id, issue_identifier: fixture.issue.identifier})
+      Operations.thread_context(table, key, %{run_id: "run"})
+
+      Operations.bind_accounting(table, "run", %{
+        issue_id: fixture.issue.id,
+        thread_id: session.thread_id,
+        thread_key: key,
+        identifier: fixture.issue.identifier,
+        model: session.metadata.model,
+        date: Date.to_iso8601(Date.utc_today()),
+        rates: Operations.rates(nil)
+      })
+
+      parent = self()
+
+      active = fn update ->
+        send(parent, {:active, update})
+        Operations.reconcile_usage(table, fixture.issue.id, "run", update, true)
+      end
+
+      assert {:error, {:turn_not_completed, ^status}} = AppServer.run_turn(session, "task", fixture.issue, on_message: active)
+      assert_received {:active, %{event: :turn_ended_with_error, model: "gpt-6-astra"}}
+      Operations.finish_run(table, "run", status, %{issue_identifier: fixture.issue.identifier})
+
+      late = fn update ->
+        send(parent, {:late, update})
+        Operations.reconcile_usage(table, fixture.issue.id, "run", update)
+      end
+
+      assert :ok = AppServer.read_account_usage(session, on_message: late)
+      assert_received {:late, %{event: :account_usage, model: "gpt-6-astra"}}
+
+      snapshot = Operations.snapshot(table)
+      assert [%{model: "gpt-6-astra", total_tokens: 240, usd_micro: 1_280}] = snapshot.by_model
+      assert snapshot.recorded.unpriced_tokens == 0
+      assert snapshot.accounting.terminal_observed == 1
+      assert Enum.all?(snapshot.activity, &(&1.usd_micro == 1_280))
+    end
+  end
+
   test "native resume requires a known completed boundary and reconciles restored usage before new work" do
     fixture = native_fixture()
     codex = %{Config.settings!().codex | resume_threads: true}
