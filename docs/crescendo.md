@@ -293,6 +293,13 @@ stay explicit.
 
 ## Research channels
 
+When GitHub delivery attempts are exhausted, retirement closes the issue as not planned and
+closes its owned drafts. Ownership requires a body line starting with `Closes #N`, `Fixes #N`,
+`Resolves #N` (including singular/past forms), `Symphony issue: #N` or `Crescendo issue: #N`,
+or an `issue-N` branch segment with an optional hyphenated suffix. The number must match exactly;
+mentioning a prerequisite or baseline failure does not make a draft belong to that issue.
+Non-draft PRs remain available for independent review.
+
 A channel under `autopilot.channels` is its focus text, or an object:
 
 ```yaml
