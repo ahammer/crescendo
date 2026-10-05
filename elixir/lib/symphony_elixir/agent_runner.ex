@@ -36,6 +36,9 @@ defmodule SymphonyElixir.AgentRunner do
         send_worker_message(codex_update_recipient, issue, :worker_startup_failure, diagnostic, opts)
         raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
 
+      {:error, {:protocol_buffer_overflow, diagnostic}} ->
+        exit({:shutdown, {:protocol_buffer_overflow, diagnostic}})
+
       {:error, reason} ->
         Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
         raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
@@ -296,7 +299,10 @@ defmodule SymphonyElixir.AgentRunner do
             Keyword.put(opts, :on_message, codex_message_handler(recipient, issue, opts))
           )
 
-    persist_checkpoint(session, issue, recipient, opts, checkpoint || %{eligible: false})
+    case checkpoint do
+      {:error, _} = error -> error
+      _ -> persist_checkpoint(session, issue, recipient, opts, checkpoint || %{eligible: false})
+    end
   end
 
   defp persist_checkpoint(session, issue, recipient, opts, checkpoint) do

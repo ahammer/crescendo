@@ -477,6 +477,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp worker_outcome({:shutdown, :deployment_drain}),
     do: {"interrupted", "Worker yielded for deployment drain", "deployment_drain"}
 
+  defp worker_outcome({:shutdown, {:protocol_buffer_overflow, _}}),
+    do: {"interrupted", "App-server protocol overflow", "protocol_buffer_overflow"}
+
   defp worker_outcome(_reason), do: {"failed", "Worker failed", nil}
 
   defp handle_agent_down(_reason, state, issue_id, %{startup_failure: diagnostic} = entry, _session_id) do
@@ -490,6 +493,30 @@ defmodule SymphonyElixir.Orchestrator do
       delay_type: :continuation,
       worker_host: Map.get(running_entry, :worker_host),
       workspace_path: Map.get(running_entry, :workspace_path)
+    })
+  end
+
+  defp handle_agent_down(
+         {:shutdown, {:protocol_buffer_overflow, _}},
+         state,
+         issue_id,
+         %{issue: %Issue{kind: :research, research: %{channel: channel}}},
+         _session
+       ) do
+    settings = Config.settings!().autopilot
+    autopilot = Autopilot.record_research_finished(state.autopilot, channel, :interrupted, now(), settings)
+    state |> put_autopilot(autopilot) |> release_issue_claim(issue_id)
+  end
+
+  defp handle_agent_down({:shutdown, {:protocol_buffer_overflow, diagnostic}}, state, issue_id, entry, _session) do
+    schedule_issue_retry(state, issue_id, Map.get(entry, :retry_attempt, 0), %{
+      identifier: entry.identifier,
+      issue_url: entry.issue.url,
+      delay_type: :held,
+      delay_ms: 30_000,
+      error: "App-server transport interrupted: #{inspect(diagnostic)}",
+      worker_host: Map.get(entry, :worker_host),
+      workspace_path: Map.get(entry, :workspace_path)
     })
   end
 

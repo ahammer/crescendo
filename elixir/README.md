@@ -676,3 +676,31 @@ the retry budget on reopening retains new attempts. Plain issue closure has unkn
 For accepted issue work without a merged PR, apply `<prefix>:delivery:verified-existing` or
 `<prefix>:delivery:split` after validation and document scoped evidence in the workpad; `not_planned`
 is retirement. See [the detailed semantics](../docs/crescendo.md#durable-outcome-facts).
+
+### Bounded Codex notification transport
+
+Codex stdio input uses a 16 MiB frame assembly ceiling and a separate 4 MiB RPC/control
+payload ceiling. Partial turn-frame assembly has an absolute `codex.read_timeout_ms` deadline
+from its first fragment, while complete stream updates retain the configured silence timeout.
+Ordinary notifications drain during RPC waits; tool/approval requests use their
+normal handlers, and terminal/input events and startup cumulative usage remain in the bounded
+control queue (4 MiB / 1,024 entries). Codex 0.160.0 generated schema excerpts are checked in under
+`test/fixtures/codex-0.160.0-output-schema.json`. Diagnostic copies of supported text deltas,
+agent message text and command `aggregatedOutput` retain at most 16 KiB per field with an explicit
+truncation marker; raw diagnostic copies are also bounded. Executed commands, tool arguments,
+RPC results, usage, model reroutes and terminal status are never truncated. Existing dashboard
+transcript entry/output limits still apply.
+
+A frame over 16 MiB, a response or irreducible control payload over 4 MiB, or saturation of the
+control queue fails closed. Overflow diagnostics record the guard, observed bytes/count, phase,
+request identity/method, thread/turn identity and work item without payload contents. After overflow,
+the stream is unusable: account-usage RPC is skipped and the process group is closed during normal
+worker cleanup. Admitted transport overflow records an infrastructure interruption and retries
+after 30 seconds without advancing the implementation attempt; startup overflow retains startup
+admission recovery. Research interruptions use the durable channel schedule and preserve the
+channel's attempt count, rather than looking up synthetic IDs in the tracker. Optional native
+context and checkpoint reads propagate transport overflow; a failed transport rejects all later
+requests, including continuation turns. Native servers must split larger output into bounded delta
+frames; this client does not stream arbitrary JSON strings or accept unbounded controls. Output-only
+fields beyond the verified schema remain subject to the control payload ceiling. No billable model run is needed to
+verify this transport behavior.

@@ -179,7 +179,7 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     assert :ok = AppServer.read_account_usage(session)
   end
 
-  test "RPC waits are bounded even while notifications continue and oversized startup buffers fail closed" do
+  test "RPC waits are bounded while notifications continue and ordinary bursts drain promptly" do
     fixture = native_fixture()
     change_fixture(fixture, %{"initialize_noise" => 40})
 
@@ -200,7 +200,197 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
       codex_read_timeout_ms: 5000
     )
 
-    assert {:error, :protocol_buffer_overflow} = AppServer.start_session(fixture.workspace)
+    assert {:ok, session} = AppServer.start_session(fixture.workspace)
+    AppServer.stop_session(session)
+  end
+
+  test "output policy matches the checked-in generated Codex 0.160.0 schema excerpts" do
+    schema = File.read!("test/fixtures/codex-0.160.0-output-schema.json") |> Jason.decode!()
+    assert schema["provenance"]["version"] == "codex-cli 0.160.0"
+
+    for type <- [
+          "AgentMessageDeltaNotification",
+          "CommandExecutionOutputDeltaNotification",
+          "FileChangeOutputDeltaNotification",
+          "ReasoningTextDeltaNotification",
+          "ReasoningSummaryTextDeltaNotification"
+        ] do
+      assert schema[type]["properties"]["delta"]["type"] == "string"
+      assert Enum.all?(["delta", "threadId", "turnId", "itemId"], &(&1 in schema[type]["required"]))
+    end
+
+    assert schema["CommandExecutionThreadItem"]["properties"]["aggregatedOutput"]["type"] == ["string", "null"]
+    assert schema["AgentMessageThreadItem"]["properties"]["text"]["type"] == "string"
+    assert schema["DynamicToolCallParams"]["properties"]["arguments"] == true
+  end
+
+  test "large fragmented output drains around the RPC response without losing usage, reroutes or completion" do
+    fixture = native_fixture()
+    change_fixture(fixture, %{"output_bytes" => 8_240_419, "fragment_bytes" => 65_537, "output_burst" => 1_100, "rerouted_model" => "gpt-6-sol"})
+    parent = self()
+    handler = fn message -> send(parent, {:large, message}) end
+    {:ok, session} = AppServer.start_session(fixture.workspace, on_message: handler)
+
+    try do
+      assert {:ok, turn} = AppServer.run_turn(session, "task", fixture.issue, on_message: handler)
+      assert turn.turn_id == "turn-1"
+      assert Process.get({session.port, :pending_bytes}) == 0
+
+      for _ <- 1..1_100 do
+        assert_receive {:large, %{payload: %{"method" => "item/commandExecution/outputDelta", "params" => %{"delta" => "log"}}}}
+      end
+
+      assert_receive {:large, %{payload: %{"params" => %{"delta" => output}}, raw: raw}}
+      assert byte_size(output) < 17_000
+      assert byte_size(raw) < 17_000
+      assert output =~ "8240419 bytes"
+      assert_receive {:large, %{payload: %{"method" => "item/completed", "params" => %{"item" => item}}}}
+      assert byte_size(item["aggregatedOutput"]) < 17_000
+      assert item["command"] == "echo original " <> String.duplicate("x", 128)
+
+      for field <- [item["command"], item["aggregatedOutput"], output, raw] do
+        assert :binary.referenced_byte_size(field) == byte_size(field)
+      end
+
+      assert_receive {:large, %{payload: %{"method" => "thread/tokenUsage/updated"}} = update}
+      assert Usage.snapshot(update).total.total_tokens == 120
+      assert update.model == "gpt-6-sol"
+      assert_receive {:large, %{event: :turn_completed, payload: %{"params" => %{"turn" => %{"items" => [terminal_item]}}}}}
+      assert byte_size(terminal_item["aggregatedOutput"]) <= 16_384
+      refute_receive {:large, %{event: :turn_completed}}
+    after
+      AppServer.stop_session(session)
+    end
+  end
+
+  test "a single oversized output frame after the RPC response is bounded in the turn loop" do
+    fixture = native_fixture()
+    change_fixture(fixture, %{"output_bytes" => 8_240_419, "response_first" => true})
+    parent = self()
+    handler = fn message -> send(parent, {:single, message}) end
+    assert {:ok, _} = AppServer.run(fixture.workspace, "task", fixture.issue, on_message: handler)
+    assert_receive {:single, %{payload: %{"params" => %{"delta" => output}}}}
+    assert byte_size(output) <= 16_384
+    assert output =~ "8240419 bytes"
+    assert_receive {:single, %{event: :turn_completed}}
+    refute_receive {:single, %{event: :turn_completed}}
+  end
+
+  test "slow partial frames cannot indefinitely reset the turn reader deadline" do
+    fixture = native_fixture()
+    change_fixture(fixture, %{"output_bytes" => 5_000_000, "response_first" => true, "fragment_bytes" => 1_048_576, "fragment_delay" => 0.1})
+
+    {:ok, session} = AppServer.start_session(fixture.workspace)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: Path.join(fixture.root, "workspaces"),
+      codex_command: "python3 #{Path.join(fixture.root, "server.py")}",
+      codex_read_timeout_ms: 150,
+      codex_turn_timeout_ms: 1_000
+    )
+
+    started = System.monotonic_time(:millisecond)
+    assert {:error, :turn_timeout} = AppServer.run_turn(session, "task", fixture.issue)
+    assert System.monotonic_time(:millisecond) - started < 700
+    assert :ok = AppServer.read_account_usage(session)
+    refute Enum.any?(requests(fixture), &(&1["method"] == "account/usage/read"))
+    assert :ok = AppServer.stop_session(session)
+    assert Port.info(session.port) == nil
+  end
+
+  test "required actions before the turn RPC response execute once with their original arguments" do
+    fixture = native_fixture()
+    change_fixture(fixture, %{"tool_before_response" => true})
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: Path.join(fixture.root, "workspaces"),
+      codex_command: "python3 #{Path.join(fixture.root, "server.py")}",
+      codex_approval_policy: "never"
+    )
+
+    {:ok, session} = AppServer.start_session(fixture.workspace)
+    parent = self()
+
+    executor = fn "fixture", arguments ->
+      send(parent, {:executed, arguments})
+      %{"success" => true, "output" => "done"}
+    end
+
+    try do
+      assert {:ok, _} = AppServer.run_turn(session, "task", fixture.issue, tool_executor: executor)
+      assert_receive {:executed, %{"original" => original}}
+      assert original == String.duplicate("x", 20_000)
+      refute_receive {:executed, _}
+      assert Enum.count(requests(fixture), &(&1["id"] == "call")) == 1
+      assert Enum.count(requests(fixture), &(&1["id"] == "approval")) == 1
+    after
+      AppServer.stop_session(session)
+    end
+  end
+
+  test "overflow diagnostics distinguish assembly, responses and queued controls without payloads" do
+    fixture = native_fixture()
+
+    for {configuration, guard} <- [
+          {%{"response_bytes" => 5_000_000, "fragment_bytes" => 65_537}, :response_payload},
+          {%{"assembly_bytes" => 18_000_000}, :frame_assembly},
+          {%{"control_burst" => 1_025}, :notification_queue},
+          {%{"control_bytes" => 5_000_000}, :notification_payload}
+        ] do
+      File.write!(Path.join(fixture.root, "fixture.json"), Jason.encode!(configuration))
+      assert {:error, {:protocol_buffer_overflow, details}} = AppServer.start_session(fixture.workspace)
+      assert details.guard == guard
+      assert details.phase == :startup
+      assert details.request_id == 1
+      assert details.request_method == "initialize"
+      assert details.bytes > 0
+      assert details.count == if(guard == :notification_queue, do: 1_025, else: 0)
+      refute inspect(details) =~ "secret"
+    end
+  end
+
+  test "an overflowed turn skips further RPC reads and closes its child on shutdown" do
+    fixture = native_fixture()
+    change_fixture(fixture, %{"turn_assembly_bytes" => 18_000_000})
+    {:ok, session} = AppServer.start_session(fixture.workspace)
+    assert {:error, {:protocol_buffer_overflow, details}} = AppServer.run_turn(session, "task", fixture.issue)
+    assert details.guard == :frame_assembly
+    assert details.phase == :turn
+    assert details.thread_id == session.thread_id
+    assert :ok = AppServer.read_account_usage(session)
+    refute Enum.any?(requests(fixture), &(&1["method"] == "account/usage/read"))
+    assert :ok = AppServer.stop_session(session)
+    assert Port.info(session.port) == nil
+    assert Process.get({session.port, :protocol_failed}) == nil
+    change_fixture(fixture, %{"turn_assembly_bytes" => 0})
+    assert {:ok, _} = AppServer.run(fixture.workspace, "healthy", fixture.issue)
+  end
+
+  test "optional context reads cannot hide an overflow or reuse the failed transport" do
+    fixture = native_fixture()
+    codex = %{Config.settings!().codex | resume_threads: true}
+    opts = [kind: :issue, codex_settings: codex]
+    change_fixture(fixture, %{"overflow_method" => "skills/list"})
+    assert {:error, {:protocol_buffer_overflow, startup}} = AppServer.start_session(fixture.workspace, opts)
+    assert startup.request_method == "skills/list"
+    refute Enum.any?(requests(fixture), &(&1["method"] == "mcpServerStatus/list"))
+
+    change_fixture(fixture, %{"overflow_method" => nil})
+    {:ok, session} = AppServer.start_session(fixture.workspace, opts)
+
+    try do
+      assert {:ok, turn} = AppServer.run_turn(session, "task", fixture.issue)
+      change_fixture(fixture, %{"overflow_method" => "config/read"})
+      assert {:error, {:protocol_buffer_overflow, diagnostic}} = AppServer.checkpoint(session, turn, [])
+      assert diagnostic.request_method == "config/read"
+      previous = requests(fixture)
+      assert {:error, {:protocol_buffer_overflow, ^diagnostic}} = AppServer.run_turn(session, "continue", fixture.issue)
+      assert requests(fixture) == previous
+      change_fixture(fixture, %{"overflow_method" => nil})
+      assert {:ok, _} = AppServer.run(fixture.workspace, "isolated", fixture.issue)
+    after
+      AppServer.stop_session(session)
+    end
   end
 
   test "one atomic thread record survives replay and charges each resumed run only for its new work" do
@@ -716,10 +906,16 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     state_file = root / 'state.json'
     config_file = root / 'fixture.json'
     def emit(message):
-        print(json.dumps(message), flush=True)
+        cfg = json.loads(config_file.read_text()) if config_file.exists() else {}
+        data = json.dumps(message)+'\\n'
+        fragment = cfg.get('fragment_bytes',len(data))
+        for start in range(0,len(data),fragment):
+            sys.stdout.write(data[start:start+fragment])
+            sys.stdout.flush()
+            if len(data) > fragment: time.sleep(cfg.get('fragment_delay',0))
     def usage(thread, state):
-        total = state.get('usage', {}).get(thread, {'inputTokens':100, 'cachedInputTokens':80, 'outputTokens':20, 'totalTokens':400000})
-        return {'method':'thread/tokenUsage/updated','params':{'threadId':thread,'turnId':state.get('last_turn','turn-1'),'tokenUsage':{'total':total}}}
+        total = state.get('usage', {}).get(thread, {'inputTokens':100, 'cachedInputTokens':80, 'outputTokens':20, 'reasoningOutputTokens':0, 'totalTokens':400000})
+        return {'method':'thread/tokenUsage/updated','params':{'threadId':thread,'turnId':state.get('last_turn','turn-1'),'tokenUsage':{'total':total,'last':total,'modelContextWindow':None}}}
     thread = None
     for line in sys.stdin:
         request = json.loads(line)
@@ -728,6 +924,9 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
         method = request.get('method')
         if method == 'initialized': continue
         cfg = json.loads(config_file.read_text()) if config_file.exists() else {}
+        if method == cfg.get('overflow_method'):
+            emit({'id':request['id'],'result':{'secret':'x'*5000000}})
+            continue
         state = json.loads(state_file.read_text()) if state_file.exists() else {}
         params = request.get('params', {})
         result = {}
@@ -737,7 +936,17 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
                 time.sleep(0.02)
             for _ in range(cfg.get('initialize_burst',0)):
                 emit({'method':'notice','params':{}})
+            if cfg.get('assembly_bytes'):
+                sys.stdout.write('{"secret":"'+('x'*cfg['assembly_bytes']))
+                sys.stdout.flush()
+                time.sleep(1)
+                continue
+            for n in range(cfg.get('control_burst',0)):
+                emit({'id':'approval-'+str(n),'method':'item/commandExecution/requestApproval','params':{'threadId':'thread-fixture','turnId':'turn-fixture','itemId':'cmd','startedAtMs':100}})
+            if cfg.get('control_bytes'):
+                emit({'id':'control','method':'item/tool/call','params':{'threadId':'thread-fixture','turnId':'turn-fixture','callId':'control','tool':'fixture','arguments':{'secret':'x'*cfg['control_bytes']}}})
             result = {'userAgent':'codex_cli_rs/'+cfg.get('version','0.160.0'), 'codexHome':str(root/'home')}
+            if cfg.get('response_bytes'): result['secret'] = 'x'*cfg['response_bytes']
         elif method == 'config/read':
             if cfg.get('config_error'):
                 emit({'id':request['id'],'error':{'code':-1,'message':'unavailable'}})
@@ -769,17 +978,36 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
             turn = 'turn-'+str(state['turns'])
             state['last_turn'] = turn
             result = {'turn':{'id':turn}}
+            if cfg.get('response_first'): emit({'id':request['id'],'result':result})
+            for n in range(cfg.get('output_burst',0)):
+                emit({'method':'item/commandExecution/outputDelta','params':{'threadId':thread,'turnId':turn,'itemId':'cmd','delta':'log'}})
+            if cfg.get('output_bytes'):
+                emit({'method':'item/commandExecution/outputDelta','params':{'threadId':thread,'turnId':turn,'itemId':'cmd','delta':'x'*cfg['output_bytes']}})
+                item = {'type':'commandExecution','id':'cmd','command':'echo original '+('x'*128),'cwd':workspace,'status':'completed','commandActions':[],'exitCode':0,'durationMs':1,'aggregatedOutput':'x'*cfg['output_bytes']}
+                emit({'method':'item/completed','params':{'threadId':thread,'turnId':turn,'completedAtMs':100,'item':item}})
+            if cfg.get('tool_before_response'):
+                arguments = {'original':'x'*20000}
+                emit({'id':'call','method':'item/tool/call','params':{'threadId':thread,'turnId':turn,'callId':'call','tool':'fixture','arguments':arguments}})
+                reply = json.loads(sys.stdin.readline())
+                with (root/'requests.jsonl').open('a') as out: out.write(json.dumps(reply)+'\\n')
+                assert reply['id'] == 'call' and reply['result']['success']
+                emit({'id':'approval','method':'item/commandExecution/requestApproval','params':{'threadId':thread,'turnId':turn,'itemId':'cmd','startedAtMs':100}})
+                reply = json.loads(sys.stdin.readline())
+                with (root/'requests.jsonl').open('a') as out: out.write(json.dumps(reply)+'\\n')
+                assert reply['id'] == 'approval' and reply['result']['decision'] == 'acceptForSession'
+            if cfg.get('turn_assembly_bytes'):
+                emit({'method':'item/tool/call','id':'oversized','params':{'arguments':{'secret':'x'*cfg['turn_assembly_bytes']}}})
             if 'rerouted_model' in cfg:
-                emit({'method':'model/rerouted','params':{'toModel':cfg['rerouted_model']}})
+                emit({'method':'model/rerouted','params':{'threadId':thread,'turnId':turn,'fromModel':'resolved-model','toModel':cfg['rerouted_model'],'reason':'highRiskCyberActivity'}})
             emit(usage(thread, state))
-            emit({'method':'turn/completed','params':{'threadId':'foreign','turn':{'id':'foreign','status':'completed'}}})
-            emit({'method':'turn/completed','params':{'threadId':thread,'turn':{'id':turn,'status':cfg.get('terminal_status','completed')}}})
+            emit({'method':'turn/completed','params':{'threadId':'foreign','turn':{'id':'foreign','items':[],'status':'completed'}}})
+            emit({'method':'turn/completed','params':{'threadId':thread,'turn':{'id':turn,'items':[item] if cfg.get('output_bytes') else [],'status':cfg.get('terminal_status','completed')}}})
         elif method == 'account/usage/read':
             result = {'threadUsage':None}
         else:
             raise RuntimeError('unsupported method '+method)
         state_file.write_text(json.dumps(state))
-        emit({'id':request['id'],'result':result})
+        if method != 'turn/start' or not cfg.get('response_first'): emit({'id':request['id'],'result':result})
     """)
 
     write_workflow_file!(Workflow.workflow_file_path(),

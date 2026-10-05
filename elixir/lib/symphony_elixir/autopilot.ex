@@ -187,7 +187,8 @@ defmodule SymphonyElixir.Autopilot do
   Ends one task run. A delivered run (or one whose deliveries could not be
   checked) starts the task's interval. A short or failed run is retried
   30 minutes later, behind other work; its last allowed attempt
-  ends the task until it is next due. Nothing waits for an operator.
+  ends the task until it is next due. A transport interruption retries after
+  30 seconds without spending an attempt. Nothing waits for an operator.
   """
   @spec record_research_finished(state(), String.t(), atom(), DateTime.t(), map()) :: state()
   def record_research_finished(state, channel, outcome, now, autopilot_settings) do
@@ -197,7 +198,7 @@ defmodule SymphonyElixir.Autopilot do
     task =
       cond do
         outcome in [:delivered, :unverified] -> %{done(now) | last: outcome}
-        attempts >= autopilot_settings.max_item_attempts -> %{done(now) | last: :gave_up}
+        attempts >= autopilot_settings.max_item_attempts and outcome != :interrupted -> %{done(now) | last: :gave_up}
         true -> retry(task, attempts, outcome, now)
       end
 
@@ -207,7 +208,8 @@ defmodule SymphonyElixir.Autopilot do
   defp done(now), do: %{finished_at: now, attempts: 0, retry_at: nil, last: nil}
 
   defp retry(task, attempts, outcome, now) do
-    Map.merge(%{finished_at: nil}, task) |> Map.merge(%{attempts: attempts, retry_at: DateTime.add(now, @retry_ms, :millisecond), last: outcome})
+    delay = if outcome == :interrupted, do: 30_000, else: @retry_ms
+    Map.merge(%{finished_at: nil}, task) |> Map.merge(%{attempts: attempts, retry_at: DateTime.add(now, delay, :millisecond), last: outcome})
   end
 
   @doc "When each configured task is next due, for the dashboard and health checks."
