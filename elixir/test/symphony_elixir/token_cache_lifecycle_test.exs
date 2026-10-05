@@ -36,6 +36,22 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     end
   end
 
+  test "supported cumulative usage queued during graceful teardown is flushed without another turn" do
+    fixture = native_fixture()
+    change_fixture(fixture, %{"teardown_usage" => true})
+    parent = self()
+    handler = fn message -> send(parent, {:teardown, message}) end
+    {:ok, session} = AppServer.start_session(fixture.workspace, on_message: handler)
+    on_exit(fn -> AppServer.stop_session(session) end)
+    assert {:ok, _} = AppServer.run_turn(session, "task", fixture.issue, on_message: handler)
+    assert_receive {:teardown, %{payload: %{"method" => "thread/tokenUsage/updated"}} = initial}
+    assert Usage.snapshot(initial).total.total_tokens == 120
+    assert :ok = AppServer.read_account_usage(session, on_message: handler)
+    assert_receive {:teardown, %{payload: %{"method" => "thread/tokenUsage/updated"}} = final}
+    assert Usage.snapshot(final).total.total_tokens == 240
+    assert Enum.count(requests(fixture), &(&1["method"] == "turn/start")) == 1
+  end
+
   test "malformed model reroutes preserve native metadata for later usage and completion" do
     fixture = native_fixture()
     parent = self()
@@ -1003,6 +1019,9 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
             emit({'method':'turn/completed','params':{'threadId':'foreign','turn':{'id':'foreign','items':[],'status':'completed'}}})
             emit({'method':'turn/completed','params':{'threadId':thread,'turn':{'id':turn,'items':[item] if cfg.get('output_bytes') else [],'status':cfg.get('terminal_status','completed')}}})
         elif method == 'account/usage/read':
+            if cfg.get('teardown_usage'):
+                state.setdefault('usage', {})[thread] = {'inputTokens':200, 'cachedInputTokens':160, 'outputTokens':40, 'reasoningOutputTokens':0, 'totalTokens':240}
+                emit(usage(thread, state))
             result = {'threadUsage':None}
         else:
             raise RuntimeError('unsupported method '+method)

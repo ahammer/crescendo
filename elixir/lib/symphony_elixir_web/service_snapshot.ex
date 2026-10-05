@@ -136,6 +136,7 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
       pricing_as_of: all |> Enum.map(& &1[:pricing_as_of]) |> Enum.find(& &1),
       cost_basis: "api_equivalent_estimate",
       account_usage: account_usage(all),
+      accounting: accounting(all),
       delivery_metrics: delivery_metrics(all),
       today: all |> Enum.map(&(&1[:today] || %{})) |> sum(),
       recorded: all |> Enum.map(&(&1[:recorded] || %{})) |> sum(),
@@ -148,6 +149,11 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
       images: images(ops),
       by_project: Enum.map(ops, fn {id, operations} -> project_spend(id, operations) end)
     }
+  end
+
+  defp accounting(all) do
+    counts = all |> Enum.map(&Map.take(&1[:accounting] || %{}, [:terminal_observed, :incomplete])) |> sum()
+    Map.merge(%{terminal_observed: 0, incomplete: 0, helper_usage_coverage: "unknown"}, counts)
   end
 
   defp account_usage(all) do

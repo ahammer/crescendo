@@ -530,7 +530,8 @@
   "provenance": {
     "version": "codex-cli 0.160.0",
     "command": "codex app-server generate-json-schema --out .scratch/protocol",
-    "server_notification_sha256": "d3479ecf59ca421a8b052d3d15e8196d23d297a0bd85ae5a270a34ddd9c865c9"
+    "server_notification_sha256": "d3479ecf59ca421a8b052d3d15e8196d23d297a0bd85ae5a270a34ddd9c865c9",
+    "thread_read_response_sha256": "3a0aaf9cff80796d07130b85723ca825f9203796d15c878f452083cf9f9a6f0a"
   },
   "ThreadTokenUsage": {
     "properties": {
@@ -664,5 +665,235 @@
       "highRiskCyberActivity"
     ],
     "type": "string"
+  },
+  "ThreadReadResponse": {
+    "properties": {
+      "thread": {
+        "$ref": "#/definitions/Thread"
+      }
+    },
+    "required": [
+      "thread"
+    ],
+    "type": "object"
+  },
+  "Thread": {
+    "properties": {
+      "agentNickname": {
+        "description": "Optional random unique nickname assigned to an AgentControl-spawned sub-agent.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "agentRole": {
+        "description": "Optional role (agent_role) assigned to an AgentControl-spawned sub-agent.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "cliVersion": {
+        "description": "Version of the CLI that created the thread.",
+        "type": "string"
+      },
+      "createdAt": {
+        "description": "Unix timestamp (in seconds) when the thread was created.",
+        "format": "int64",
+        "type": "integer"
+      },
+      "cwd": {
+        "allOf": [
+          {
+            "$ref": "#/definitions/AbsolutePathBuf"
+          }
+        ],
+        "description": "Working directory captured for the thread."
+      },
+      "ephemeral": {
+        "description": "Whether the thread is ephemeral and should not be materialized on disk.",
+        "type": "boolean"
+      },
+      "forkedFromId": {
+        "description": "Source thread id when this thread was created by forking another thread.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "gitInfo": {
+        "anyOf": [
+          {
+            "$ref": "#/definitions/GitInfo"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Optional Git metadata captured when the thread was created."
+      },
+      "historyMode": {
+        "allOf": [
+          {
+            "$ref": "#/definitions/ThreadHistoryMode"
+          }
+        ],
+        "default": "legacy",
+        "description": "Persisted thread history contract selected when this thread was created."
+      },
+      "id": {
+        "description": "Identifier for this thread. Codex-generated thread IDs are UUIDv7.",
+        "type": "string"
+      },
+      "model": {
+        "description": "Current configured model when loaded, otherwise the latest persisted model. Null when unavailable. This is not per-turn execution telemetry.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "modelProvider": {
+        "description": "Model provider used for this thread (for example, 'openai').",
+        "type": "string"
+      },
+      "name": {
+        "description": "Optional user-facing thread title.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "originator": {
+        "description": "Originator recorded when the thread was created, independent of its current client or executor. Null when the recorded originator is unavailable.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "parentThreadId": {
+        "description": "The ID of the parent thread. This will only be set if this thread is a subagent.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "path": {
+        "description": "[UNSTABLE] Path to the thread on disk.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "preview": {
+        "description": "Usually the first user message in the thread, if available.",
+        "type": "string"
+      },
+      "projectId": {
+        "description": "Canonical project assignment owned by app-server, if any.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "reasoningEffort": {
+        "anyOf": [
+          {
+            "$ref": "#/definitions/ReasoningEffort"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Current configured reasoning effort when loaded, otherwise the latest persisted effort. Null when unset or unavailable. This is not per-turn execution telemetry."
+      },
+      "recencyAt": {
+        "description": "Unix timestamp (in seconds) used for thread recency ordering.",
+        "format": "int64",
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "section": {
+        "anyOf": [
+          {
+            "$ref": "#/definitions/ThreadSection"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "The independently persisted section selected for this thread, if any."
+      },
+      "sectionEnteredAt": {
+        "default": null,
+        "description": "Unix timestamp in seconds when the thread entered its current section.",
+        "format": "int64",
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "sessionId": {
+        "description": "Session id shared by threads that belong to the same session tree.",
+        "type": "string"
+      },
+      "source": {
+        "allOf": [
+          {
+            "$ref": "#/definitions/SessionSource"
+          }
+        ],
+        "description": "Origin of the thread (CLI, VSCode, codex exec, codex app-server, etc.)."
+      },
+      "status": {
+        "allOf": [
+          {
+            "$ref": "#/definitions/ThreadStatus"
+          }
+        ],
+        "description": "Current runtime status for the thread."
+      },
+      "threadSource": {
+        "anyOf": [
+          {
+            "$ref": "#/definitions/ThreadSource"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Optional analytics source classification for this thread."
+      },
+      "turns": {
+        "description": "Only populated on `thread/resume`, `thread/fork`, and `thread/read` (when `includeTurns` is true) responses. For all other responses and notifications returning a Thread, the turns field will be an empty list.",
+        "items": {
+          "$ref": "#/definitions/Turn"
+        },
+        "type": "array"
+      },
+      "updatedAt": {
+        "description": "Unix timestamp (in seconds) when the thread was last updated.",
+        "format": "int64",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "cliVersion",
+      "createdAt",
+      "cwd",
+      "ephemeral",
+      "id",
+      "modelProvider",
+      "preview",
+      "projectId",
+      "sessionId",
+      "source",
+      "status",
+      "turns",
+      "updatedAt"
+    ],
+    "type": "object"
   }
 }

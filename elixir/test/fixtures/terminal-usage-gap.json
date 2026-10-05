@@ -1,0 +1,179 @@
+{
+  "provenance": "Synthetic, sanitized offline reproduction of the reported six-run aggregate; not copied live records.",
+  "runs": [
+    {
+      "run_id": "ended-1",
+      "thread_id": "thread-1",
+      "outcome": "stopped",
+      "ledger": {
+        "inputTokens": 1000,
+        "outputTokens": 20
+      },
+      "native_event": {
+        "method": "thread/tokenUsage/updated",
+        "params": {
+          "threadId": "thread-1",
+          "turnId": "turn-1",
+          "tokenUsage": {
+            "total": {
+              "inputTokens": 101000,
+              "cachedInputTokens": 500,
+              "outputTokens": 320,
+              "reasoningOutputTokens": 10,
+              "totalTokens": 101320
+            },
+            "last": {
+              "inputTokens": 100000,
+              "outputTokens": 300
+            }
+          }
+        }
+      }
+    },
+    {
+      "run_id": "ended-2",
+      "thread_id": "thread-2",
+      "outcome": "stopped",
+      "ledger": {
+        "inputTokens": 1000,
+        "outputTokens": 20
+      },
+      "native_event": {
+        "method": "thread/tokenUsage/updated",
+        "params": {
+          "threadId": "thread-2",
+          "turnId": "turn-2",
+          "tokenUsage": {
+            "total": {
+              "inputTokens": 101000,
+              "cachedInputTokens": 500,
+              "outputTokens": 320,
+              "reasoningOutputTokens": 10,
+              "totalTokens": 101320
+            },
+            "last": {
+              "inputTokens": 100000,
+              "outputTokens": 300
+            }
+          }
+        }
+      }
+    },
+    {
+      "run_id": "ended-3",
+      "thread_id": "thread-3",
+      "outcome": "stopped",
+      "ledger": {
+        "inputTokens": 1000,
+        "outputTokens": 20
+      },
+      "native_event": {
+        "method": "thread/tokenUsage/updated",
+        "params": {
+          "threadId": "thread-3",
+          "turnId": "turn-3",
+          "tokenUsage": {
+            "total": {
+              "inputTokens": 101000,
+              "cachedInputTokens": 500,
+              "outputTokens": 320,
+              "reasoningOutputTokens": 10,
+              "totalTokens": 101320
+            },
+            "last": {
+              "inputTokens": 100000,
+              "outputTokens": 300
+            }
+          }
+        }
+      }
+    },
+    {
+      "run_id": "ended-4",
+      "thread_id": "thread-4",
+      "outcome": "stopped",
+      "ledger": {
+        "inputTokens": 1000,
+        "outputTokens": 20
+      },
+      "native_event": {
+        "method": "thread/tokenUsage/updated",
+        "params": {
+          "threadId": "thread-4",
+          "turnId": "turn-4",
+          "tokenUsage": {
+            "total": {
+              "inputTokens": 101000,
+              "cachedInputTokens": 500,
+              "outputTokens": 320,
+              "reasoningOutputTokens": 10,
+              "totalTokens": 101320
+            },
+            "last": {
+              "inputTokens": 100000,
+              "outputTokens": 300
+            }
+          }
+        }
+      }
+    },
+    {
+      "run_id": "ended-5",
+      "thread_id": "thread-5",
+      "outcome": "stopped",
+      "ledger": {
+        "inputTokens": 1000,
+        "outputTokens": 20
+      },
+      "native_event": {
+        "method": "thread/tokenUsage/updated",
+        "params": {
+          "threadId": "thread-5",
+          "turnId": "turn-5",
+          "tokenUsage": {
+            "total": {
+              "inputTokens": 101000,
+              "cachedInputTokens": 500,
+              "outputTokens": 320,
+              "reasoningOutputTokens": 10,
+              "totalTokens": 101320
+            },
+            "last": {
+              "inputTokens": 100000,
+              "outputTokens": 300
+            }
+          }
+        }
+      }
+    },
+    {
+      "run_id": "ended-6",
+      "thread_id": "thread-6",
+      "outcome": "failed",
+      "ledger": {
+        "inputTokens": 1000,
+        "outputTokens": 20
+      },
+      "native_event": {
+        "method": "thread/tokenUsage/updated",
+        "params": {
+          "threadId": "thread-6",
+          "turnId": "turn-6",
+          "tokenUsage": {
+            "total": {
+              "inputTokens": 13557,
+              "cachedInputTokens": 500,
+              "outputTokens": 447,
+              "reasoningOutputTokens": 10,
+              "totalTokens": 14004
+            },
+            "last": {
+              "inputTokens": 12557,
+              "outputTokens": 427
+            }
+          }
+        }
+      }
+    }
+  ]
+}

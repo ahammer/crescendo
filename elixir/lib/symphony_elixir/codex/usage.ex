@@ -18,6 +18,17 @@ defmodule SymphonyElixir.Codex.Usage do
     :completion_tokens
   ]
 
+  @write_keys [
+    "cacheWriteInputTokens",
+    :cacheWriteInputTokens,
+    "cacheWriteTokens",
+    :cacheWriteTokens,
+    "cache_write_tokens",
+    :cache_write_tokens,
+    "cache_write_input_tokens",
+    :cache_write_input_tokens
+  ]
+
   @spec snapshot(map()) :: map() | nil
   def snapshot(update) do
     payload = update[:payload] || update
@@ -30,6 +41,7 @@ defmodule SymphonyElixir.Codex.Usage do
         source: source,
         turn_id: get(params, "turnId", :turnId),
         complete: observed?(usage, @input_keys) and observed?(usage, @output_keys),
+        cache_write_observed: observed?(usage, @write_keys),
         thread_id: get(params, "threadId", :threadId) || get(params, "id", :id) || update[:thread_id],
         total: normalize(usage),
         reported_total_tokens: integer(get(usage, "totalTokens", :totalTokens) || get(usage, "total_tokens", :total_tokens)),
@@ -61,18 +73,7 @@ defmodule SymphonyElixir.Codex.Usage do
     input = counter(usage, @input_keys)
     output = counter(usage, @output_keys)
 
-    write_keys = [
-      "cacheWriteInputTokens",
-      :cacheWriteInputTokens,
-      "cacheWriteTokens",
-      :cacheWriteTokens,
-      "cache_write_tokens",
-      :cache_write_tokens,
-      "cache_write_input_tokens",
-      :cache_write_input_tokens
-    ]
-
-    write = counter(usage, write_keys)
+    write = counter(usage, @write_keys)
 
     %{
       input_tokens: input,
