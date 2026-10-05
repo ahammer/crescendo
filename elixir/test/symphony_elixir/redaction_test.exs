@@ -24,10 +24,22 @@ defmodule SymphonyElixirWeb.RedactionTest do
       model: "gpt-6-sol"
     }
 
+    blocked = %{
+      project: "nubu3d",
+      issue_identifier: "GH-4",
+      error: "e",
+      workspace_path: "/w",
+      session_id: "s",
+      last_message: "m",
+      startup: %{context: "secret"},
+      run_id: "run",
+      worker_pid: "worker"
+    }
+
     %{
       running: [running, %{running | project: "metalrain", issue_identifier: "GH-2"}],
-      retrying: [%{project: "nubu3d", issue_identifier: "GH-3", error: "stack trace", workspace_path: "/w"}],
-      blocked: [%{project: "nubu3d", issue_identifier: "GH-4", error: "e", workspace_path: "/w", session_id: "s", last_message: "m"}],
+      retrying: [%{project: "nubu3d", issue_identifier: "GH-3", error: "stack trace", workspace_path: "/w", startup: %{context: "secret"}}],
+      blocked: [blocked],
       upcoming: %{
         ready: [%{project: "nubu3d", issue_identifier: "GH-5", title: "Secret"}],
         waiting: [%{project: "metalrain", issue_identifier: "GH-6", title: "Public"}]
@@ -35,7 +47,7 @@ defmodule SymphonyElixirWeb.RedactionTest do
       pull_requests: %{items: [%{project: "nubu3d", number: 7, title: "Secret PR", head_ref: "feat/secret", author: "a", url: "u"}]},
       usage: %{
         activity: [
-          %{project: "nubu3d", kind: "pr_opened", summary: "Secret PR", title: "Secret issue"},
+          %{project: "nubu3d", kind: "pr_opened", summary: "Secret PR", title: "Secret issue", startup: %{context: "secret"}, run_id: "run"},
           %{project: "metalrain", kind: "dispatch", summary: "s"}
         ],
         images: [%{project: "nubu3d", src: "/artifacts/a/1.png"}, %{project: "metalrain", src: "/artifacts/b/1.png"}]
@@ -54,13 +66,16 @@ defmodule SymphonyElixirWeb.RedactionTest do
     assert public.title == "Secret feature"
 
     assert [%{error: nil, workspace_path: nil}] = scrubbed.retrying
-    assert [%{error: nil, session_id: nil, last_message: nil}] = scrubbed.blocked
+    assert [%{error: nil, session_id: nil, last_message: nil} = blocked] = scrubbed.blocked
+    refute Map.has_key?(blocked, :startup) or Map.has_key?(blocked, :run_id) or Map.has_key?(blocked, :worker_pid)
+    refute Map.has_key?(hd(scrubbed.retrying), :startup)
     assert [%{title: "Private work"}] = scrubbed.upcoming.ready
     assert [%{title: "Public"}] = scrubbed.upcoming.waiting
     assert [%{title: "Private work", number: 7, url: "u"} = pull] = scrubbed.pull_requests.items
     refute Map.has_key?(pull, :head_ref)
     assert [%{kind: "pr_opened"} = event, %{summary: "s"}] = scrubbed.usage.activity
     refute Map.has_key?(event, :summary) or Map.has_key?(event, :title)
+    refute Map.has_key?(event, :startup) or Map.has_key?(event, :run_id)
     assert [%{project: "metalrain"}] = scrubbed.usage.images
   end
 

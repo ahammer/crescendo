@@ -120,7 +120,7 @@ defmodule SymphonyElixir.Operations do
       end
 
     cost = run_usage(table, id)
-    category = task_category(details[:issue_identifier])
+    category = if kind == "startup_failed", do: "startup", else: task_category(details[:issue_identifier])
     seconds = if started, do: max(now - started, 0)
     model = details[:model] || "unknown"
 
@@ -139,7 +139,7 @@ defmodule SymphonyElixir.Operations do
     :ok =
       :dets.insert(
         table,
-        {{:lineage_run, id}, Map.merge(lookup(table, {:lineage_run, id}, run), Map.merge(Map.take(details, [:reason]), %{status: kind, finished_s: now}))}
+        {{:lineage_run, id}, Map.merge(lookup(table, {:lineage_run, id}, run), Map.merge(Map.take(details, [:reason, :startup, :worker_host]), %{status: kind, finished_s: now}))}
       )
 
     :dets.select_delete(table, [
@@ -697,6 +697,21 @@ defmodule SymphonyElixir.Operations do
     safe_write(fn -> :dets.insert(table, {:pull_inventory, pulls, observed_at}) end)
   end
 
+  @doc "Durable startup admission failures, independent of delivery attempts."
+  @spec startup_state(handle()) :: map()
+  def startup_state(nil), do: %{}
+  def startup_state(table), do: lookup(table, :startup, %{})
+
+  @spec save_startup_state(handle(), map()) :: :ok
+  def save_startup_state(nil, _state), do: :ok
+
+  def save_startup_state(table, state) do
+    safe_write(fn ->
+      :ok = :dets.insert(table, {:startup, state})
+      sync(table)
+    end)
+  end
+
   @empty_autopilot %{pr_handled: %{}, tasks: %{}, item_attempts: %{}}
 
   @doc """
@@ -783,6 +798,11 @@ defmodule SymphonyElixir.Operations do
         :usd_micro,
         :run_id,
         :item_attempt,
+        :startup,
+        :startup_attempt,
+        :issue_id,
+        :worker_host,
+        :worker_pid,
         :disposition
       ])
 

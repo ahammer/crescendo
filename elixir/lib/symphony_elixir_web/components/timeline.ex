@@ -17,7 +17,7 @@ defmodule SymphonyElixirWeb.Timeline do
   @done_limit 60
   # Finished work worth a row; dispatches show as running, and turn or
   # retry bookkeeping would drown the rest.
-  @done_kinds ~w(completed failed stopped interrupted pr_merged pr_closed pr_opened pr_reopened item_disposition attempt_failed issue_terminal retired blocked task_delivered task_short)
+  @done_kinds ~w(startup_failed startup_retry startup_blocked completed failed stopped interrupted pr_merged pr_closed pr_opened pr_reopened item_disposition attempt_failed issue_terminal retired blocked task_delivered task_short)
   @run_kinds ~w(completed failed stopped interrupted)
 
   attr(:payload, :map, required: true)
@@ -171,6 +171,7 @@ defmodule SymphonyElixirWeb.Timeline do
   @spec category_name(String.t()) :: String.t()
   def category_name("review"), do: "Review"
   def category_name("research"), do: "Research"
+  def category_name("startup"), do: "Startup"
   def category_name("marketing"), do: "Marketing"
   def category_name(_category), do: "Delivery"
 
@@ -246,6 +247,7 @@ defmodule SymphonyElixirWeb.Timeline do
   # Pull request events carry the PR title as their summary; runs carry the item title.
   defp event_title(%{kind: "pr_" <> _} = event), do: event[:summary]
   defp event_title(%{kind: "task_" <> _} = event), do: event[:summary]
+  defp event_title(%{kind: "startup_" <> _} = event), do: event[:summary]
   defp event_title(event), do: event[:title]
 
   defp event_category(event), do: event[:category] || Operations.task_category(event[:issue_identifier])
@@ -257,6 +259,7 @@ defmodule SymphonyElixirWeb.Timeline do
   defp event_icon(%{kind: "failed"}), do: "failed"
   defp event_icon(%{kind: kind}) when kind in ["stopped", "interrupted"], do: "stopped"
   defp event_icon(%{kind: "retired"}), do: "retired"
+  defp event_icon(%{kind: kind}) when kind in ["startup_failed", "startup_retry", "startup_blocked"], do: "blocked"
   defp event_icon(%{kind: "blocked"}), do: "blocked"
   defp event_icon(event), do: event_category(event)
 
@@ -268,6 +271,9 @@ defmodule SymphonyElixirWeb.Timeline do
   defp event_label(%{kind: "pr_opened"}), do: "PR opened"
   defp event_label(%{kind: "issue_terminal"}), do: "Issue closed"
   defp event_label(%{kind: "retired"}), do: "Retired"
+  defp event_label(%{kind: "startup_failed"}), do: "Startup admission failed"
+  defp event_label(%{kind: "startup_retry"}), do: "Startup retry scheduled"
+  defp event_label(%{kind: "startup_blocked"}), do: "Startup blocked"
   defp event_label(%{kind: "blocked"}), do: "Blocked"
   defp event_label(%{kind: "completed"} = event), do: event_name(event) <> " turn completed"
   defp event_label(%{kind: "task_delivered"} = event), do: event_name(event) <> " delivered"
@@ -279,12 +285,12 @@ defmodule SymphonyElixirWeb.Timeline do
   defp event_name(event), do: category_name(event_category(event))
 
   defp event_tone(kind) when kind in ["completed", "pr_merged", "issue_terminal", "task_delivered"], do: "good"
-  defp event_tone(kind) when kind in ["failed", "blocked", "retired"], do: "critical"
+  defp event_tone(kind) when kind in ["startup_failed", "startup_blocked", "failed", "blocked", "retired"], do: "critical"
   defp event_tone(kind) when kind in ["stopped", "interrupted", "pr_closed", "task_short"], do: "warning"
   defp event_tone(_kind), do: "info"
 
   # Short state names keep the row readable; the full reason is the tooltip.
-  defp waiting_label(reason) when reason in ["dependency blocked", "operator blocked"], do: "Blocked"
+  defp waiting_label(reason) when reason in ["startup admission blocked", "dependency blocked", "operator blocked"], do: "Blocked"
   defp waiting_label("retry scheduled"), do: "Retrying"
   defp waiting_label("draft"), do: "Draft"
   defp waiting_label("continuation pending"), do: "Continuing"

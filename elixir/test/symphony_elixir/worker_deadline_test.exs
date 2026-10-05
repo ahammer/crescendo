@@ -3,6 +3,23 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
 
   alias SymphonyElixir.{Governor, Project, Projects, Service}
 
+  defmodule RetryTracker do
+    alias SymphonyElixir.Tracker.Memory
+    def fetch_issues_by_states(states), do: Memory.fetch_issues_by_states(states)
+
+    def fetch_issues_by_ids(ids) do
+      if Application.get_env(:symphony_elixir, :startup_tracker_down) do
+        {:error, :offline_tracker}
+      else
+        Memory.fetch_issues_by_ids(ids)
+      end
+    end
+  end
+
+  defmodule ReviewCI do
+    def fetch_commit_ci_state(_sha), do: {:ok, "success"}
+  end
+
   setup do
     root = Path.join(System.tmp_dir!(), "worker-deadline-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
@@ -13,9 +30,9 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
   test "workspace hooks and cleanup outlive Codex inactivity, including a config reload", %{root: root} do
     ctx =
       start_worker(root,
-        hook_after_create: "echo started > after_create; sleep 0.3; echo done >> after_create",
-        hook_before_run: "echo started > before_run; sleep 0.3; echo done >> before_run",
-        hook_after_run: "echo started > after_run; sleep 0.3; echo done >> after_run"
+        hook_after_create: "echo started > after_create; sleep 0.7; echo done >> after_create",
+        hook_before_run: "echo started > before_run; sleep 0.7; echo done >> before_run",
+        hook_after_run: "echo started > after_run; sleep 0.7; echo done >> after_run"
       )
 
     entry = await_entry(ctx, :workspace)
@@ -25,7 +42,7 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
     assert state(ctx).running[ctx.issue.id].pid == entry.pid
     refute Map.has_key?(state(ctx).retry_attempts, ctx.issue.id)
 
-    write_workflow_file!(ctx.workflow, Keyword.put(ctx.config, :codex_stall_timeout_ms, 80))
+    write_workflow_file!(ctx.workflow, Keyword.put(ctx.config, :codex_stall_timeout_ms, 500))
     assert :ok = Project.with_project("deadline", &WorkflowStore.force_reload/0)
     await(fn -> File.exists?(Path.join(ctx.workspace, "before_run")) end)
     Process.sleep(150)
@@ -57,7 +74,7 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
     assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
     await(fn -> Map.has_key?(state(ctx).retry_attempts, ctx.issue.id) end)
     retry = state(ctx).retry_attempts[ctx.issue.id]
-    assert retry.attempt == 1
+    assert retry.attempt == 0
     assert retry.error =~ "workspace_hook_timeout"
     assert %{busy: 0} = Governor.snapshot()
     refute File.exists?(Path.join(root, "sessions"))
@@ -66,7 +83,6 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
     config = Keyword.merge(ctx.config, hook_after_create: nil, hook_before_run: "exec sleep 0.3", hook_timeout_ms: 1_500)
     write_workflow_file!(ctx.workflow, config)
     assert :ok = Project.with_project("deadline", &WorkflowStore.force_reload/0)
-    await(fn -> state(ctx).throttle.slots > 0 end)
     send(ctx.orchestrator, {:retry_issue, ctx.issue.id, retry.retry_token})
     replacement = await_entry(ctx, :workspace)
     assert replacement.pid != entry.pid
@@ -111,7 +127,7 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
     await_entry(ctx, :cleanup)
     assert %{busy: 1} = Governor.snapshot()
     await(fn -> Map.has_key?(state(ctx).retry_attempts, ctx.issue.id) end)
-    assert state(ctx).retry_attempts[ctx.issue.id].error =~ "response_timeout"
+    assert state(ctx).startup_failures[ctx.issue.id].diagnostic.status == "timeout"
     assert File.read!(Path.join(ctx.workspace, "after_run")) == "started\n"
     assert %{busy: 0} = Governor.snapshot()
   end
@@ -126,7 +142,7 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
     write_workflow_file!(ctx.workflow, Keyword.put(ctx.config, :hook_before_run, "exec sleep 0.3"))
     assert :ok = Project.with_project("deadline", &WorkflowStore.force_reload/0)
     retry = state(ctx).retry_attempts[ctx.issue.id]
-    await(fn -> state(ctx).throttle.slots > 0 end)
+    await(fn -> state(ctx).throttle && state(ctx).throttle.slots > 0 end)
     send(ctx.orchestrator, {:retry_issue, ctx.issue.id, retry.retry_token})
     worker = await_entry(ctx, :workspace)
     worker_ref = Process.monitor(worker.pid)
@@ -235,6 +251,265 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
     await(fn -> File.exists?(marker) end)
   end
 
+  test "empty before-run failures under autopilot exhaust only startup admission and recover", %{root: root} do
+    Application.put_env(:symphony_elixir, :memory_tracker_writes, [])
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_writes) end)
+    ctx = start_worker(root, hook_before_run: "exit 1", max_attempts: 1, autopilot: %{"enabled" => true, "max_item_attempts" => 1, "max_open_issues" => 1})
+
+    for count <- 1..3 do
+      await(fn -> get_in(state(ctx).startup_failures, [ctx.issue.id, :count]) == count end)
+      assert %{busy: 0} = Governor.snapshot()
+      assert state(ctx).autopilot.item_attempts == %{}
+      refute MapSet.member?(state(ctx).claimed, ctx.issue.id)
+      refute File.exists?(Path.join(root, "sessions"))
+      assert Application.get_env(:symphony_elixir, :memory_tracker_writes) == []
+      if count < 3, do: retry_now(ctx)
+    end
+
+    assert state(ctx).retry_attempts == %{}
+    assert [blocked] = Orchestrator.snapshot(ctx.orchestrator, 5_000).blocked
+
+    assert blocked.startup == %{
+             reason: :workspace_hook_failed,
+             phase: :before_run,
+             hook: "before_run",
+             status: 1,
+             context: "",
+             empty_output: true
+           }
+
+    assert blocked.run_id
+    assert blocked.worker_pid
+    for _ <- 1..5, do: send(ctx.orchestrator, :run_poll_cycle)
+    assert state(ctx).running == %{}
+    assert state(ctx).startup_failures[ctx.issue.id].count == 3
+    old_failure = state(ctx).startup_failures[ctx.issue.id]
+
+    # Restart cannot reset the blocked budget or the wall-clock deadline.
+    Process.exit(ctx.orchestrator, :kill)
+    await(fn -> GenServer.whereis(Project.via("deadline", :orchestrator)) not in [nil, ctx.orchestrator] end)
+    ctx = %{ctx | orchestrator: GenServer.whereis(Project.via("deadline", :orchestrator))}
+    assert state(ctx).startup_failures[ctx.issue.id] == old_failure
+    assert state(ctx).running == %{}
+    assert state(ctx).autopilot.item_attempts == %{}
+
+    write_workflow_file!(ctx.workflow, Keyword.put(ctx.config, :hook_before_run, "sleep 0.2"))
+    assert :ok = Project.with_project("deadline", &WorkflowStore.force_reload/0)
+    worker = await_entry(ctx, :workspace)
+    send(ctx.orchestrator, {:worker_admitted, ctx.issue.id, old_failure.run_id, %{}})
+    send(ctx.orchestrator, {:worker_startup_failure, ctx.issue.id, old_failure.run_id, blocked.startup})
+    send(ctx.orchestrator, {:DOWN, make_ref(), :process, self(), :failed})
+    assert state(ctx).running[ctx.issue.id].pid == worker.pid
+    assert state(ctx).running[ctx.issue.id].model_admitted == false
+    await(fn -> File.exists?(Path.join(root, "sessions")) end)
+    await(fn -> Map.has_key?(state(ctx).retry_attempts, ctx.issue.id) end)
+    assert state(ctx).startup_failures == %{}
+    assert state(ctx).autopilot.item_attempts == %{}
+    assert File.read!(Path.join(root, "sessions")) == "start\n"
+  end
+
+  test "environment recovery uses one cooldown probe without resetting delivery counters", %{root: root} do
+    marker = Path.join(root, "fixed")
+    ctx = start_worker(root, hook_before_run: "test -f '#{marker}'", max_attempts: 1)
+
+    for count <- 1..3 do
+      await(fn -> get_in(state(ctx).startup_failures, [ctx.issue.id, :count]) == count end)
+      if count < 3, do: retry_now(ctx)
+    end
+
+    File.write!(marker, "fixed")
+
+    :sys.replace_state(ctx.orchestrator, fn state ->
+      put_in(state.startup_failures[ctx.issue.id].due_at_ms, 0)
+    end)
+
+    send(ctx.orchestrator, :run_poll_cycle)
+    send(ctx.orchestrator, :run_poll_cycle)
+    await(fn -> Map.has_key?(state(ctx).retry_attempts, ctx.issue.id) end)
+    assert state(ctx).startup_failures == %{}
+    assert File.read!(Path.join(root, "sessions")) == "start\n"
+    assert %{busy: 0} = Governor.snapshot()
+  end
+
+  test "hook timeout kills a grandchild before releasing the governor slot", %{root: root} do
+    pid_file = Path.join(root, "child")
+    ctx = start_worker(root, hook_before_run: "sleep 60 & echo $! > '#{pid_file}'; wait", hook_timeout_ms: 200)
+    await(fn -> File.exists?(pid_file) end)
+    child = pid_file |> File.read!() |> String.trim()
+    await(fn -> Map.has_key?(state(ctx).startup_failures, ctx.issue.id) end)
+    await(fn -> not os_running?(child) end)
+    assert %{busy: 0} = Governor.snapshot()
+    assert state(ctx).startup_failures[ctx.issue.id].diagnostic.status == "timeout"
+    refute File.exists?(Path.join(root, "sessions"))
+  end
+
+  test "remote worker admission reports transport exit and recovers without a delivery attempt", %{root: root} do
+    fake_ssh(root, "exit 75")
+    ctx = start_worker(root, worker_ssh_hosts: ["fixture-worker"])
+    await(fn -> Map.has_key?(state(ctx).startup_failures, ctx.issue.id) end)
+    failure = state(ctx).startup_failures[ctx.issue.id]
+    assert failure.worker_host == "fixture-worker"
+    assert failure.diagnostic.status == 75
+    assert failure.diagnostic.empty_output
+    assert failure.diagnostic.phase == :workspace
+    refute File.exists?(Path.join(root, "sessions"))
+    fake_ssh(root, "for command do :; done; exec sh -c \"$command\"")
+    retry_now(ctx)
+    await(fn -> File.exists?(Path.join(root, "sessions")) end)
+    await(fn -> Map.has_key?(state(ctx).retry_attempts, ctx.issue.id) end)
+    assert state(ctx).startup_failures == %{}
+    assert %{busy: 0} = Governor.snapshot()
+  end
+
+  test "remote after-create deadline retains the hook name and kills its child", %{root: root} do
+    fake_ssh(root, "for command do :; done; exec sh -c \"$command\"")
+    pid_file = Path.join(root, "remote-child")
+    ctx = start_worker(root, worker_ssh_hosts: ["fixture-worker"], hook_timeout_ms: 500, hook_after_create: "sleep 60 & echo $! > '#{pid_file}'; wait")
+    await(fn -> File.exists?(pid_file) end)
+    child = pid_file |> File.read!() |> String.trim()
+    await(fn -> Map.has_key?(state(ctx).startup_failures, ctx.issue.id) end)
+    assert state(ctx).startup_failures[ctx.issue.id].diagnostic.hook == "after_create"
+    assert state(ctx).startup_failures[ctx.issue.id].diagnostic.status == "timeout"
+    await(fn -> not os_running?(child) end)
+    assert %{busy: 0} = Governor.snapshot()
+    refute File.exists?(Path.join(root, "sessions"))
+  end
+
+  test "OTP spawn refusal is a bounded admission failure and restores backoff on restart", %{root: root} do
+    ctx = start_worker(root, hook_before_run: "exit 1")
+    await(fn -> Map.has_key?(state(ctx).startup_failures, ctx.issue.id) end)
+    first = state(ctx).startup_failures[ctx.issue.id]
+    Process.exit(ctx.orchestrator, :kill)
+    await(fn -> GenServer.whereis(Project.via("deadline", :orchestrator)) not in [nil, ctx.orchestrator] end)
+    ctx = %{ctx | orchestrator: GenServer.whereis(Project.via("deadline", :orchestrator))}
+    assert state(ctx).startup_failures[ctx.issue.id] == first
+    assert state(ctx).retry_attempts[ctx.issue.id].due_at_ms > System.monotonic_time(:millisecond)
+    refusing = start_supervised!({Task.Supervisor, max_children: 0})
+    :sys.replace_state(ctx.orchestrator, &%{&1 | task_supervisor: refusing})
+    retry_now(ctx)
+    await(fn -> state(ctx).startup_failures[ctx.issue.id].count == 2 end)
+    assert state(ctx).startup_failures[ctx.issue.id].diagnostic.phase == :worker_spawn
+    assert state(ctx).startup_failures[ctx.issue.id].diagnostic.context =~ "max_children"
+    assert %{busy: 0} = Governor.snapshot()
+    refute MapSet.member?(state(ctx).claimed, ctx.issue.id)
+  end
+
+  test "a zero-token failure after model admission still exhausts delivery attempts", %{root: root} do
+    Application.put_env(:symphony_elixir, :memory_tracker_writes, [])
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_writes) end)
+    ctx = start_worker(root, [max_attempts: 1, autopilot: %{"enabled" => true, "max_item_attempts" => 1, "max_open_issues" => 1}], :turn_failure)
+    await(fn -> Map.has_key?(state(ctx).retry_attempts, ctx.issue.id) end)
+    assert state(ctx).startup_failures == %{}
+    assert state(ctx).retry_attempts[ctx.issue.id].attempt == 1
+    retry_now(ctx, 1)
+
+    await(fn ->
+      Enum.any?(
+        Application.get_env(:symphony_elixir, :memory_tracker_writes),
+        &match?({:retire, _, _}, &1)
+      )
+    end)
+
+    activity = SymphonyElixir.Operations.snapshot(state(ctx).operations).activity
+    assert Enum.any?(activity, &match?(%{kind: "attempt_failed", item_attempt: 1}, &1))
+
+    assert Enum.count(
+             Application.get_env(:symphony_elixir, :memory_tracker_writes),
+             &match?({:retire, _, _}, &1)
+           ) == 1
+
+    assert state(ctx).startup_failures == %{}
+    assert state(ctx).codex_totals.total_tokens == 0
+    assert %{busy: 0} = Governor.snapshot()
+  end
+
+  test "tracker outage during attempt-zero recovery holds durable backoff", %{root: root} do
+    previous = Application.get_env(:symphony_elixir, :linear_client_module)
+    Application.put_env(:symphony_elixir, :linear_client_module, RetryTracker)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:symphony_elixir, :linear_client_module, previous),
+        else: Application.delete_env(:symphony_elixir, :linear_client_module)
+
+      Application.delete_env(:symphony_elixir, :startup_tracker_down)
+    end)
+
+    ctx = start_worker(root, tracker_kind: "linear", hook_before_run: "exit 1")
+    await(fn -> Map.has_key?(state(ctx).startup_failures, ctx.issue.id) end)
+    Application.put_env(:symphony_elixir, :startup_tracker_down, true)
+    retry_now(ctx)
+    retry = state(ctx).retry_attempts[ctx.issue.id]
+    assert retry.attempt == 0
+    assert retry.error =~ "offline_tracker"
+    assert retry.due_at_ms - System.monotonic_time(:millisecond) >= 25_000
+    failure = state(ctx).startup_failures[ctx.issue.id]
+    assert failure.count == 1
+    assert failure.due_at_ms - System.system_time(:millisecond) >= 25_000
+    Process.exit(ctx.orchestrator, :kill)
+    await(fn -> GenServer.whereis(Project.via("deadline", :orchestrator)) not in [nil, ctx.orchestrator] end)
+    ctx = %{ctx | orchestrator: GenServer.whereis(Project.via("deadline", :orchestrator))}
+    assert state(ctx).startup_failures[ctx.issue.id].due_at_ms >= failure.due_at_ms
+    assert state(ctx).retry_attempts[ctx.issue.id].due_at_ms - System.monotonic_time(:millisecond) >= 25_000
+    refute File.exists?(Path.join(root, "sessions"))
+    assert %{busy: 0} = Governor.snapshot()
+  end
+
+  test "PR startup hooks cannot spend the independent review cap", %{root: root} do
+    previous = Application.get_env(:symphony_elixir, :github_client_module)
+    Application.put_env(:symphony_elixir, :github_client_module, ReviewCI)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:symphony_elixir, :github_client_module, previous),
+        else: Application.delete_env(:symphony_elixir, :github_client_module)
+    end)
+
+    ctx = start_worker(root, issue_kind: :pull_request, hook_before_run: "exit 1", autopilot: %{"enabled" => true, "max_pr_runs" => 1, "max_open_issues" => 1})
+
+    for count <- 1..3 do
+      await(fn -> get_in(state(ctx).startup_failures, [ctx.issue.id, :count]) == count end)
+      assert state(ctx).autopilot.pr_handled == %{}
+      if count < 3, do: retry_now(ctx)
+    end
+
+    assert state(ctx).autopilot.item_attempts == %{}
+    write_workflow_file!(ctx.workflow, Keyword.put(ctx.config, :hook_before_run, "true"))
+    assert :ok = Project.with_project("deadline", &WorkflowStore.force_reload/0)
+    await(fn -> get_in(state(ctx).autopilot, [:pr_handled, ctx.issue.id, :runs]) == 1 end)
+    assert state(ctx).startup_failures == %{}
+    assert File.read!(Path.join(root, "sessions")) == "start\n"
+  end
+
+  defp fake_ssh(root, command) do
+    previous = System.get_env("PATH")
+
+    if not File.exists?(Path.join(root, "ssh")) do
+      System.put_env("PATH", root <> ":" <> previous)
+      on_exit(fn -> System.put_env("PATH", previous) end)
+    end
+
+    File.write!(Path.join(root, "ssh"), "#!/bin/sh\n#{command}\n")
+    File.chmod!(Path.join(root, "ssh"), 0o755)
+  end
+
+  defp os_running?(pid) do
+    case File.read("/proc/#{pid}/stat") do
+      {:ok, stat} -> not String.contains?(stat, ") Z ")
+      {:error, :enoent} -> false
+    end
+  end
+
+  defp retry_now(ctx, expected_attempt \\ 0) do
+    await(fn -> state(ctx).throttle && state(ctx).throttle.slots > 0 end)
+    retry = state(ctx).retry_attempts[ctx.issue.id]
+    assert retry.attempt == expected_attempt
+    send(ctx.orchestrator, {:retry_issue, ctx.issue.id, retry.retry_token})
+    # Ensure duplicate timer messages cannot start another worker.
+    send(ctx.orchestrator, {:retry_issue, ctx.issue.id, retry.retry_token})
+    :sys.get_state(ctx.orchestrator)
+  end
+
   defp start_worker(root, overrides, mode \\ :complete) do
     binary = Path.join(root, "codex")
 
@@ -248,7 +523,8 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
         *'"method":"thread/start"'*) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-deadline"}}}' ;;
         *'"method":"turn/start"'*)
           printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-deadline"}}}'
-          if [ '#{mode}' = complete ]; then printf '%s\\n' '{"method":"turn/completed","params":{"turn":{"status":"completed"}}}'; fi ;;
+          if [ '#{mode}' = complete ]; then printf '%s\\n' '{"method":"turn/completed","params":{"turn":{"status":"completed"}}}'; fi
+          if [ '#{mode}' = turn_failure ]; then printf '%s\\n' '{"method":"turn/completed","params":{"turn":{"status":"failed"}}}'; fi ;;
       esac
     done
     """)
@@ -265,11 +541,20 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
           poll_interval_ms: 10,
           max_turns: 1,
           codex_command: binary,
-          codex_stall_timeout_ms: 100,
+          codex_stall_timeout_ms: 1_000,
           hook_timeout_ms: 1_500
         ],
         overrides
       )
+
+    config =
+      if autopilot = config[:autopilot] do
+        for kind <- ["pull_request", "research"], do: File.write!(Path.join(root, "#{kind}.md"), "Fake #{kind}")
+        prompts = Map.new(["pull_request", "research"], &{&1, Path.join(root, "#{&1}.md")})
+        Keyword.put(config, :autopilot, Map.put(autopilot, "prompts", prompts))
+      else
+        config
+      end
 
     write_workflow_file!(workflow, config)
     File.write!(Path.join(root, "crescendo.yml"), "paths: {state: state}\npool: {slots: 1}\nprojects: {deadline: {}}")
@@ -279,7 +564,29 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
     start_supervised!({Projects, service})
     await(fn -> GenServer.whereis(Project.via("deadline", :orchestrator)) != nil end)
     orchestrator = GenServer.whereis(Project.via("deadline", :orchestrator))
-    issue = %Issue{id: "deadline", identifier: "GH-32", title: "Deadline", state: "In Progress", dispatchable: true}
+    kind = overrides[:issue_kind] || :issue
+
+    issue = %Issue{
+      id: "deadline",
+      identifier: "GH-32",
+      title: "Deadline",
+      state: "In Progress",
+      dispatchable: true,
+      kind: kind,
+      pull_request: if(kind == :pull_request, do: %{head_sha: "fixture-head", draft: false, trusted: true})
+    }
+
+    if config[:autopilot] do
+      channels = Project.with_project("deadline", fn -> Config.settings!().autopilot.channels end)
+
+      cooled =
+        Map.new(channels, fn {channel, _} ->
+          {channel, %{finished_at: DateTime.add(DateTime.utc_now(), 1, :day), attempts: 0, last: :delivered}}
+        end)
+
+      :sys.replace_state(orchestrator, &%{&1 | autopilot: %{&1.autopilot | tasks: cooled}})
+    end
+
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
     send(orchestrator, :run_poll_cycle)
     %{orchestrator: orchestrator, issue: issue, workflow: workflow, config: config, workspace: Path.join(root, "workspaces/GH-32")}
@@ -288,11 +595,11 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
   defp state(ctx), do: :sys.get_state(ctx.orchestrator)
 
   defp await_entry(ctx, phase) do
-    await(fn -> get_in(state(ctx).running, [ctx.issue.id, :phase]) == phase end)
+    await(fn -> get_in(state(ctx).running, [ctx.issue.id, :phase]) == phase end, 300)
     state(ctx).running[ctx.issue.id]
   end
 
-  defp await(check, attempts \\ 150) do
+  defp await(check, attempts \\ 250) do
     cond do
       check.() -> :ok
       attempts == 0 -> flunk("condition never held")

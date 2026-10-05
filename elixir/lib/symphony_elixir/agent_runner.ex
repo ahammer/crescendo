@@ -5,7 +5,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, Governor, ModelRouting, Project, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, Governor, ModelRouting, Project, PromptBuilder, Startup, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @type worker_host :: String.t() | nil
@@ -32,6 +32,10 @@ defmodule SymphonyElixir.AgentRunner do
       {:yield, :deployment_drain} ->
         exit({:shutdown, :deployment_drain})
 
+      {:error, {:startup_failed, diagnostic} = reason} ->
+        send_worker_message(codex_update_recipient, issue, :worker_startup_failure, diagnostic, opts)
+        raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+
       {:error, reason} ->
         Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
         raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
@@ -41,12 +45,14 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
-    case Workspace.create_for_issue(issue, worker_host) do
+    case startup_step(:workspace, fn -> Workspace.create_for_issue(issue, worker_host) end) do
       {:ok, workspace} ->
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace, opts)
 
         try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
+          before_run = fn -> Workspace.run_before_run_hook(workspace, issue, worker_host) end
+
+          with :ok <- startup_step(:before_run, before_run) do
             run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
           end
         after
@@ -56,6 +62,13 @@ defmodule SymphonyElixir.AgentRunner do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp startup_step(phase, fun) do
+    case fun.() do
+      {:error, reason} -> {:error, {:startup_failed, Startup.diagnostic(phase, reason)}}
+      result -> result
     end
   end
 
@@ -117,7 +130,12 @@ defmodule SymphonyElixir.AgentRunner do
     with {:ok, route} <- model_route(issue, opts),
          :ok <- log_route(issue, route),
          :ok <- send_worker_message(codex_update_recipient, issue, :worker_model_route, route, opts),
-         {:ok, session} <- AppServer.start_session(workspace, [model_route: route] ++ session_opts) do
+         {:ok, session} <-
+           startup_step(:session_start, fn ->
+             AppServer.start_session(workspace, [model_route: route] ++ session_opts)
+           end) do
+      send_worker_message(codex_update_recipient, issue, :worker_admitted, %{}, opts)
+
       try do
         do_run_codex_turns(
           session,

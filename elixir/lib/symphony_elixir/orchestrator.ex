@@ -17,6 +17,7 @@ defmodule SymphonyElixir.Orchestrator do
     Operations,
     Project,
     Quota,
+    Startup,
     StatusDashboard,
     Throttle,
     Tracker,
@@ -27,6 +28,8 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.Codex.Usage
   alias SymphonyElixir.GitHub.Client, as: GitHubClient
   alias SymphonyElixir.Tracker.Issue
+
+  @worker_updates ~w(worker_runtime_info worker_model_route codex_worker_update worker_startup_failure worker_admitted)a
 
   @continuation_retry_delay_ms 1_000
   # A retry held for a slot, the throttle, or a backed-off route checks again after this.
@@ -46,6 +49,8 @@ defmodule SymphonyElixir.Orchestrator do
     Runtime state for the orchestrator polling loop.
     """
 
+    # One coordinator per project owns both budgets; another owner would duplicate retry state.
+    # credo:disable-for-next-line Credo.Check.Warning.StructFieldAmount
     defstruct [
       :poll_interval_ms,
       :max_concurrent_agents,
@@ -61,6 +66,7 @@ defmodule SymphonyElixir.Orchestrator do
       completed: MapSet.new(),
       claimed: MapSet.new(),
       blocked: %{},
+      startup_failures: %{},
       retry_attempts: %{},
       polled_issues: [],
       issues_observed_at: nil,
@@ -117,13 +123,14 @@ defmodule SymphonyElixir.Orchestrator do
           codex_rate_limits: nil,
           codex_quota: Operations.quota(operations),
           artifacts_root: artifacts_root(opts),
+          startup_failures: Operations.startup_state(operations),
           autopilot: Operations.autopilot_state(operations)
         }
 
         run_terminal_workspace_cleanup()
         # A restarted service learns the last known quota before the first run reports a new one.
         if state.codex_quota && governed?(), do: Governor.report_quota(state.codex_quota)
-        state = schedule_tick(state, 0)
+        state = state |> restore_startup_retries() |> schedule_tick(0)
 
         {:ok, state}
 
@@ -209,7 +216,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_info({type, issue_id, run_id, payload}, state)
-      when type in [:worker_runtime_info, :worker_model_route, :codex_worker_update] do
+      when type in @worker_updates do
     case state.running[issue_id] do
       %{run_id: ^run_id} -> apply_worker_update(type, issue_id, payload, state)
       _ -> {:noreply, state}
@@ -217,7 +224,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_info({type, issue_id, payload}, state)
-      when type in [:worker_runtime_info, :worker_model_route, :codex_worker_update] do
+      when type in @worker_updates do
     case state.running[issue_id] do
       %{run_id: _} -> {:noreply, state}
       _ -> apply_worker_update(type, issue_id, payload, state)
@@ -278,6 +285,30 @@ defmodule SymphonyElixir.Orchestrator do
   def terminate(_reason, state) do
     Operations.sync(state.operations)
     Operations.close(state.operations)
+  end
+
+  defp apply_worker_update(:worker_startup_failure, issue_id, diagnostic, state) do
+    case state.running[issue_id] do
+      %{model_admitted: false} = entry ->
+        entry = Map.put(entry, :startup_failure, diagnostic)
+        {:noreply, %{state | running: Map.put(state.running, issue_id, entry)}}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
+  defp apply_worker_update(:worker_admitted, issue_id, _payload, state) do
+    case state.running[issue_id] do
+      %{model_admitted: false} = entry ->
+        entry = Map.put(entry, :model_admitted, true)
+        state = %{state | running: Map.put(state.running, issue_id, entry)}
+        state = put_startup(state, Map.delete(state.startup_failures, issue_id))
+        {:noreply, put_autopilot(state, Autopilot.record_pull_dispatch(state.autopilot, entry.issue))}
+
+      _ ->
+        {:noreply, state}
+    end
   end
 
   defp apply_worker_update(:worker_runtime_info, issue_id, runtime, state) when is_map(runtime) do
@@ -400,9 +431,13 @@ defmodule SymphonyElixir.Orchestrator do
         {running_entry, state} = pop_running_entry(state, issue_id)
         :ok = release_slot(issue_id)
         state = record_session_completion_totals(state, running_entry)
+        running_entry = startup_exit_evidence(running_entry, reason)
         session_id = running_entry_session_id(running_entry)
 
-        {outcome, summary, interruption} = worker_outcome(reason)
+        {outcome, summary, interruption} =
+          if running_entry[:startup_failure],
+            do: {"startup_failed", "Startup admission failed", nil},
+            else: worker_outcome(reason)
 
         Operations.finish_run(
           state.operations,
@@ -414,7 +449,9 @@ defmodule SymphonyElixir.Orchestrator do
             title: running_entry.issue.title,
             model: Map.get(running_entry, :model),
             summary: summary,
-            reason: interruption
+            reason: interruption,
+            startup: running_entry[:startup_failure],
+            worker_host: running_entry[:worker_host]
           }
         )
 
@@ -427,12 +464,24 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp startup_exit_evidence(entry, {:shutdown, :deployment_drain}), do: entry
+
+  defp startup_exit_evidence(%{model_admitted: false} = entry, reason) when reason != :normal do
+    Map.put_new(entry, :startup_failure, Startup.diagnostic(:worker_start, reason))
+  end
+
+  defp startup_exit_evidence(entry, _reason), do: entry
+
   defp worker_outcome(:normal), do: {"completed", "Worker finished", nil}
 
   defp worker_outcome({:shutdown, :deployment_drain}),
     do: {"interrupted", "Worker yielded for deployment drain", "deployment_drain"}
 
   defp worker_outcome(_reason), do: {"failed", "Worker failed", nil}
+
+  defp handle_agent_down(_reason, state, issue_id, %{startup_failure: diagnostic} = entry, _session_id) do
+    startup_failed(state, issue_id, entry, diagnostic)
+  end
 
   defp handle_agent_down({:shutdown, :deployment_drain}, state, issue_id, running_entry, _session_id) do
     schedule_issue_retry(state, issue_id, Map.get(running_entry, :retry_attempt, 0), %{
@@ -540,8 +589,10 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_dispatch(%State{} = state) do
     state =
       state
+      |> refresh_startup_retries()
       |> reconcile_running_issues()
       |> reconcile_blocked_issues()
+      |> reconcile_startup_issues()
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_issues_by_states(Config.settings!().tracker.active_states) do
@@ -916,6 +967,13 @@ defmodule SymphonyElixir.Orchestrator do
       session_id = running_entry_session_id(running_entry)
 
       cond do
+        running_entry[:model_admitted] == false ->
+          diagnostic = Startup.diagnostic(:session_start, "stalled for #{elapsed_ms}ms without codex activity")
+
+          state
+          |> terminate_running_issue(issue_id, false)
+          |> startup_failed(issue_id, running_entry, diagnostic)
+
         research_entry?(running_entry) ->
           Logger.warning("Research stalled: issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; ending round")
 
@@ -1281,6 +1339,7 @@ defmodule SymphonyElixir.Orchestrator do
       !Map.has_key?(state.running, issue.id) and
       !Map.has_key?(state.retry_attempts, issue.id) and
       !Map.has_key?(state.blocked, issue.id) and
+      Startup.ready?(state.startup_failures[issue.id]) and
       Autopilot.pull_request_ready?(issue, state.autopilot, Config.settings!().autopilot) and
       dispatch_admission(state, issue) == :ok
   end
@@ -1361,6 +1420,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
+    startup = state.startup_failures[issue.id]
+    attempt = if startup, do: startup.delivery_attempt, else: attempt
+
     case refresh_issue_for_dispatch(issue) do
       {:ok, %Issue{} = refreshed_issue} ->
         case admit_run(state, refreshed_issue, dispatch_class(state, refreshed_issue)) do
@@ -1458,7 +1520,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     spawn_result =
       with :ok <- claim do
-        Task.Supervisor.start_child(state.task_supervisor, fn ->
+        start_worker_task(state.task_supervisor, fn ->
           AgentRunner.run(issue, recipient,
             attempt: attempt,
             worker_host: worker_host,
@@ -1487,6 +1549,7 @@ defmodule SymphonyElixir.Orchestrator do
             worker_host: worker_host,
             workspace_path: nil,
             phase: :workspace,
+            model_admitted: false,
             session_id: nil,
             last_codex_message: nil,
             last_codex_timestamp: nil,
@@ -1531,20 +1594,27 @@ defmodule SymphonyElixir.Orchestrator do
             claimed: MapSet.put(state.claimed, issue.id),
             retry_attempts: Map.delete(state.retry_attempts, issue.id)
         }
-        |> put_autopilot(Autopilot.record_pull_dispatch(state.autopilot, issue))
 
       {:error, reason} ->
         Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
         :ok = release_slot(issue.id)
-        next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
 
-        schedule_issue_retry(state, issue.id, next_attempt, %{
+        entry = %{
+          issue: issue,
           identifier: issue.identifier,
-          issue_url: issue.url,
-          error: "failed to spawn agent: #{inspect(reason)}",
-          worker_host: worker_host
-        })
+          run_id: run_id,
+          worker_host: worker_host,
+          retry_attempt: normalize_retry_attempt(attempt)
+        }
+
+        startup_failed(state, issue.id, entry, Startup.diagnostic(:worker_spawn, reason))
     end
+  end
+
+  defp start_worker_task(supervisor, fun) do
+    Task.Supervisor.start_child(supervisor, fun)
+  catch
+    :exit, reason -> {:error, {:worker_spawn_exit, reason}}
   end
 
   defp claim_checkpoint(table, issue, item_attempt, host, codex) do
@@ -1598,11 +1668,115 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
+  defp startup_failed(state, issue_id, entry, diagnostic) do
+    identity = %{
+      issue_id: issue_id,
+      kind: entry.issue.kind,
+      research_channel: entry.issue.research && entry.issue.research[:channel],
+      identifier: entry.identifier,
+      issue_url: entry.issue.url,
+      worker_host: entry[:worker_host],
+      run_id: entry[:run_id],
+      worker_pid: inspect(entry[:pid])
+    }
+
+    failure = Startup.failed(state.startup_failures[issue_id], identity, diagnostic, entry[:retry_attempt] || 0)
+
+    Operations.event(
+      state.operations,
+      if(failure.count >= 3, do: "startup_blocked", else: "startup_retry"),
+      Map.merge(identity, %{
+        issue_identifier: entry.identifier,
+        startup: diagnostic,
+        startup_attempt: failure.count,
+        summary: failure.error
+      })
+    )
+
+    state = state |> release_issue_claim(issue_id) |> put_startup(Map.put(state.startup_failures, issue_id, failure))
+    schedule_startup_retry(state, issue_id, failure)
+  end
+
+  defp put_startup(state, failures) do
+    :ok = Operations.save_startup_state(state.operations, failures)
+    %{state | startup_failures: failures}
+  end
+
+  defp schedule_startup_retry(state, issue_id, %{count: count} = failure) when count < 3 do
+    schedule_issue_retry(state, issue_id, failure.delivery_attempt, %{
+      identifier: failure.identifier,
+      issue_url: failure.issue_url,
+      error: failure.error,
+      worker_host: failure.worker_host,
+      delay_type: :startup,
+      delay_ms: max(0, failure.due_at_ms - System.system_time(:millisecond))
+    })
+  end
+
+  defp schedule_startup_retry(state, _issue_id, _failure), do: state
+
+  defp restore_startup_retries(state) do
+    Enum.reduce(state.startup_failures, state, fn {id, failure}, acc -> schedule_startup_retry(acc, id, failure) end)
+  end
+
+  defp reconcile_startup_issues(state) do
+    ids = for {id, entry} <- state.startup_failures, entry[:kind] != :research, do: id
+    refresh_startup_visibility(state, ids)
+  end
+
+  defp refresh_startup_visibility(state, []), do: state
+
+  defp refresh_startup_visibility(state, ids) do
+    case Tracker.fetch_issues_by_ids(ids) do
+      {:ok, issues} -> prune_startup_failures(state, ids, issues)
+      {:error, _reason} -> state
+    end
+  end
+
+  defp prune_startup_failures(state, ids, issues) do
+    visible = for issue <- issues, issue_routable?(issue) and active_issue_state?(issue.state, active_state_set()), into: MapSet.new(), do: issue.id
+    removed = Enum.reject(ids, &MapSet.member?(visible, &1))
+    state = Enum.reduce(removed, state, &release_issue_claim(&2, &1))
+    put_startup(state, Map.drop(state.startup_failures, removed))
+  end
+
+  defp refresh_startup_retries(state) do
+    fingerprint = Startup.fingerprint()
+
+    state.startup_failures
+    |> Enum.filter(fn {_id, failure} -> failure.fingerprint != fingerprint end)
+    |> Enum.reduce(state, fn {id, _failure}, acc -> cancel_startup_timer(acc, id) end)
+  end
+
+  defp cancel_startup_timer(state, id) do
+    case state.retry_attempts[id] do
+      %{timer_ref: timer} when is_reference(timer) -> Process.cancel_timer(timer)
+      _ -> :ok
+    end
+
+    %{state | retry_attempts: Map.delete(state.retry_attempts, id)}
+  end
+
+  defp scheduled_retry_delay(state, issue_id, attempt, metadata) do
+    metadata[:delay_ms] ||
+      if(state.startup_failures[issue_id], do: @held_retry_delay_ms, else: retry_delay(attempt, metadata))
+  end
+
   defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
        when is_binary(issue_id) and is_map(metadata) do
     previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
     next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
-    delay_ms = retry_delay(next_attempt, metadata)
+
+    delay_ms = scheduled_retry_delay(state, issue_id, next_attempt, metadata)
+
+    state =
+      if failure = state.startup_failures[issue_id] do
+        failure = %{failure | due_at_ms: System.system_time(:millisecond) + delay_ms}
+        put_startup(state, Map.put(state.startup_failures, issue_id, failure))
+      else
+        state
+      end
+
     old_timer = Map.get(previous_retry, :timer_ref)
     retry_token = make_ref()
     due_at_ms = System.monotonic_time(:millisecond) + delay_ms
@@ -1626,7 +1800,11 @@ defmodule SymphonyElixir.Orchestrator do
       Operations.event(state.operations, "retry_scheduled", %{
         issue_identifier: identifier,
         issue_url: issue_url,
-        summary: "Attempt #{next_attempt} in #{div(delay_ms, 1_000)}s"
+        summary:
+          if(state.startup_failures[issue_id],
+            do: "Startup recovery check in #{div(delay_ms, 1_000)}s",
+            else: "Attempt #{next_attempt} in #{div(delay_ms, 1_000)}s"
+          )
       })
     end
 
@@ -1689,7 +1867,7 @@ defmodule SymphonyElixir.Orchestrator do
          schedule_issue_retry(
            state,
            issue_id,
-           attempt + 1,
+           if(state.startup_failures[issue_id], do: attempt, else: attempt + 1),
            Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
          )}
     end
@@ -1803,7 +1981,7 @@ defmodule SymphonyElixir.Orchestrator do
          schedule_issue_retry(
            state,
            issue.id,
-           attempt + 1,
+           if(state.startup_failures[issue.id], do: attempt, else: attempt + 1),
            Map.put(metadata, :error, "retry dispatch refresh failed: #{inspect(reason)}")
          )}
     end
@@ -1834,7 +2012,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp failure_retry_delay(attempt) do
-    max_delay_power = min(attempt - 1, 10)
+    max_delay_power = max(0, min(attempt - 1, 10))
     min(@failure_retry_base_ms * (1 <<< max_delay_power), Config.settings!().agent.max_retry_backoff_ms)
   end
 
@@ -2049,11 +2227,14 @@ defmodule SymphonyElixir.Orchestrator do
          Throttle.admit(state.throttle, :research) == :ok do
       open_issues = open_issue_count(issues, config)
 
-      opts = [idle: idle, open_pull_requests: state.polled_issues]
+      opts = [idle: idle, open_pull_requests: state.polled_issues, running: startup_held_channels(state)]
 
       case Autopilot.next_research(state.autopilot, config.autopilot, open_issues, DateTime.utc_now(), opts) do
-        {autopilot, nil} -> put_autopilot(state, autopilot)
-        {autopilot, item} -> state |> put_autopilot(autopilot) |> dispatch_issue(item)
+        {autopilot, nil} ->
+          put_autopilot(state, autopilot)
+
+        {autopilot, item} ->
+          state |> put_autopilot(autopilot) |> dispatch_issue(item)
       end
     else
       state
@@ -2064,6 +2245,7 @@ defmodule SymphonyElixir.Orchestrator do
     candidate_issue?(issue, active_state_set(), terminal_state_set()) and
       not MapSet.member?(state.claimed, issue.id) and
       not Map.has_key?(state.blocked, issue.id) and
+      Startup.ready?(state.startup_failures[issue.id]) and
       Autopilot.pull_request_ready?(issue, state.autopilot, Config.settings!().autopilot)
   end
 
@@ -2212,7 +2394,9 @@ defmodule SymphonyElixir.Orchestrator do
           issue_url: Map.get(retry, :issue_url),
           error: Map.get(retry, :error),
           worker_host: Map.get(retry, :worker_host),
-          workspace_path: Map.get(retry, :workspace_path)
+          workspace_path: Map.get(retry, :workspace_path),
+          startup: state.startup_failures[issue_id] && state.startup_failures[issue_id].diagnostic,
+          startup_attempt: state.startup_failures[issue_id] && state.startup_failures[issue_id].count
         }
       end)
 
@@ -2235,11 +2419,20 @@ defmodule SymphonyElixir.Orchestrator do
         }
       end)
 
+    startup_blocked =
+      for {issue_id, entry} <- state.startup_failures, entry.count >= 3, not Map.has_key?(state.running, issue_id) do
+        entry
+        |> Map.drop([:fingerprint, :delivery_attempt])
+        |> Map.put(:issue_id, issue_id)
+        |> Map.put(:startup, entry.diagnostic)
+        |> Map.merge(%{state: "Startup blocked", session_id: nil, last_codex_event: nil, last_codex_message: nil, last_codex_timestamp: nil})
+      end
+
     {:reply,
      %{
        running: running,
        retrying: retrying,
-       blocked: blocked,
+       blocked: blocked ++ startup_blocked,
        codex_totals: state.codex_totals,
        operations: Operations.snapshot(state.operations, opts),
        operations_error: state.operations_error,
@@ -2496,7 +2689,7 @@ defmodule SymphonyElixir.Orchestrator do
       running: map_size(state.running),
       ready: length(upcoming.ready),
       waiting: length(upcoming.waiting),
-      attention: map_size(state.blocked) + map_size(state.retry_attempts),
+      attention: map_size(state.blocked) + map_size(state.retry_attempts) + map_size(state.startup_failures),
       open_prs: length(state.pull_requests),
       spend_micro: Operations.spend_today(state.operations)
     })
@@ -2637,13 +2830,22 @@ defmodule SymphonyElixir.Orchestrator do
     open_issues = open_issue_count(state.polled_issues, config)
     idle = state.running == %{}
 
-    opts = [idle: idle, open_pull_requests: state.polled_issues]
+    opts = [idle: idle, open_pull_requests: state.polled_issues, running: startup_held_channels(state)]
     next = Autopilot.next_research(state.autopilot, config.autopilot, open_issues, DateTime.utc_now(), opts)
 
     config.autopilot.enabled and not research_running?(state) and
       Throttle.admit(state.throttle, :research) == :ok and
-      match?({_autopilot, %Issue{}}, next)
+      research_startup_ready?(next, state)
   end
+
+  defp startup_held_channels(state) do
+    for {_id, failure} <- state.startup_failures, failure[:kind] == :research and not Startup.ready?(failure), do: failure.research_channel
+  end
+
+  defp research_startup_ready?({_autopilot, %Issue{} = item}, state),
+    do: Startup.ready?(state.startup_failures[item.id])
+
+  defp research_startup_ready?(_next, _state), do: false
 
   # The route and a service slot are settled before a run starts; either can make it wait.
   defp admit_run(%State{} = state, %Issue{} = issue, class) do
@@ -3083,13 +3285,21 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp upcoming_reason(state, issue, active_states, terminal_states) do
     cond do
-      Map.has_key?(state.blocked, issue.id) -> "operator blocked"
+      reason = startup_blocking_reason(state, issue) -> reason
       Map.has_key?(state.retry_attempts, issue.id) -> "retry scheduled"
       reason = item_waiting_reason(issue, state) -> reason
       issue.blocked_by != [] and not issue.dispatchable -> "dependency blocked"
       MapSet.member?(state.claimed, issue.id) -> "continuation pending"
       not candidate_issue?(issue, active_states, terminal_states) -> "not queued"
       true -> admission_reason(state, issue)
+    end
+  end
+
+  defp startup_blocking_reason(state, issue) do
+    cond do
+      Map.has_key?(state.blocked, issue.id) -> "operator blocked"
+      not Startup.ready?(state.startup_failures[issue.id]) -> "startup admission blocked"
+      true -> nil
     end
   end
 

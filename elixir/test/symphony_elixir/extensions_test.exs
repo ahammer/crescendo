@@ -1081,6 +1081,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     at = fn seconds_ago -> DateTime.utc_now() |> DateTime.add(-seconds_ago, :second) |> DateTime.to_iso8601() end
 
     activity = [
+      %{kind: "startup_failed", at: at.(1), issue_identifier: "GH-43", category: "startup", summary: "before_run exited 1 (empty output)"},
+      %{kind: "startup_retry", at: at.(2), issue_identifier: "GH-43", category: "startup"},
+      %{kind: "startup_blocked", at: at.(3), issue_identifier: "GH-43", category: "startup"},
       %{kind: "pr_merged", at: at.(10), pr_number: 41, pr_url: "https://github.com/acme/app/pull/41", summary: "Tidy the README"},
       %{kind: "completed", at: at.(20), issue_identifier: "PR-41", category: "review", seconds: 300, usd_micro: 250_000},
       %{kind: "completed", at: at.(30), issue_identifier: "research-marketing", seconds: 600, usd_micro: 0},
@@ -1172,6 +1175,12 @@ defmodule SymphonyElixir.ExtensionsTest do
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
     {:ok, _view, html} = live(build_conn(), "/")
+
+    assert html =~ "Startup admission failed"
+    assert html =~ "Startup retry scheduled"
+    assert html =~ "Startup blocked"
+    assert html =~ "before_run exited 1 (empty output)"
+    assert SymphonyElixirWeb.Timeline.category_name("startup") == "Startup"
 
     # Up next: the retry and the first five ready items, the soonest nearest "Now".
     assert html =~ "+5 more queued"

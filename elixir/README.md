@@ -195,7 +195,7 @@ Notes:
   case and surrounding whitespace. A blank configured label matches no issue.
 - `tracker.excluded_labels` is optional. An issue with any configured label (for example
   `symphony:hold`) does not dispatch, and a running worker stops when one is added.
-- `agent.max_attempts` optionally caps failure retries. Once exceeded, the issue is blocked until
+- `agent.max_attempts` optionally caps delivery failure retries. Once exceeded, the issue is blocked until
   its state or labels change. Unset means retry indefinitely with backoff.
 - `codex.routing` optionally selects a model and reasoning effort from explicit issue labels.
   Example: `routing: {label_prefix: "symphony:model:", default: {model: "gpt-6.1-sol", effort: "medium"}, labels: {"symphony:model:astra": {model: "gpt-6.1-sol", effort: "xhigh"}}}`.
@@ -245,7 +245,7 @@ Notes:
 - Workspace preparation (`after_create`, `before_run`) and cleanup (`after_run`) use
   `hooks.timeout_ms`, independently of `codex.stall_timeout_ms`. The orchestrator tracks worker
   phases; Codex inactivity starts when preparation finishes, including app-server startup.
-  Startup request/response waits also retain `codex.read_timeout_ms`. Hook failures retry normally;
+  Startup request/response waits also retain `codex.read_timeout_ms`. Mandatory hook failures use the independent startup budget;
   cleanup failures are logged and ignored. Reloads preserve the current phase, and runtime restart
   cancels workers with their scheduler before redispatch.
 - Due retries and retries held for admission stay in the service's weighted slot queue;
@@ -407,6 +407,15 @@ attempt (`autopilot.max_item_attempts`) is final: the worker delivers, splits an
 the issue, and if it still fails Symphony closes the issue as not planned along with its draft pull
 requests. Pull requests that reach `max_pr_runs` without merging are closed too. Add `symphony:hold` to any issue or pull request
 to stop and hold it. Handled pull request heads and the research cooldown survive restarts.
+
+Startup failures before a session is admitted are an exception to delivery exhaustion: they retain
+the issue and dependencies, retry twice after 10/20 seconds, then expose a startup block with a
+30-minute recovery probe. Correct the environment and leave the item ready, or change the relevant
+hooks/workspace/worker/Codex config to retry immediately. Backoff survives restart in the operations
+store; successful admission clears it. They consume neither item effort nor PR review/research
+attempts. Once admitted, even a zero-token model failure follows normal delivery policy. See
+[the startup policy and recovery contract](../docs/crescendo.md#first-service). SSH workers running
+hooks need GNU `timeout`; local and transport process groups are cleaned on cancellation.
 
 ```bash
 GITHUB_REPO=owner/name GITHUB_TOKEN=... mise exec -- ./bin/crescendo \
