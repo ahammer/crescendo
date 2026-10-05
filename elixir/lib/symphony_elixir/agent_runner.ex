@@ -299,7 +299,10 @@ defmodule SymphonyElixir.AgentRunner do
             Keyword.put(opts, :on_message, codex_message_handler(recipient, issue, opts))
           )
 
-    persist_checkpoint(session, issue, recipient, opts, checkpoint || %{eligible: false})
+    case checkpoint do
+      {:error, _} = error -> error
+      _ -> persist_checkpoint(session, issue, recipient, opts, checkpoint || %{eligible: false})
+    end
   end
 
   defp persist_checkpoint(session, issue, recipient, opts, checkpoint) do

@@ -366,6 +366,33 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     assert {:ok, _} = AppServer.run(fixture.workspace, "healthy", fixture.issue)
   end
 
+  test "optional context reads cannot hide an overflow or reuse the failed transport" do
+    fixture = native_fixture()
+    codex = %{Config.settings!().codex | resume_threads: true}
+    opts = [kind: :issue, codex_settings: codex]
+    change_fixture(fixture, %{"overflow_method" => "skills/list"})
+    assert {:error, {:protocol_buffer_overflow, startup}} = AppServer.start_session(fixture.workspace, opts)
+    assert startup.request_method == "skills/list"
+    refute Enum.any?(requests(fixture), &(&1["method"] == "mcpServerStatus/list"))
+
+    change_fixture(fixture, %{"overflow_method" => nil})
+    {:ok, session} = AppServer.start_session(fixture.workspace, opts)
+
+    try do
+      assert {:ok, turn} = AppServer.run_turn(session, "task", fixture.issue)
+      change_fixture(fixture, %{"overflow_method" => "config/read"})
+      assert {:error, {:protocol_buffer_overflow, diagnostic}} = AppServer.checkpoint(session, turn, [])
+      assert diagnostic.request_method == "config/read"
+      previous = requests(fixture)
+      assert {:error, {:protocol_buffer_overflow, ^diagnostic}} = AppServer.run_turn(session, "continue", fixture.issue)
+      assert requests(fixture) == previous
+      change_fixture(fixture, %{"overflow_method" => nil})
+      assert {:ok, _} = AppServer.run(fixture.workspace, "isolated", fixture.issue)
+    after
+      AppServer.stop_session(session)
+    end
+  end
+
   test "one atomic thread record survives replay and charges each resumed run only for its new work" do
     {table, path} = ledger()
     key = {"storage", "thread"}
@@ -897,6 +924,9 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
         method = request.get('method')
         if method == 'initialized': continue
         cfg = json.loads(config_file.read_text()) if config_file.exists() else {}
+        if method == cfg.get('overflow_method'):
+            emit({'id':request['id'],'result':{'secret':'x'*5000000}})
+            continue
         state = json.loads(state_file.read_text()) if state_file.exists() else {}
         params = request.get('params', {})
         result = {}

@@ -205,7 +205,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   def read_account_usage(session, opts \\ []) do
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
 
-    if native_version(session.metadata[:user_agent]) && not Process.get({session.port, :protocol_failed}, false) do
+    if native_version(session.metadata[:user_agent]) && is_nil(Process.get({session.port, :protocol_failed})) do
       usage = native_account_usage(session)
 
       flush_notifications(session.port, on_message, false)
@@ -231,7 +231,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   @doc "Captures a successful boundary only when the verified native context still matches."
-  @spec checkpoint(session(), map(), keyword()) :: map() | nil
+  @spec checkpoint(session(), map(), keyword()) :: map() | nil | {:error, term()}
   def checkpoint(%{reuse_context: nil}, _turn, _opts), do: nil
 
   def checkpoint(session, turn, opts) do
@@ -261,7 +261,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       end
 
     flush_notifications(session.port, Keyword.get(opts, :on_message, &default_on_message/1), false)
-    result
+    Process.get({session.port, :protocol_failed}) || result
   end
 
   defp validate_workspace_cwd(workspace, nil) when is_binary(workspace) do
@@ -468,7 +468,9 @@ defmodule SymphonyElixir.Codex.AppServer do
         context = read_reuse_context(port, settings, result["instructionSources"], reuse)
         metadata = native_metadata(result, settings, opts)
         thread_id = result["thread"]["id"]
-        {:ok, %{thread_id: thread_id, metadata: metadata, resumed: restored, reuse_context: context}}
+
+        Process.get({port, :protocol_failed}) ||
+          {:ok, %{thread_id: thread_id, metadata: metadata, resumed: restored, reuse_context: context}}
       end
     end
   end
@@ -830,7 +832,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp stream_timeout(port, pending) do
-    if pending != "", do: Process.put({port, :protocol_failed}, true)
+    if pending != "", do: Process.put({port, :protocol_failed}, {:error, :turn_timeout})
     {:error, :turn_timeout}
   end
 
@@ -1381,7 +1383,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     Process.put({port, :awaiting_response}, true)
 
     try do
-      with_timeout_response(port, id, deadline, "")
+      Process.get({port, :protocol_failed}) || with_timeout_response(port, id, deadline, "")
     after
       Process.delete({port, :awaiting_response})
     end
@@ -1561,9 +1563,10 @@ defmodule SymphonyElixir.Codex.AppServer do
       request_method: Process.get({port, :request_method})
     }
 
-    Process.put({port, :protocol_failed}, true)
+    error = {:error, {:protocol_buffer_overflow, details}}
+    Process.put({port, :protocol_failed}, error)
     Logger.warning("Codex protocol overflow #{inspect(details)}")
-    {:error, {:protocol_buffer_overflow, details}}
+    error
   end
 
   defp queue_notification(port, %{"method" => _}, line) do
@@ -1739,12 +1742,16 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp tool_call_arguments(_params), do: %{}
 
   defp send_message(port, message) do
-    if message["method"] do
-      Process.put({port, :request_method}, message["method"])
-    end
+    if error = Process.get({port, :protocol_failed}) do
+      error
+    else
+      if message["method"] do
+        Process.put({port, :request_method}, message["method"])
+      end
 
-    line = Jason.encode!(message) <> "\n"
-    Port.command(port, line)
+      line = Jason.encode!(message) <> "\n"
+      Port.command(port, line)
+    end
   end
 
   defp needs_input?("mcpServer/elicitation/request", payload) when is_map(payload), do: true

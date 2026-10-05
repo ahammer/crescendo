@@ -697,7 +697,10 @@ request identity/method, thread/turn identity and work item without payload cont
 the stream is unusable: account-usage RPC is skipped and the process group is closed during normal
 worker cleanup. Admitted transport overflow records an infrastructure interruption and retries
 after 30 seconds without advancing the implementation attempt; startup overflow retains startup
-admission recovery. Native servers must split larger output into bounded delta frames; this client
-does not stream arbitrary JSON strings or accept unbounded controls. Output-only fields beyond the
-verified schema remain subject to the control payload ceiling. No billable model run is needed to
+admission recovery. Research interruptions use the durable channel schedule and preserve the
+channel's attempt count, rather than looking up synthetic IDs in the tracker. Optional native
+context and checkpoint reads propagate transport overflow; a failed transport rejects all later
+requests, including continuation turns. Native servers must split larger output into bounded delta
+frames; this client does not stream arbitrary JSON strings or accept unbounded controls. Output-only
+fields beyond the verified schema remain subject to the control payload ceiling. No billable model run is needed to
 verify this transport behavior.

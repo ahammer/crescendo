@@ -496,6 +496,18 @@ defmodule SymphonyElixir.Orchestrator do
     })
   end
 
+  defp handle_agent_down(
+         {:shutdown, {:protocol_buffer_overflow, _}},
+         state,
+         issue_id,
+         %{issue: %Issue{kind: :research, research: %{channel: channel}}},
+         _session
+       ) do
+    settings = Config.settings!().autopilot
+    autopilot = Autopilot.record_research_finished(state.autopilot, channel, :interrupted, now(), settings)
+    state |> put_autopilot(autopilot) |> release_issue_claim(issue_id)
+  end
+
   defp handle_agent_down({:shutdown, {:protocol_buffer_overflow, diagnostic}}, state, issue_id, entry, _session) do
     schedule_issue_retry(state, issue_id, Map.get(entry, :retry_attempt, 0), %{
       identifier: entry.identifier,

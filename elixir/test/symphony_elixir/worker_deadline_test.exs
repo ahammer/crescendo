@@ -123,6 +123,72 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
     assert File.read!(Path.join(root, "sessions")) == "start\n"
   end
 
+  test "research transport recovery uses the channel schedule without spending an attempt", %{root: root} do
+    previous = Application.get_env(:symphony_elixir, :task_deliveries_fun)
+    Application.put_env(:symphony_elixir, :task_deliveries_fun, fn _, _ -> {:ok, %{issues: 0, pull_requests: 0}} end)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:symphony_elixir, :task_deliveries_fun, previous),
+        else: Application.delete_env(:symphony_elixir, :task_deliveries_fun)
+    end)
+
+    ctx =
+      start_worker(
+        root,
+        [
+          poll_interval_ms: 1_000_000,
+          hook_before_run: "exit 1",
+          autopilot: %{
+            "enabled" => true,
+            "repo_tasks" => false,
+            "max_item_attempts" => 1,
+            "channels" => %{"fixture" => %{"focus" => "Offline fixture", "min_issues" => 0}}
+          }
+        ],
+        :protocol_overflow
+      )
+
+    await(fn -> Map.has_key?(state(ctx).startup_failures, ctx.issue.id) end)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    write_workflow_file!(ctx.workflow, Keyword.put(ctx.config, :hook_before_run, "sleep 0.2"))
+    assert :ok = Project.with_project("deadline", &WorkflowStore.force_reload/0)
+    :sys.replace_state(ctx.orchestrator, &%{&1 | autopilot: %{&1.autopilot | tasks: %{}}})
+    send(ctx.orchestrator, :run_poll_cycle)
+    id = "research:fixture"
+    await(fn -> get_in(state(ctx).running, [id, :phase]) == :workspace end)
+    entry = state(ctx).running[id]
+    await(fn -> state(ctx).running == %{} and File.exists?(Path.join(root, "sessions")) end)
+    current = state(ctx)
+    assert %{attempts: 0, last: :interrupted, retry_at: retry_at} = current.autopilot.tasks["fixture"]
+    assert DateTime.diff(retry_at, DateTime.utc_now(), :second) in 25..30
+    refute Map.has_key?(current.retry_attempts, id)
+    refute MapSet.member?(current.claimed, id)
+    refute Map.has_key?(current.startup_failures, id)
+    assert [{_, %{status: "interrupted"}}] = :dets.lookup(current.operations, {:lineage_run, entry.run_id})
+    assert %{busy: 0} = Governor.snapshot()
+
+    Process.exit(ctx.orchestrator, :kill)
+
+    await(fn ->
+      replacement = GenServer.whereis(Project.via("deadline", :orchestrator))
+      replacement != nil and replacement != ctx.orchestrator
+    end)
+
+    ctx = %{ctx | orchestrator: GenServer.whereis(Project.via("deadline", :orchestrator))}
+    assert state(ctx).autopilot.tasks["fixture"].retry_at == retry_at
+    send(ctx.orchestrator, :run_poll_cycle)
+    assert state(ctx).running == %{}
+    assert File.read!(Path.join(root, "sessions")) == "start\n"
+    File.write!(Path.join(root, "recovered"), "")
+    :sys.replace_state(ctx.orchestrator, &put_in(&1.autopilot.tasks["fixture"].retry_at, DateTime.add(DateTime.utc_now(), -1, :second)))
+    send(ctx.orchestrator, :run_poll_cycle)
+    await(fn -> get_in(state(ctx).autopilot, [:tasks, "fixture", :last]) == :delivered end)
+    assert state(ctx).autopilot.tasks["fixture"].attempts == 0
+    assert File.read!(Path.join(root, "sessions")) == "start\nstart\n"
+    assert %{busy: 0} = Governor.snapshot()
+  end
+
   test "Codex startup has a fresh inactivity deadline after a long hook", %{root: root} do
     ctx = start_worker(root, [hook_before_run: "exec sleep 0.3", codex_read_timeout_ms: 2_000], :startup)
     entry = await_entry(ctx, :codex)
@@ -628,8 +694,8 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
         *'"method":"thread/start"'*) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-deadline"}}}' ;;
         *'"method":"turn/start"'*)
           printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-deadline"}}}'
-          if [ '#{mode}' = complete ]; then printf '%s\\n' '{"method":"turn/completed","params":{"turn":{"status":"completed"}}}'; fi
-          if [ '#{mode}' = protocol_overflow ]; then printf '%s' '{"secret":"'; python3 -c "print('x'*18000000)"; fi
+          if [ '#{mode}' = complete ] || [ -f '#{root}/recovered' ]; then printf '%s\\n' '{"method":"turn/completed","params":{"turn":{"status":"completed"}}}'; fi
+          if [ '#{mode}' = protocol_overflow ] && [ ! -f '#{root}/recovered' ]; then printf '%s' '{"secret":"'; python3 -c "print('x'*18000000)"; fi
           if [ '#{mode}' = turn_failure ]; then printf '%s\\n' '{"method":"turn/completed","params":{"turn":{"status":"failed"}}}'; fi ;;
       esac
     done
