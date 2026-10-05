@@ -218,8 +218,16 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info({type, issue_id, run_id, payload}, state)
       when type in @worker_updates do
     case state.running[issue_id] do
-      %{run_id: ^run_id} -> apply_worker_update(type, issue_id, payload, state)
-      _ -> {:noreply, state}
+      %{run_id: ^run_id} ->
+        apply_worker_update(type, issue_id, payload, state)
+
+      _ ->
+        if type == :codex_worker_update do
+          Operations.reconcile_usage(state.operations, issue_id, run_id, payload)
+          notify_dashboard()
+        end
+
+        {:noreply, state}
     end
   end
 
@@ -380,7 +388,19 @@ defmodule SymphonyElixir.Orchestrator do
       ])
       |> Map.put(:run_id, entry.run_id)
 
-    result = Operations.thread_context(table, key, context)
+    attribution = %{
+      issue_id: entry.issue.id,
+      thread_id: thread,
+      thread_key: key,
+      identifier: entry.identifier,
+      model: update[:model] || entry[:model],
+      date: Date.to_iso8601(Date.utc_today()),
+      rates: Map.get_lazy(entry, :pricing_rates, fn -> Operations.rates(Config.settings!().pricing) end)
+    }
+
+    result =
+      with :ok <- Operations.thread_context(table, key, context),
+           do: Operations.bind_accounting(table, entry.run_id, attribution)
 
     entry =
       entry |> Map.put(:thread_id, thread) |> Map.put(:thread_key, key) |> Map.put(:codex_provenance, context)
@@ -388,37 +408,17 @@ defmodule SymphonyElixir.Orchestrator do
     {if(result == :ok, do: entry, else: Map.put(entry, :accounting_error, result)), update}
   end
 
-  defp account_thread_update(table, entry, %{event: :account_usage, thread_id: thread} = update) do
-    if entry[:thread_id] == thread,
-      do: Operations.account_usage(table, entry[:thread_key], thread, update[:account_usage])
-
-    {entry, update}
-  end
-
   defp account_thread_update(table, entry, update) do
-    snapshot = Usage.snapshot(update)
-    rates = Map.get_lazy(entry, :pricing_rates, fn -> Operations.rates(Config.settings!().pricing) end)
+    case Operations.reconcile_usage(table, entry.issue.id, entry[:run_id], update, true) do
+      {:ok, delta} ->
+        {entry, Map.put(update, :accounted_delta, delta)}
 
-    if entry[:thread_key] && entry[:run_id] && snapshot && snapshot.thread_id == entry[:thread_id] do
-      case Operations.thread_usage(
-             table,
-             entry.thread_key,
-             entry.run_id,
-             update[:model] || entry[:model],
-             snapshot,
-             entry.identifier,
-             rates,
-             update[:restored] == true
-           ) do
-        {:ok, delta} ->
-          {entry, Map.put(update, :accounted_delta, delta)}
+      {:error, reason} ->
+        Logger.error("Thread accounting unavailable for #{entry.identifier}: #{inspect(reason)}")
+        {Map.put(entry, :accounting_error, reason), Map.put(update, :accounted_delta, Usage.normalize(%{}))}
 
-        {:error, reason} ->
-          Logger.error("Thread accounting unavailable for #{entry.identifier}: #{inspect(reason)}")
-          {Map.put(entry, :accounting_error, reason), Map.put(update, :accounted_delta, Usage.normalize(%{}))}
-      end
-    else
-      {entry, if(entry[:thread_key], do: Map.put(update, :accounted_delta, Usage.normalize(%{})), else: update)}
+      :ignored ->
+        {entry, if(entry[:thread_key], do: Map.put(update, :accounted_delta, Usage.normalize(%{})), else: update)}
     end
   end
 

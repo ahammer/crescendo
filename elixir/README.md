@@ -704,3 +704,19 @@ requests, including continuation turns. Native servers must split larger output 
 frames; this client does not stream arbitrary JSON strings or accept unbounded controls. Output-only
 fields beyond the verified schema remain subject to the control payload ceiling. No billable model run is needed to
 verify this transport behavior.
+
+## Terminal thread usage reconciliation
+
+Operations reconciles supported cumulative usage even after completion, failure, interruption or
+force-stop. The existing 90-day run history retains credential-free attribution; late accounting
+cannot act on a replacement worker or grant checkpoint eligibility. Run history and dashboard
+summaries show corrected estimates and explicit `terminal_observed` / `incomplete` accounting.
+Terminal observation is evidence of a matching cumulative snapshot and terminal turn, not a
+promise of complete provider billing. Missing cache-write and helper/reviewer coverage stay unknown.
+Observed turn usage evidence survives older notifications, including before turn-start responses.
+
+The offline tests use the pinned Codex 0.160.0 schema and a synthetic sanitized reproduction of the
+reported aggregate gap. Graceful teardown flushes supported queued events; force termination can
+prevent observation. No new turn or token-usage RPC is used. See [reconciliation and coverage
+limits](../docs/crescendo.md#terminal-thread-usage-reconciliation) before replaying copied native
+records into an offline scratch ledger.

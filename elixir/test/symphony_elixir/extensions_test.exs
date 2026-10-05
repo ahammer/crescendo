@@ -363,6 +363,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                "status" => "unavailable",
                "pricing_as_of" => "2026-09-24",
                "cost_basis" => "api_equivalent_estimate",
+               "accounting" => %{"terminal_observed" => 0, "incomplete" => 0, "helper_usage_coverage" => "unknown"},
                "account_usage" => %{
                  "coverage" => "incomplete",
                  "threads_recorded" => 0,

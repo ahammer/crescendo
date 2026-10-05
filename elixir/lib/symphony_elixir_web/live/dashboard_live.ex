@@ -418,6 +418,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <div title="Spend per finished run"><dt>Per run</dt><dd class="numeric"><%= per(@total, @stats.total) %></dd></div>
         <div title="API-equivalent spend divided by observed merges; accepted-delivery cost is not verified"><dt>Per observed merge</dt><dd class="numeric"><%= per(@total, @stats.merged) %></dd></div>
       </dl>
+      <p class="muted">Terminal usage observed: <%= get_in(@usage, [:accounting, :terminal_observed]) || 0 %> runs ·
+        incomplete: <%= get_in(@usage, [:accounting, :incomplete]) || 0 %> runs (90-day history).
+        Separately launched helper/reviewer usage is unknown.</p>
       <p :if={@usage.status != "ok"} class="error-copy">History unavailable<%= if @usage_error do %>: <%= @usage_error %><% end %>.</p>
       <Charts.columns id="spend-chart" title="Estimated worker spend per day by model, last 14 days" series={spend_series(@usage)} columns={spend_columns(@usage)} format={&format_usd_axis/1} />
     </section>

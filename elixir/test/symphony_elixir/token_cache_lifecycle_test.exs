@@ -36,6 +36,53 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     end
   end
 
+  test "supported cumulative usage queued during graceful teardown is flushed without another turn" do
+    fixture = native_fixture()
+    change_fixture(fixture, %{"teardown_usage" => true})
+    parent = self()
+    handler = fn message -> send(parent, {:teardown, message}) end
+    {:ok, session} = AppServer.start_session(fixture.workspace, on_message: handler)
+    on_exit(fn -> AppServer.stop_session(session) end)
+    assert {:ok, _} = AppServer.run_turn(session, "task", fixture.issue, on_message: handler)
+    assert_receive {:teardown, %{payload: %{"method" => "thread/tokenUsage/updated"}} = initial}
+    assert Usage.snapshot(initial).total.total_tokens == 120
+    assert :ok = AppServer.read_account_usage(session, on_message: handler)
+    assert_receive {:teardown, %{payload: %{"method" => "thread/tokenUsage/updated"}} = final}
+    assert Usage.snapshot(final).total.total_tokens == 240
+    assert Enum.count(requests(fixture), &(&1["method"] == "turn/start")) == 1
+  end
+
+  test "continuation usage before the turn-start response still supplies terminal accounting evidence" do
+    fixture = native_fixture()
+    {table, _path} = ledger()
+    {:ok, session} = AppServer.start_session(fixture.workspace)
+    on_exit(fn -> AppServer.stop_session(session) end)
+    key = session.metadata.thread_key
+    Operations.start_run(table, "run", %{issue_id: fixture.issue.id, issue_identifier: fixture.issue.identifier})
+    Operations.thread_context(table, key, %{run_id: "run"})
+
+    Operations.bind_accounting(table, "run", %{
+      issue_id: fixture.issue.id,
+      thread_id: session.thread_id,
+      thread_key: key,
+      identifier: fixture.issue.identifier,
+      model: session.metadata.model,
+      date: Date.to_iso8601(Date.utc_today()),
+      rates: Operations.rates(nil)
+    })
+
+    handler = fn update -> Operations.reconcile_usage(table, fixture.issue.id, "run", update, true) end
+
+    for prompt <- ["task", "continue"] do
+      assert {:ok, _turn} = AppServer.run_turn(session, prompt, fixture.issue, on_message: handler)
+      assert Operations.snapshot(table).accounting.terminal_observed == 1
+      assert Operations.snapshot(table).accounting.incomplete == 0
+    end
+
+    assert Operations.run_usage(table, "run").total_tokens == 120
+    assert Enum.count(requests(fixture), &(&1["method"] == "turn/start")) == 2
+  end
+
   test "malformed model reroutes preserve native metadata for later usage and completion" do
     fixture = native_fixture()
     parent = self()
@@ -58,6 +105,55 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
       assert_received {:native, %{payload: %{"method" => "thread/tokenUsage/updated"}} = update}
       assert update.model == expected
       assert_received {:native, %{event: :turn_completed, model: ^expected}}
+    end
+  end
+
+  for status <- ["failed", "interrupted"] do
+    @tag terminal_status: status
+    test "late usage after a rerouted #{status} turn retains the executed model and rates", %{terminal_status: status} do
+      fixture = native_fixture()
+      change_fixture(fixture, %{"rerouted_model" => "gpt-6-astra", "terminal_status" => status, "teardown_usage" => true})
+      {table, _path} = ledger()
+      {:ok, session} = AppServer.start_session(fixture.workspace)
+      on_exit(fn -> AppServer.stop_session(session) end)
+      key = session.metadata.thread_key
+      Operations.start_run(table, "run", %{issue_id: fixture.issue.id, issue_identifier: fixture.issue.identifier})
+      Operations.thread_context(table, key, %{run_id: "run"})
+
+      Operations.bind_accounting(table, "run", %{
+        issue_id: fixture.issue.id,
+        thread_id: session.thread_id,
+        thread_key: key,
+        identifier: fixture.issue.identifier,
+        model: session.metadata.model,
+        date: Date.to_iso8601(Date.utc_today()),
+        rates: Operations.rates(nil)
+      })
+
+      parent = self()
+
+      active = fn update ->
+        send(parent, {:active, update})
+        Operations.reconcile_usage(table, fixture.issue.id, "run", update, true)
+      end
+
+      assert {:error, {:turn_not_completed, ^status}} = AppServer.run_turn(session, "task", fixture.issue, on_message: active)
+      assert_received {:active, %{event: :turn_ended_with_error, model: "gpt-6-astra"}}
+      Operations.finish_run(table, "run", status, %{issue_identifier: fixture.issue.identifier})
+
+      late = fn update ->
+        send(parent, {:late, update})
+        Operations.reconcile_usage(table, fixture.issue.id, "run", update)
+      end
+
+      assert :ok = AppServer.read_account_usage(session, on_message: late)
+      assert_received {:late, %{event: :account_usage, model: "gpt-6-astra"}}
+
+      snapshot = Operations.snapshot(table)
+      assert [%{model: "gpt-6-astra", total_tokens: 240, usd_micro: 1_280}] = snapshot.by_model
+      assert snapshot.recorded.unpriced_tokens == 0
+      assert snapshot.accounting.terminal_observed == 1
+      assert Enum.all?(snapshot.activity, &(&1.usd_micro == 1_280))
     end
   end
 
@@ -1003,6 +1099,9 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
             emit({'method':'turn/completed','params':{'threadId':'foreign','turn':{'id':'foreign','items':[],'status':'completed'}}})
             emit({'method':'turn/completed','params':{'threadId':thread,'turn':{'id':turn,'items':[item] if cfg.get('output_bytes') else [],'status':cfg.get('terminal_status','completed')}}})
         elif method == 'account/usage/read':
+            if cfg.get('teardown_usage'):
+                state.setdefault('usage', {})[thread] = {'inputTokens':200, 'cachedInputTokens':160, 'outputTokens':40, 'reasoningOutputTokens':0, 'totalTokens':240}
+                emit(usage(thread, state))
             result = {'threadUsage':None}
         else:
             raise RuntimeError('unsupported method '+method)

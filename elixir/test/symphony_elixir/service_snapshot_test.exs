@@ -27,6 +27,15 @@ defmodule SymphonyElixirWeb.ServiceSnapshotTest do
     )
   end
 
+  test "terminal accounting counts and corrected usage merge across projects" do
+    first = snapshot(%{operations: operations(%{accounting: %{terminal_observed: 2, incomplete: 1}})})
+    second = snapshot(%{operations: operations(%{accounting: %{terminal_observed: 1, incomplete: 3}})})
+    merged = ServiceSnapshot.merge([{"one", first}, {"two", second}], nil).operations
+    assert merged.accounting == %{terminal_observed: 3, incomplete: 4, helper_usage_coverage: "unknown"}
+    assert merged.recorded.total_tokens == 100
+    assert ServiceSnapshot.merge([], nil).operations.accounting.incomplete == 0
+  end
+
   test "billing coverage merges known native credits without converting missing estimates to zero" do
     first =
       snapshot(%{

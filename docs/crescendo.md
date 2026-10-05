@@ -499,3 +499,46 @@ requests, including continuation turns. Native servers must split larger output 
 frames; this client does not stream arbitrary JSON strings or accept unbounded controls. Output-only
 fields beyond the verified schema remain subject to the control payload ceiling. No billable model run is needed to
 verify this transport behavior.
+
+## Terminal thread usage reconciliation
+
+Operations owns cumulative accounting after a worker completes, fails, is interrupted or is
+force-stopped. Credential-free run attribution retains the scoped thread, item, model, price
+rates and UTC allocation date in the existing 90-day run history. A late supported usage event
+updates the original run's watermark and derived run/item/model/date/service estimates exactly
+once. It cannot change worker actions, transcripts, routes, rate-limit controls, claims, retries,
+issue disposition, governor slots or grant checkpoint eligibility. A thread subsequently resumed by
+another run rejects observations attributed to its former owner.
+
+`usage.accounting` reports `terminal_observed` and `incomplete` run counts over retained run
+history; `usage.activity` carries each run's current `accounting_status`, `cache_write_status`
+and corrected estimate. Terminal observation means a supported cumulative input/output snapshot
+and a matching terminal turn were observed, including failed/interrupted turns. It does not
+promise provider billing completeness. Starting another turn makes terminal accounting
+incomplete until that turn's usage and terminal event are observed. Missing cache-write fields
+remain `unknown`; cached input and reasoning output remain subsets, never additional tokens.
+Observed turn usage evidence stays in bounded run history, so an older notification cannot erase
+it when cumulative usage precedes the turn-start response.
+
+The pinned Codex 0.160.0 generated schema exposes `thread/tokenUsage/updated.tokenUsage.total`.
+`last` is not cumulative, `turn/completed` contains terminal status but no usage snapshot, and
+`ThreadReadResponse.thread` has no token-usage field. Graceful teardown already reads the supported
+native account estimate with a one-second timeout and flushes queued notifications; these
+notifications now reach retained accounting even after worker removal. Force-killing a worker,
+protocol failure or an absent provider event can leave accounting incomplete. No turn is launched
+for telemetry, and no token-usage read RPC or Responses parameter is inferred from `thread/read`.
+
+Reconciliation is bounded: during the retained 90-day window, replay only supported cumulative
+notifications with verified original run/thread identity through Operations.reconcile_usage/5.
+The orchestrator's late-message path uses this same function. Offline investigations must use
+copied immutable native-event/ledger snapshots, validate identity and schema, and replay into a
+scratch ledger; do not edit the live operational ledger. Beyond retention or without a supported
+final observation, retain unknown coverage rather than inventing totals. Attribution expires
+with existing run-history pruning; cumulative aggregate records remain available.
+
+`test/fixtures/terminal-usage-gap.json` is a synthetic sanitized reproduction of the reported
+512,557 input / 1,927 output aggregate gap, not recovered operational data. Deterministic tests
+cover usage on either side of worker removal/terminal events, failure/interruption, duplicates,
+stale events, compaction estimates, restart, redispatch, resumed-thread fencing and retention.
+Separately launched helper/reviewer threads remain unobserved (`helper_usage_coverage: unknown`);
+recorded parent-thread estimates must not be described as complete whole-project cost.

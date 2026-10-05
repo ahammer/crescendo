@@ -75,6 +75,8 @@ defmodule SymphonyElixir.Operations do
       run =
         Map.merge(details, %{
           status: "running",
+          accounting_status: "incomplete",
+          cache_write_status: "unknown",
           started_s: System.os_time(:second),
           first_eligible_at: lookup(table, {:eligible, details[:issue_id]}, nil)
         })
@@ -219,7 +221,7 @@ defmodule SymphonyElixir.Operations do
       owner =
         if restored and record.owner,
           do: record.owner,
-          else: {run_id, Date.to_iso8601(Date.utc_today()), model || "unknown", item}
+          else: {run_id, usage_date(snapshot), model || "unknown", item}
 
       allocations = allocate_usage(record.allocations, owner, delta, rates)
       last_turn = if ignored, do: record[:last_turn], else: complete_turn(snapshot)
@@ -238,6 +240,115 @@ defmodule SymphonyElixir.Operations do
       {:ok, if(restored, do: Map.new(delta, fn {field, _} -> {field, 0} end), else: delta)}
     end)
   end
+
+  @doc "Retains credential-free accounting attribution in the existing bounded run history."
+  @spec bind_accounting(handle(), String.t(), map()) :: :ok | {:error, term()}
+  def bind_accounting(table, run_id, attribution) do
+    checked_write(table, fn ->
+      run = lookup(table, {:lineage_run, run_id}, %{})
+      :ok = :dets.insert(table, {{:lineage_run, run_id}, Map.put(run, :accounting, attribution)})
+      :ok = :dets.sync(table)
+    end)
+  end
+
+  @doc "Reconciles only usage and terminal evidence; never performs active worker actions."
+  def reconcile_usage(table, issue_id, run_id, update, active \\ false)
+
+  @spec reconcile_usage(handle(), String.t(), String.t(), map(), boolean()) ::
+          {:ok, map()} | :ignored | {:error, term()}
+  def reconcile_usage(nil, _issue_id, _run_id, _update, _active), do: :ignored
+
+  def reconcile_usage(table, issue_id, run_id, update, active) do
+    checked_write(table, fn ->
+      run = lookup(table, {:lineage_run, run_id}, %{})
+      attribution = run[:accounting]
+
+      if valid_accounting?(table, run, attribution, issue_id, run_id) do
+        reconcile_observation(table, run_id, run, attribution, update, active)
+      else
+        :ignored
+      end
+    end)
+  end
+
+  defp valid_accounting?(table, run, attribution, issue_id, run_id) do
+    is_map(attribution) and attribution.issue_id == issue_id and
+      (run[:finished_s] || System.os_time(:second)) >= System.os_time(:second) - 90 * 86_400 and
+      lookup(table, {:thread_context, attribution.thread_key}, %{})[:run_id] == run_id
+  end
+
+  defp reconcile_observation(table, run_id, run, attribution, update, active) do
+    attribution =
+      if active and update[:event] != :account_usage,
+        do: %{attribution | model: update[:model] || attribution.model, date: Date.to_iso8601(Date.utc_today())},
+        else: attribution
+
+    if active and run[:accounting] != attribution,
+      do: :dets.insert(table, {{:lineage_run, run_id}, Map.put(run, :accounting, attribution)})
+
+    run = Map.put(run, :accounting, attribution)
+
+    case Usage.snapshot(update) do
+      %{thread_id: thread} = snapshot when thread == attribution.thread_id ->
+        reconcile_snapshot(table, run_id, run, attribution, snapshot, active and update[:restored] == true)
+
+      _ ->
+        observe_boundary(table, run_id, run, attribution, update, active)
+    end
+  end
+
+  defp reconcile_snapshot(table, run_id, run, attribution, snapshot, restored) do
+    snapshot = Map.put(snapshot, :accounting_date, attribution.date)
+    result = thread_usage(table, attribution.thread_key, run_id, attribution.model, snapshot, attribution.identifier, attribution.rates, restored)
+
+    if match?({:ok, _}, result) do
+      run = if snapshot[:cache_write_observed], do: Map.put(run, :cache_write_status, "observed"), else: run
+      turn = complete_turn(snapshot)
+      # Stale notifications cannot erase usage observed before turn/start.
+      run = if turn, do: Map.update(run, :usage_turns, MapSet.new([turn]), &MapSet.put(&1, turn)), else: run
+      save_accounting_observation(table, run_id, run)
+    end
+
+    result
+  end
+
+  defp observe_boundary(table, id, run, attribution, %{event: :session_started, thread_id: thread, turn_id: turn}, true)
+       when thread == attribution.thread_id do
+    run =
+      run
+      |> Map.put(:active_turn, turn)
+      |> Map.delete(:terminal_turn)
+
+    save_accounting_observation(table, id, run)
+    :ignored
+  end
+
+  defp observe_boundary(table, id, run, attribution, %{payload: %{"method" => "turn/completed", "params" => %{"threadId" => thread, "turn" => %{"id" => turn, "status" => status}}}}, _active)
+       when thread == attribution.thread_id and status in ["completed", "failed", "interrupted"] do
+    if matching_turn?(run, turn),
+      do: save_accounting_observation(table, id, Map.put(run, :terminal_turn, turn))
+
+    :ignored
+  end
+
+  defp observe_boundary(table, _id, _run, attribution, %{event: :account_usage, thread_id: thread} = update, _active)
+       when thread == attribution.thread_id do
+    account_usage(table, attribution.thread_key, thread, update[:account_usage])
+    :ignored
+  end
+
+  defp observe_boundary(_table, _id, _run, _attribution, _update, _active), do: :ignored
+
+  defp matching_turn?(run, turn),
+    do: is_binary(turn) and (is_nil(run[:active_turn]) or run[:active_turn] == turn)
+
+  defp save_accounting_observation(table, run_id, run) do
+    status = if MapSet.member?(run[:usage_turns] || MapSet.new(), run[:terminal_turn]), do: "terminal_observed", else: "incomplete"
+    :ok = :dets.insert(table, {{:lineage_run, run_id}, Map.put(run, :accounting_status, status)})
+    :ok = :dets.sync(table)
+  end
+
+  defp usage_date(snapshot), do: snapshot[:accounting_date] || Date.to_iso8601(Date.utc_today())
 
   defp complete_turn(%{source: :canonical, complete: true, turn_id: turn}) when is_binary(turn), do: turn
   defp complete_turn(_snapshot), do: nil
@@ -822,6 +933,7 @@ defmodule SymphonyElixir.Operations do
       pricing_as_of: @price_date,
       cost_basis: "api_equivalent_estimate",
       account_usage: empty_account(),
+      accounting: %{terminal_observed: 0, incomplete: 0, helper_usage_coverage: "unknown"},
       delivery_metrics: empty_delivery_metrics(),
       today: empty_usage(),
       recorded: empty_usage(),
@@ -883,11 +995,15 @@ defmodule SymphonyElixir.Operations do
         table
       )
 
+    costs = current_run_costs(table)
+
     ordered_events =
       events
       |> Enum.sort_by(fn {sequence, _} -> sequence end)
       |> Enum.map(fn {_sequence, event} ->
-        Map.put(event, :attribution, if(event[:run_id], do: "recorded", else: "unknown"))
+        event
+        |> Map.put(:attribution, if(event[:run_id], do: "recorded", else: "unknown"))
+        |> current_accounting(table, costs)
       end)
 
     # Task and image records ride in the samples accumulator, tagged (sample buckets are integers).
@@ -899,6 +1015,7 @@ defmodule SymphonyElixir.Operations do
       pricing_as_of: @price_date,
       cost_basis: "api_equivalent_estimate",
       account_usage: account_snapshot(table),
+      accounting: accounting_summary(table),
       delivery_metrics: delivery_snapshot(table),
       today: daily,
       recorded: recorded,
@@ -916,17 +1033,37 @@ defmodule SymphonyElixir.Operations do
           if(opts[:history], do: @sample_retention_buckets, else: @sample_window_buckets)
         ),
       median_run_seconds: median_run_seconds(ordered_events),
-      by_task: by_task(tasks_with_current_cost(table, tasks)),
+      by_task: by_task(tasks_with_current_cost(costs, tasks)),
       images: recent_images(images)
     }
   end
 
-  defp tasks_with_current_cost(table, tasks) do
-    costs =
-      Enum.reduce(usage_rows(table), %{}, fn {{run, _, _, _}, value}, acc ->
-        Map.update(acc, run, value.usd_micro, &(&1 + value.usd_micro))
-      end)
+  defp current_accounting(%{run_id: id} = event, table, costs) do
+    run = lookup(table, {:lineage_run, id}, %{})
 
+    event
+    |> Map.put(:accounting_status, run[:accounting_status] || "incomplete")
+    |> Map.put(:cache_write_status, run[:cache_write_status] || "unknown")
+    |> Map.put(:usd_micro, Map.get(costs, id, 0))
+  end
+
+  defp current_accounting(event, _table, _costs), do: event
+
+  defp accounting_summary(table) do
+    :dets.match_object(table, {{:lineage_run, :_}, :_})
+    |> Enum.reduce(%{terminal_observed: 0, incomplete: 0, helper_usage_coverage: "unknown"}, fn {_, run}, acc ->
+      field = if run[:accounting_status] == "terminal_observed", do: :terminal_observed, else: :incomplete
+      Map.update!(acc, field, &(&1 + 1))
+    end)
+  end
+
+  defp current_run_costs(table) do
+    Enum.reduce(usage_rows(table), %{}, fn {{run, _, _, _}, value}, acc ->
+      Map.update(acc, run, value.usd_micro, &(&1 + value.usd_micro))
+    end)
+  end
+
+  defp tasks_with_current_cost(costs, tasks) do
     Enum.map(tasks, fn {:task, {run, task}} ->
       Map.put(task, :usd_micro, Map.get(costs, run, task.usd_micro))
     end)
