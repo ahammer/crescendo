@@ -52,6 +52,37 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     assert Enum.count(requests(fixture), &(&1["method"] == "turn/start")) == 1
   end
 
+  test "continuation usage before the turn-start response still supplies terminal accounting evidence" do
+    fixture = native_fixture()
+    {table, _path} = ledger()
+    {:ok, session} = AppServer.start_session(fixture.workspace)
+    on_exit(fn -> AppServer.stop_session(session) end)
+    key = session.metadata.thread_key
+    Operations.start_run(table, "run", %{issue_id: fixture.issue.id, issue_identifier: fixture.issue.identifier})
+    Operations.thread_context(table, key, %{run_id: "run"})
+
+    Operations.bind_accounting(table, "run", %{
+      issue_id: fixture.issue.id,
+      thread_id: session.thread_id,
+      thread_key: key,
+      identifier: fixture.issue.identifier,
+      model: session.metadata.model,
+      date: Date.to_iso8601(Date.utc_today()),
+      rates: Operations.rates(nil)
+    })
+
+    handler = fn update -> Operations.reconcile_usage(table, fixture.issue.id, "run", update, true) end
+
+    for prompt <- ["task", "continue"] do
+      assert {:ok, _turn} = AppServer.run_turn(session, prompt, fixture.issue, on_message: handler)
+      assert Operations.snapshot(table).accounting.terminal_observed == 1
+      assert Operations.snapshot(table).accounting.incomplete == 0
+    end
+
+    assert Operations.run_usage(table, "run").total_tokens == 120
+    assert Enum.count(requests(fixture), &(&1["method"] == "turn/start")) == 2
+  end
+
   test "malformed model reroutes preserve native metadata for later usage and completion" do
     fixture = native_fixture()
     parent = self()

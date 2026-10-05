@@ -313,7 +313,15 @@ defmodule SymphonyElixir.Operations do
 
   defp observe_boundary(table, id, run, attribution, %{event: :session_started, thread_id: thread, turn_id: turn}, true)
        when thread == attribution.thread_id do
-    run = run |> Map.put(:active_turn, turn) |> Map.delete(:terminal_turn)
+    # Native usage may arrive before turn/start returns the new turn ID.
+    usage_turn = lookup(table, {:thread_usage, attribution.thread_key}, %{})[:last_turn]
+
+    run =
+      run
+      |> Map.put(:active_turn, turn)
+      |> Map.put(:usage_turn, if(usage_turn == turn, do: turn))
+      |> Map.delete(:terminal_turn)
+
     save_accounting_observation(table, id, run)
     :ignored
   end
