@@ -69,6 +69,28 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
     end
   end
 
+  test "admitted protocol overflow interrupts and retries without failing the implementation attempt", %{root: root} do
+    ctx = start_worker(root, [hook_before_run: "sleep 0.2", max_attempts: 1], :protocol_overflow)
+    entry = await_entry(ctx, :workspace)
+    await(fn -> Map.has_key?(state(ctx).retry_attempts, ctx.issue.id) end)
+    current = state(ctx)
+    retry = current.retry_attempts[ctx.issue.id]
+    assert retry.attempt == 0
+    assert retry.error =~ "frame_assembly"
+    assert current.startup_failures == %{}
+    assert current.blocked == %{}
+    assert current.autopilot.item_attempts == %{}
+    refute MapSet.member?(current.completed, ctx.issue.id)
+    assert %{busy: 0} = Governor.snapshot()
+
+    assert [{_, %{status: "interrupted", reason: "protocol_buffer_overflow"}}] =
+             :dets.lookup(current.operations, {:lineage_run, entry.run_id})
+
+    send(ctx.orchestrator, {:DOWN, entry.ref, :process, entry.pid, :normal})
+    assert state(ctx).retry_attempts[ctx.issue.id].retry_token == retry.retry_token
+    refute Enum.any?(SymphonyElixir.Operations.snapshot(current.operations).activity, &(&1.kind == "attempt_failed"))
+  end
+
   test "an over-deadline hook releases its slot and retries once", %{root: root} do
     ctx = start_worker(root, hook_after_create: "exec sleep 0.3", hook_timeout_ms: 200)
     entry = await_entry(ctx, :workspace)
@@ -607,6 +629,7 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
         *'"method":"turn/start"'*)
           printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-deadline"}}}'
           if [ '#{mode}' = complete ]; then printf '%s\\n' '{"method":"turn/completed","params":{"turn":{"status":"completed"}}}'; fi
+          if [ '#{mode}' = protocol_overflow ]; then printf '%s' '{"secret":"'; python3 -c "print('x'*18000000)"; fi
           if [ '#{mode}' = turn_failure ]; then printf '%s\\n' '{"method":"turn/completed","params":{"turn":{"status":"failed"}}}'; fi ;;
       esac
     done

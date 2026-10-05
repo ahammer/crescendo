@@ -36,6 +36,9 @@ defmodule SymphonyElixir.AgentRunner do
         send_worker_message(codex_update_recipient, issue, :worker_startup_failure, diagnostic, opts)
         raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
 
+      {:error, {:protocol_buffer_overflow, diagnostic}} ->
+        exit({:shutdown, {:protocol_buffer_overflow, diagnostic}})
+
       {:error, reason} ->
         Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
         raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"

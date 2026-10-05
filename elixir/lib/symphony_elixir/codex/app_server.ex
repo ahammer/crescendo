@@ -12,6 +12,15 @@ defmodule SymphonyElixir.Codex.AppServer do
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
   @pending_limit 4_194_304
+  @frame_limit 16_777_216
+  @output_limit 16_384
+  @output_methods [
+    "item/agentMessage/delta",
+    "item/commandExecution/outputDelta",
+    "item/fileChange/outputDelta",
+    "item/reasoning/textDelta",
+    "item/reasoning/summaryTextDelta"
+  ]
   @type session :: %{
           port: port(),
           metadata: map(),
@@ -56,6 +65,8 @@ defmodule SymphonyElixir.Codex.AppServer do
          {:ok, port} <- start_port(expanded_workspace, worker_host, dynamic_tool_binding, session_env) do
       :ok = SymphonyElixir.ProcessGroup.protect(port)
       metadata = port_metadata(port, worker_host)
+      Process.put({port, :work_item}, Keyword.get(opts, :work_item))
+      Process.put({port, :on_message}, Keyword.get(opts, :on_message, &default_on_message/1))
 
       with {:ok, policies} <- session_policies(expanded_workspace, worker_host),
            {:ok, native} <-
@@ -85,6 +96,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         }
 
         Process.put({port, :metadata}, session.metadata)
+        Process.put({port, :thread_id}, session.thread_id)
         on_message = Keyword.get(opts, :on_message, &default_on_message/1)
         details = %{thread_id: session.thread_id, resumed: session.resumed}
         emit_message(on_message, :thread_initialized, details, session.metadata)
@@ -122,55 +134,64 @@ defmodule SymphonyElixir.Codex.AppServer do
         DynamicTool.execute(tool, arguments, dynamic_tool_binding, issue: issue)
       end)
 
-    case start_turn(port, thread_id, prompt, workspace, approval_policy, turn_sandbox_policy, model_route) do
-      {:ok, turn_id} ->
-        Process.put({port, :active_turn}, {thread_id, turn_id})
-        session_id = "#{thread_id}-#{turn_id}"
-        Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
+    Process.put({port, :on_message}, on_message)
+    Process.put({port, :turn_handler}, {tool_executor, auto_approve_requests})
+    Process.put({port, :phase}, :turn)
 
-        emit_message(
-          on_message,
-          :session_started,
-          %{
-            session_id: session_id,
-            thread_id: thread_id,
-            turn_id: turn_id
-          },
-          metadata
-        )
+    try do
+      case start_turn(port, thread_id, prompt, workspace, approval_policy, turn_sandbox_policy, model_route) do
+        {:ok, turn_id} ->
+          Process.put({port, :active_turn}, {thread_id, turn_id})
+          session_id = "#{thread_id}-#{turn_id}"
+          Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
 
-        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
-          {:ok, result} ->
-            Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
+          emit_message(
+            on_message,
+            :session_started,
+            %{
+              session_id: session_id,
+              thread_id: thread_id,
+              turn_id: turn_id
+            },
+            Process.get({port, :metadata}, metadata)
+          )
 
-            {:ok,
-             %{
-               result: result,
-               session_id: session_id,
-               thread_id: thread_id,
-               turn_id: turn_id
-             }}
+          case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+            {:ok, result} ->
+              Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
-          {:error, reason} ->
-            Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
+              {:ok,
+               %{
+                 result: result,
+                 session_id: session_id,
+                 thread_id: thread_id,
+                 turn_id: turn_id
+               }}
 
-            emit_message(
-              on_message,
-              :turn_ended_with_error,
-              %{
-                session_id: session_id,
-                reason: reason
-              },
-              metadata
-            )
+            {:error, reason} ->
+              Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
 
-            {:error, reason}
-        end
+              emit_message(
+                on_message,
+                :turn_ended_with_error,
+                %{
+                  session_id: session_id,
+                  reason: reason
+                },
+                metadata
+              )
 
-      {:error, reason} ->
-        Logger.error("Codex session failed for #{issue_context(issue)}: #{inspect(reason)}")
-        emit_message(on_message, :startup_failed, %{reason: reason}, metadata)
-        {:error, reason}
+              {:error, reason}
+          end
+
+        {:error, reason} ->
+          Logger.error("Codex session failed for #{issue_context(issue)}: #{inspect(reason)}")
+          emit_message(on_message, :startup_failed, %{reason: reason}, metadata)
+          {:error, reason}
+      end
+    after
+      Process.delete({port, :turn_handler})
+      Process.put({port, :phase}, :session)
     end
   end
 
@@ -184,7 +205,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   def read_account_usage(session, opts \\ []) do
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
 
-    if native_version(session.metadata[:user_agent]) do
+    if native_version(session.metadata[:user_agent]) && not Process.get({session.port, :protocol_failed}, false) do
       usage = native_account_usage(session)
 
       flush_notifications(session.port, on_message, false)
@@ -771,41 +792,65 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp receive_port(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests) do
-    receive do
-      {^port, {:data, {:eol, chunk}}} ->
-        complete_line = pending_line <> to_string(chunk)
-        handle_incoming(port, on_message, complete_line, timeout_ms, tool_executor, auto_approve_requests)
+    remaining = frame_remaining(port, pending_line, timeout_ms)
 
-      {^port, {:data, {:noeol, chunk}}} ->
-        if byte_size(pending_line) + byte_size(chunk) > @pending_limit do
-          {:error, :protocol_buffer_overflow}
-        else
-          receive_loop(
-            port,
-            on_message,
-            timeout_ms,
-            pending_line <> to_string(chunk),
-            tool_executor,
-            auto_approve_requests
-          )
-        end
+    if remaining <= 0 do
+      stream_timeout(port, pending_line)
+    else
+      receive do
+        {^port, {:data, {:eol, chunk}}} ->
+          complete_line = pending_line <> to_string(chunk)
+          handle_incoming(port, on_message, complete_line, timeout_ms, tool_executor, auto_approve_requests)
 
-      {^port, {:exit_status, status}} ->
-        {:error, {:port_exit, status}}
-    after
-      timeout_ms ->
-        {:error, :turn_timeout}
+        {^port, {:data, {:noeol, chunk}}} ->
+          if pending_line == "" do
+            Process.put({port, :frame_deadline}, System.monotonic_time(:millisecond) + Config.settings!().codex.read_timeout_ms)
+          end
+
+          if byte_size(pending_line) + byte_size(chunk) > @frame_limit do
+            overflow(port, :frame_assembly, byte_size(pending_line) + byte_size(chunk))
+          else
+            receive_loop(
+              port,
+              on_message,
+              timeout_ms,
+              pending_line <> to_string(chunk),
+              tool_executor,
+              auto_approve_requests
+            )
+          end
+
+        {^port, {:exit_status, status}} ->
+          {:error, {:port_exit, status}}
+      after
+        remaining ->
+          stream_timeout(port, pending_line)
+      end
     end
   end
 
-  defp handle_incoming(_port, _on_message, data, _timeout, _executor, _auto)
-       when byte_size(data) > @pending_limit,
-       do: {:error, :protocol_buffer_overflow}
+  defp stream_timeout(port, pending) do
+    if pending != "", do: Process.put({port, :protocol_failed}, true)
+    {:error, :turn_timeout}
+  end
+
+  defp frame_remaining(port, "", timeout) do
+    Process.delete({port, :frame_deadline})
+    timeout
+  end
+
+  defp frame_remaining(port, _pending, timeout) do
+    min(timeout, max(0, Process.get({port, :frame_deadline}) - System.monotonic_time(:millisecond)))
+  end
+
+  defp handle_incoming(port, _on_message, data, _timeout, _executor, _auto)
+       when byte_size(data) > @frame_limit,
+       do: overflow(port, :frame_assembly, byte_size(data))
 
   defp handle_incoming(port, on_message, data, timeout_ms, tool_executor, auto_approve_requests) do
     payload_string = to_string(data)
 
-    case Jason.decode(payload_string) do
+    case decode_notification(port, payload_string) do
       {:ok, %{"method" => "turn/completed"} = payload} ->
         if current_turn?(port, payload) do
           complete_turn(port, on_message, payload, payload_string)
@@ -851,6 +896,9 @@ defmodule SymphonyElixir.Codex.AppServer do
 
         receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
 
+      {:error, {:protocol_buffer_overflow, _}} = error ->
+        error
+
       {:error, _reason} ->
         log_non_json_stream_line(payload_string, "turn stream")
 
@@ -859,7 +907,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             on_message,
             :malformed,
             %{
-              payload: payload_string,
+              payload: bound_text(payload_string),
               raw: payload_string
             },
             metadata_from_message(port, %{raw: payload_string})
@@ -1316,15 +1364,27 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp await_response(port, request_id) do
+    Process.put({port, :request_id}, request_id)
     deadline = System.monotonic_time(:millisecond) + Config.settings!().codex.read_timeout_ms
-    with_timeout_response(port, request_id, deadline, "")
+    wait_for_rpc(port, request_id, deadline)
   end
 
   defp rpc(port, method, params, timeout \\ nil) do
     id = "crescendo-#{System.unique_integer([:positive])}"
+    Process.put({port, :request_id}, id)
     send_message(port, %{"id" => id, "method" => method, "params" => params})
     deadline = System.monotonic_time(:millisecond) + (timeout || Config.settings!().codex.read_timeout_ms)
-    with_timeout_response(port, id, deadline, "")
+    wait_for_rpc(port, id, deadline)
+  end
+
+  defp wait_for_rpc(port, id, deadline) do
+    Process.put({port, :awaiting_response}, true)
+
+    try do
+      with_timeout_response(port, id, deadline, "")
+    after
+      Process.delete({port, :awaiting_response})
+    end
   end
 
   defp with_timeout_response(port, request_id, deadline, pending_line) do
@@ -1342,8 +1402,8 @@ defmodule SymphonyElixir.Codex.AppServer do
         handle_response(port, request_id, complete_line, deadline)
 
       {^port, {:data, {:noeol, chunk}}} ->
-        if byte_size(pending_line) + byte_size(chunk) > @pending_limit do
-          {:error, :protocol_buffer_overflow}
+        if byte_size(pending_line) + byte_size(chunk) > @frame_limit do
+          overflow(port, :frame_assembly, byte_size(pending_line) + byte_size(chunk))
         else
           with_timeout_response(port, request_id, deadline, pending_line <> to_string(chunk))
         end
@@ -1356,13 +1416,13 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp handle_response(_port, _request, data, _deadline) when byte_size(data) > @pending_limit,
-    do: {:error, :protocol_buffer_overflow}
+  defp handle_response(port, _request, data, _deadline) when byte_size(data) > @frame_limit,
+    do: overflow(port, :frame_assembly, byte_size(data))
 
   defp handle_response(port, request_id, data, deadline) do
     payload = to_string(data)
 
-    case Jason.decode(payload) do
+    case decode_notification(port, payload) do
       {:ok, %{"id" => ^request_id, "error" => error}} ->
         {:error, {:response_error, error}}
 
@@ -1373,15 +1433,137 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, {:response_error, response_payload}}
 
       {:ok, %{} = other} ->
-        case queue_notification(port, other, payload) do
+        case dispatch_notification(port, other, Jason.encode!(other)) do
           :ok -> with_timeout_response(port, request_id, deadline, "")
           error -> error
         end
+
+      {:error, {:protocol_buffer_overflow, _}} = error ->
+        error
 
       _ ->
         log_non_json_stream_line(payload, "response stream")
         with_timeout_response(port, request_id, deadline, "")
     end
+  end
+
+  defp decode_notification(port, line) do
+    case Jason.decode(line, strings: :copy, keys: &:binary.copy/1) do
+      {:ok, %{"method" => _method, "id" => _}} when byte_size(line) > @pending_limit ->
+        overflow(port, :notification_payload, byte_size(line))
+
+      {:ok, %{"method" => method, "params" => params} = payload}
+      when not is_map_key(payload, "id") and is_map(params) ->
+        bounded = bound_output(payload, method)
+
+        if byte_size(Jason.encode!(bounded)) > @pending_limit,
+          do: overflow(port, :notification_payload, byte_size(line)),
+          else: {:ok, bounded}
+
+      {:ok, payload} when byte_size(line) > @pending_limit ->
+        guard = if is_map(payload) and Map.has_key?(payload, "id"), do: :response_payload, else: :notification_payload
+        overflow(port, guard, byte_size(line))
+
+      result ->
+        result
+    end
+  end
+
+  defp bound_output(payload, method) when method in @output_methods do
+    update_in(payload, ["params", "delta"], &bound_text/1)
+  end
+
+  defp bound_output(payload, method) when method in ["item/started", "item/completed"] do
+    update_in(payload, ["params", "item"], &bound_item/1)
+  end
+
+  defp bound_output(%{"params" => %{"turn" => %{"items" => items}}} = payload, "turn/completed")
+       when is_list(items),
+       do: put_in(payload, ["params", "turn", "items"], Enum.map(items, &bound_item/1))
+
+  defp bound_output(payload, _method), do: payload
+
+  defp bound_item(%{"type" => "commandExecution"} = item),
+    do: Map.update(item, "aggregatedOutput", nil, &bound_text/1)
+
+  defp bound_item(%{"type" => "agentMessage"} = item),
+    do: Map.update(item, "text", nil, &bound_text/1)
+
+  defp bound_item(item), do: item
+
+  defp bound_text(text) when is_binary(text) and byte_size(text) > @output_limit do
+    prefix = text |> binary_part(0, @output_limit - 128) |> String.replace_invalid() |> :binary.copy()
+    :binary.copy(prefix <> " [output truncated; #{byte_size(text)} bytes]")
+  end
+
+  defp bound_text(text), do: text
+
+  defp bound_raw(%{raw: raw} = details) when is_binary(raw) and byte_size(raw) > @output_limit do
+    details |> Map.put(:raw, bound_text(raw)) |> Map.put(:raw_bytes, byte_size(raw))
+  end
+
+  defp bound_raw(details), do: details
+
+  defp dispatch_notification(port, %{"method" => method, "id" => _} = payload, line) do
+    case Process.get({port, :turn_handler}) do
+      nil ->
+        queue_notification(port, payload, line)
+
+      {executor, auto} ->
+        on_message = Process.get({port, :on_message})
+        metadata = metadata_from_message(port, payload)
+
+        case maybe_handle_approval_request(port, method, payload, line, on_message, metadata, executor, auto) do
+          :approved -> :ok
+          :approval_required -> rpc_input_required(port, :approval_required, payload, line)
+          :input_required -> rpc_input_required(port, :turn_input_required, payload, line)
+          _ -> queue_notification(port, payload, line)
+        end
+    end
+  end
+
+  defp dispatch_notification(port, %{"method" => method} = payload, line) when is_binary(method) do
+    if deferred_notification?(port, method, payload) do
+      queue_notification(port, payload, line)
+    else
+      refresh_native_model(port, payload)
+      emit_message(Process.get({port, :on_message}), :notification, %{payload: payload, raw: line}, metadata_from_message(port, payload))
+      :ok
+    end
+  end
+
+  defp dispatch_notification(_port, _payload, _line), do: :ok
+
+  defp deferred_notification?(_port, method, _payload) when method in ["turn/completed", "turn/failed", "turn/cancelled"],
+    do: true
+
+  defp deferred_notification?(port, "thread/tokenUsage/updated", _payload),
+    do: is_nil(Process.get({port, :turn_handler}))
+
+  defp deferred_notification?(_port, method, payload), do: needs_input?(method, payload)
+
+  defp rpc_input_required(port, event, payload, line) do
+    emit_message(Process.get({port, :on_message}), event, %{payload: payload, raw: line}, metadata_from_message(port, payload))
+    {:error, {event, payload}}
+  end
+
+  defp overflow(port, guard, bytes, count \\ 0) do
+    details = %{
+      guard: guard,
+      bytes: bytes,
+      count: count,
+      phase: Process.get({port, :phase}, :startup),
+      awaiting_response: Process.get({port, :awaiting_response}, false),
+      request_id: Process.get({port, :request_id}),
+      session_id: Process.get({port, :active_turn}),
+      thread_id: Process.get({port, :thread_id}),
+      issue_identifier: Process.get({port, :work_item}),
+      request_method: Process.get({port, :request_method})
+    }
+
+    Process.put({port, :protocol_failed}, true)
+    Logger.warning("Codex protocol overflow #{inspect(details)}")
+    {:error, {:protocol_buffer_overflow, details}}
   end
 
   defp queue_notification(port, %{"method" => _}, line) do
@@ -1393,7 +1575,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       Process.put({port, :pending}, :queue.in(line, queue))
       :ok
     else
-      {:error, :protocol_buffer_overflow}
+      overflow(port, :notification_queue, bytes, :queue.len(queue) + 1)
     end
   end
 
@@ -1469,7 +1651,23 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp stop_port(port) when is_port(port) do
-    for key <- [:metadata, :active_turn, :pending, :pending_bytes], do: Process.delete({port, key})
+    for key <- [
+          :metadata,
+          :active_turn,
+          :pending,
+          :pending_bytes,
+          :on_message,
+          :turn_handler,
+          :protocol_failed,
+          :request_id,
+          :request_method,
+          :thread_id,
+          :work_item,
+          :awaiting_response,
+          :frame_deadline,
+          :phase
+        ],
+        do: Process.delete({port, key})
 
     case :erlang.port_info(port) do
       :undefined ->
@@ -1487,6 +1685,8 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp emit_message(on_message, event, details, metadata) when is_function(on_message, 1) do
+    details = bound_raw(details)
+
     message =
       metadata |> Map.merge(details) |> Map.put(:event, event) |> Map.put(:timestamp, DateTime.utc_now())
 
@@ -1539,6 +1739,10 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp tool_call_arguments(_params), do: %{}
 
   defp send_message(port, message) do
+    if message["method"] do
+      Process.put({port, :request_method}, message["method"])
+    end
+
     line = Jason.encode!(message) <> "\n"
     Port.command(port, line)
   end
