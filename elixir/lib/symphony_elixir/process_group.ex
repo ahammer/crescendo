@@ -84,11 +84,17 @@ defmodule SymphonyElixir.ProcessGroup do
   end
 
   defp collect(port, output, deadline) do
-    receive do
-      {^port, {:data, data}} -> collect(port, String.slice(output <> data, -2_048, 2_048), deadline)
-      {^port, {:exit_status, status}} -> {:ok, {output, status}}
-    after
-      max(0, deadline - System.monotonic_time(:millisecond)) -> {:error, :timeout}
+    remaining_ms = deadline - System.monotonic_time(:millisecond)
+
+    if remaining_ms > 0 do
+      receive do
+        {^port, {:data, data}} -> collect(port, String.slice(output <> data, -2_048, 2_048), deadline)
+        {^port, {:exit_status, status}} -> {:ok, {output, status}}
+      after
+        remaining_ms -> {:error, :timeout}
+      end
+    else
+      {:error, :timeout}
     end
   end
 end

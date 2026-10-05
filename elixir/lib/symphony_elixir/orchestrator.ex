@@ -1846,11 +1846,19 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  # With every slot busy the retry waits without asking the tracker.
+  # Research retries use their configured channels, never synthetic tracker IDs.
+  # With every slot busy an issue retry waits without asking the tracker.
   defp handle_retry_issue(%State{} = state, issue_id, attempt, metadata) do
-    if available_slots(state) > 0,
-      do: fetch_retry_issue(state, issue_id, attempt, metadata),
-      else: {:noreply, hold_retry(state, issue_id, attempt, metadata, "no available orchestrator slots")}
+    cond do
+      match?(%{kind: :research}, state.startup_failures[issue_id]) ->
+        {:noreply, maybe_dispatch_research(state, state.polled_issues)}
+
+      available_slots(state) > 0 ->
+        fetch_retry_issue(state, issue_id, attempt, metadata)
+
+      true ->
+        {:noreply, hold_retry(state, issue_id, attempt, metadata, "no available orchestrator slots")}
+    end
   end
 
   defp fetch_retry_issue(%State{} = state, issue_id, attempt, metadata) do

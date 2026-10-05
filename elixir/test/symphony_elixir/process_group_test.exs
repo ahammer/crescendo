@@ -3,6 +3,12 @@ defmodule SymphonyElixir.ProcessGroupTest do
 
   alias SymphonyElixir.ProcessGroup
 
+  test "continuous subprocess output cannot extend the absolute deadline" do
+    worker = Task.async(fn -> ProcessGroup.run(port("exec yes"), 50) end)
+    result = Task.yield(worker, 1_000) || Task.shutdown(worker, :brutal_kill)
+    assert result == {:ok, {:error, :timeout}}
+  end
+
   test "output and deadline are bounded, descendants die on timeout and owner cancellation" do
     assert {:ok, {"hello", 7}} = ProcessGroup.run(port("printf hello; exit 7"), 1_000)
     assert {:ok, {output, 0}} = ProcessGroup.run(port("head -c 4000 /dev/zero | tr '\\0' x; printf marker"), 1_000)

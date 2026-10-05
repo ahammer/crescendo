@@ -7,6 +7,8 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
     alias SymphonyElixir.Tracker.Memory
     def fetch_issues_by_states(states), do: Memory.fetch_issues_by_states(states)
 
+    def fetch_issues_by_ids(["research:" <> _]), do: {:error, :invalid_github_issue_id}
+
     def fetch_issues_by_ids(ids) do
       if Application.get_env(:symphony_elixir, :startup_tracker_down) do
         {:error, :offline_tracker}
@@ -481,6 +483,87 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
     assert File.read!(Path.join(root, "sessions")) == "start\n"
   end
 
+  test "research startup retries use configured channels and recover without delivery exhaustion", %{root: root} do
+    previous = Application.get_env(:symphony_elixir, :github_client_module)
+    previous_deliveries = Application.get_env(:symphony_elixir, :task_deliveries_fun)
+    previous_repo = System.get_env("GITHUB_REPO")
+    previous_token = System.get_env("GITHUB_TOKEN")
+    Application.put_env(:symphony_elixir, :github_client_module, RetryTracker)
+
+    Application.put_env(:symphony_elixir, :task_deliveries_fun, fn _label, _since ->
+      {:ok, %{issues: 0, pull_requests: 0}}
+    end)
+
+    System.put_env("GITHUB_REPO", "fixture/repo")
+    System.put_env("GITHUB_TOKEN", "offline-fixture")
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:symphony_elixir, :github_client_module, previous),
+        else: Application.delete_env(:symphony_elixir, :github_client_module)
+
+      if previous_deliveries,
+        do: Application.put_env(:symphony_elixir, :task_deliveries_fun, previous_deliveries),
+        else: Application.delete_env(:symphony_elixir, :task_deliveries_fun)
+
+      restore_env("GITHUB_REPO", previous_repo)
+      restore_env("GITHUB_TOKEN", previous_token)
+    end)
+
+    marker = Path.join(root, "fixed")
+
+    ctx =
+      start_worker(root,
+        tracker_kind: "github",
+        tracker_active_states: ["open"],
+        tracker_terminal_states: ["closed"],
+        issue_state: "open",
+        hook_before_run: "test -f '#{marker}'",
+        autopilot: %{
+          "enabled" => true,
+          "repo_tasks" => false,
+          "max_item_attempts" => 1,
+          "max_open_issues" => 1,
+          "channels" => %{"fixture" => %{"focus" => "Offline fixture", "min_issues" => 0}}
+        }
+      )
+
+    await(fn -> Map.has_key?(state(ctx).startup_failures, ctx.issue.id) end)
+    :sys.replace_state(ctx.orchestrator, &%{&1 | autopilot: %{&1.autopilot | tasks: %{}}})
+    send(ctx.orchestrator, :run_poll_cycle)
+    id = "research:fixture"
+
+    for count <- 1..3 do
+      await(fn -> get_in(state(ctx).startup_failures, [id, :count]) == count end)
+      assert state(ctx).autopilot.tasks == %{}
+      assert state(ctx).autopilot.item_attempts == %{}
+      assert %{busy: 0} = Governor.snapshot()
+      refute File.exists?(Path.join(root, "sessions"))
+
+      if count < 3 do
+        retry = state(ctx).retry_attempts[id]
+        assert retry.attempt == 0
+        :sys.replace_state(ctx.orchestrator, &put_in(&1.startup_failures[id].due_at_ms, 0))
+        send(ctx.orchestrator, {:retry_issue, id, retry.retry_token})
+        send(ctx.orchestrator, {:retry_issue, id, retry.retry_token})
+      end
+    end
+
+    refute Map.has_key?(state(ctx).retry_attempts, id)
+    send(ctx.orchestrator, :run_poll_cycle)
+    assert state(ctx).startup_failures[id].count == 3
+    assert state(ctx).running == %{}
+    File.write!(marker, "fixed")
+    :sys.replace_state(ctx.orchestrator, &put_in(&1.startup_failures[id].due_at_ms, 0))
+    send(ctx.orchestrator, :run_poll_cycle)
+    send(ctx.orchestrator, :run_poll_cycle)
+    await(fn -> get_in(state(ctx).autopilot.tasks, ["fixture", :last]) == :delivered end)
+    refute Map.has_key?(state(ctx).startup_failures, id)
+    assert state(ctx).autopilot.tasks["fixture"].attempts == 0
+    assert File.read!(Path.join(root, "sessions")) == "start\n"
+    assert %{busy: 0} = Governor.snapshot()
+  end
+
   defp fake_ssh(root, command) do
     previous = System.get_env("PATH")
 
@@ -570,7 +653,7 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
       id: "deadline",
       identifier: "GH-32",
       title: "Deadline",
-      state: "In Progress",
+      state: overrides[:issue_state] || "In Progress",
       dispatchable: true,
       kind: kind,
       pull_request: if(kind == :pull_request, do: %{head_sha: "fixture-head", draft: false, trusted: true})
