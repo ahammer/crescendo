@@ -1122,8 +1122,9 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "a deployment yield preserves the first worker's retry budget" do
-    write_workflow_file!(Workflow.workflow_file_path(), max_attempts: 1)
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", max_attempts: 1)
     pid = start_supervised!({Orchestrator, name: Module.concat(__MODULE__, :DrainRetryOrchestrator)})
+    assert eventually_value(fn -> :sys.get_state(pid).issues_observed_at end)
     issue = %Issue{id: "issue-drain-retry", identifier: "MT-558", state: "In Progress"}
     ref = make_ref()
 

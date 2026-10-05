@@ -564,6 +564,8 @@ defmodule SymphonyElixir.AutopilotTest do
       assert_received {:ci_lookup, "sha-2"}
       assert Map.keys(state.running) == ["2"]
       assert state.running["2"].issue.pull_request.ci_state == "success"
+      refute Map.has_key?(state.autopilot.pr_handled, "2")
+      state = admit_running(pid, "2")
       assert state.autopilot.pr_handled["2"] == %{runs: 1}
       refute state.running["2"].final_attempt
       assert Orchestrator.snapshot(name, 5_000).running |> Enum.map(& &1.identifier) == ["PR-2"]
@@ -583,7 +585,8 @@ defmodule SymphonyElixir.AutopilotTest do
       state = :sys.get_state(pid)
 
       assert state.running["2"].final_attempt
-      assert state.autopilot.pr_handled["2"].runs == 2
+      assert state.autopilot.pr_handled["2"].runs == 1
+      assert admit_running(pid, "2").autopilot.pr_handled["2"].runs == 2
     end
 
     test "a pull request with pending or unknown CI is skipped" do
@@ -767,6 +770,7 @@ defmodule SymphonyElixir.AutopilotTest do
       send(pid, :run_poll_cycle)
       assert Map.keys(:sys.get_state(pid).running) |> Enum.sort() == ["1", "research:deps"]
 
+      admit_running(pid, "research:deps")
       %{ref: ref} = :sys.get_state(pid).running["research:deps"]
       send(pid, {:DOWN, ref, :process, self(), :boom})
       assert %{last: :failed, attempts: 1} = :sys.get_state(pid).autopilot.tasks["deps"]
@@ -982,6 +986,14 @@ defmodule SymphonyElixir.AutopilotTest do
     :sys.replace_state(pid, fn state ->
       %{state | autopilot: Map.put(state.autopilot, :tasks, cooled_tasks())}
     end)
+  end
+
+  defp admit_running(pid, id) do
+    entry = :sys.get_state(pid).running[id]
+    send(pid, {:worker_admitted, id, entry.run_id, %{}})
+    state = :sys.get_state(pid)
+    assert state.running[id].model_admitted
+    state
   end
 
   defp finish_running_research(pid, id) do

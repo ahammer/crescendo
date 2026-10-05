@@ -27,6 +27,9 @@ hooks:
     fi
   before_remove: |
     cd elixir && mise exec -- mix workspace.before_remove
+# Pre-model startup failures retry after 10/20s, then block with 30-minute recovery probes.
+# Hook/workspace/worker/Codex changes allow immediate retry; model attempt caps are independent.
+# Remote mandatory hooks require GNU timeout. See ../docs/crescendo.md for recovery.
 agent:
   max_concurrent_agents: 10
   max_turns: 20

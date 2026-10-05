@@ -66,12 +66,40 @@ dashboard (its filter pill is marked) and the other projects still run.
 Workspace hooks use each project's `hooks.timeout_ms`, independently of Codex inactivity.
 The orchestrator tracks workspace preparation, Codex startup/execution, and `after_run` cleanup;
 `codex.stall_timeout_ms` applies only during Codex startup/execution, with a fresh deadline after
-preparation. Startup also retains `codex.read_timeout_ms`. Hook timeouts follow normal retries;
+preparation. Startup also retains `codex.read_timeout_ms`. Mandatory hook failures use startup admission retries;
 cleanup failures are best effort. Slots remain occupied through cleanup and are released once
 on worker exit or reconciliation. Workflow reloads preserve phases; runtime restarts cancel
 workers together with their scheduler before redispatch.
 Due retries and retries held for admission stay in weighted slot demand, while future backoff
 does not reserve a slot. Retry timers refresh the slot policy before checking capacity.
+
+Startup admission failures have their own budget, with or without autopilot. Workspace preparation,
+mandatory `after_create`/`before_run` hooks, app-server session initialization and worker spawn
+failures occur before model admission. They never advance `agent.max_attempts`, the logical item
+attempt/effort ladder, research delivery attempts or the PR review cap, and never retire tracker
+items or their dependencies. Zero tokens alone does not establish startup failure; once the
+session is admitted, delivery and independent acceptance policies apply normally.
+
+The first two failed starts retry after 10 and 20 seconds. After the third, the dashboard shows a
+startup block and the scheduler permits one recovery probe every 30 minutes. Failed probes stay
+blocked; successful admission clears startup accounting. Backoff and the capped failure count are
+stored in `operations.dets` using wall-clock deadlines and survive restart. No worker slot or claim
+is held during backoff. Fixing the environment allows recovery at the next probe; changing the
+project's hooks, workspace, worker or Codex configuration permits an immediate controlled retry.
+Keep the issue ready and preserve its dependency graph; no dashboard write endpoint is involved.
+Configuration reloads and stale worker/run/timer identity checks prevent duplicate workers.
+
+Existing workflows need no new settings. Startup admission uses this policy even when
+`agent.max_attempts` is unset or `autopilot.max_item_attempts` is one. Mandatory hooks still abort
+on failure; `after_run` remains best effort, with its separate hook deadline. Local hooks and SSH
+transport subprocesses use Erlang port process groups so timeout/cancellation terminates their
+children. Remote hooks require the standard GNU `timeout` utility (including `-k`) to enforce the
+hook deadline on the worker; missing utilities fail visibly before model work.
+
+History records `startup_failed`, `startup_retry` and `startup_blocked` separately from delivery
+failures, with phase, hook, exit/timeout status, run/worker identity and bounded sanitized context.
+Captured empty output is explicitly marked, without attributing a root cause. Timeout diagnostics
+say when no output was captured. Private-project redaction also removes these diagnostics.
 
 ## Install and deploy
 

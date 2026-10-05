@@ -230,7 +230,13 @@ Fields (logical):
 
 #### 4.1.5 Run Attempt
 
-One execution attempt for one issue.
+One worker execution for one issue. Crescendo distinguishes pre-model startup admission from
+model delivery attempts: startup failures do not consume delivery retry/effort or retirement
+budgets. Explicit session admission, rather than token usage, establishes the boundary. A separate
+persisted startup budget retries twice (10/20 seconds), then reports a startup block with one
+30-minute recovery probe; relevant configuration changes permit immediate retry. Tracker items
+and dependencies are preserved, and capacity/claims are released during backoff. Startup history
+carries phase, hook/status, run/worker identity and bounded sanitized diagnostics.
 
 Fields (logical):
 
@@ -462,7 +468,7 @@ Fields:
   - Changes SHOULD be re-applied at runtime and affect future retry scheduling.
 - `max_attempts` (positive integer or null)
   - Default: null (retry failures indefinitely).
-  - When a failure-driven retry would exceed this attempt number, the issue is blocked instead of
+  - When a delivery failure-driven retry would exceed this attempt number, the issue is blocked instead of
     retried. The block is released when the issue's state or routability changes.
 - `max_concurrent_agents_by_state` (map `state_name -> positive integer`)
   - Default: empty map.

@@ -401,21 +401,10 @@ defmodule SymphonyElixir.Workspace do
     # Hooks know their project, work item and hook, like the agent's own commands.
     env = [{"CRESCENDO_HOOK", hook_name} | SymphonyElixir.RunEnv.vars(Map.get(issue_context, :issue_identifier))]
 
-    task =
-      Task.async(fn ->
-        System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true, env: env)
-      end)
-
-    case Task.yield(task, timeout_ms) do
-      {:ok, cmd_result} ->
-        handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
-
-      nil ->
-        Task.shutdown(task, :brutal_kill)
-
-        Logger.warning("Workspace hook timed out hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local timeout_ms=#{timeout_ms}")
-
-        {:error, {:workspace_hook_timeout, hook_name, timeout_ms}}
+    case local_hook_command(command, workspace, env, timeout_ms) do
+      {:ok, result} -> handle_hook_command_result(result, workspace, issue_context, hook_name)
+      {:error, :timeout} -> {:error, {:workspace_hook_timeout, hook_name, timeout_ms}}
+      {:error, reason} -> {:error, {:workspace_hook_start_failed, hook_name, reason}}
     end
   end
 
@@ -424,15 +413,42 @@ defmodule SymphonyElixir.Workspace do
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host}")
 
-    case run_remote_command(worker_host, "cd #{shell_escape(workspace)} && #{command}", timeout_ms) do
+    script = "cd #{shell_escape(workspace)} && timeout -k 0.1 #{timeout_ms / 1_000}s sh -lc #{shell_escape(command)}"
+
+    case run_remote_command(worker_host, script, timeout_ms + 1_000) do
+      {:ok, {_output, 124}} ->
+        {:error, {:workspace_hook_timeout, hook_name, timeout_ms}}
+
       {:ok, cmd_result} ->
         handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
 
-      {:error, {:workspace_hook_timeout, ^hook_name, _timeout_ms} = reason} ->
-        {:error, reason}
+      {:error, {:workspace_hook_timeout, _remote_hook, timeout_ms}} ->
+        {:error, {:workspace_hook_timeout, hook_name, timeout_ms}}
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  # Erlang spawn ports create a process group; cancellation kills shell descendants with it.
+  # The watcher outlives a killed worker; normal completion waits for its cleanup acknowledgement.
+  defp local_hook_command(command, workspace, env, timeout_ms) do
+    case System.find_executable("sh") do
+      nil ->
+        {:error, :sh_not_found}
+
+      executable ->
+        port =
+          Port.open({:spawn_executable, String.to_charlist(executable)}, [
+            :binary,
+            :exit_status,
+            :stderr_to_stdout,
+            args: [~c"-lc", String.to_charlist(command)],
+            cd: String.to_charlist(workspace),
+            env: Enum.map(env, fn {key, value} -> {String.to_charlist(key), String.to_charlist(value)} end)
+          ])
+
+        SymphonyElixir.ProcessGroup.run(port, timeout_ms)
     end
   end
 
@@ -441,23 +457,11 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp handle_hook_command_result({output, status}, workspace, issue_context, hook_name) do
-    sanitized_output = sanitize_hook_output_for_log(output)
+    sanitized_output = SymphonyElixir.Startup.sanitize(output)
 
     Logger.warning("Workspace hook failed hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} status=#{status} output=#{inspect(sanitized_output)}")
 
     {:error, {:workspace_hook_failed, hook_name, status, output}}
-  end
-
-  defp sanitize_hook_output_for_log(output, max_bytes \\ 2_048) do
-    binary_output = IO.iodata_to_binary(output)
-
-    case byte_size(binary_output) <= max_bytes do
-      true ->
-        binary_output
-
-      false ->
-        binary_part(binary_output, 0, max_bytes) <> "... (truncated)"
-    end
   end
 
   defp validate_workspace_path(workspace, nil) when is_binary(workspace) do
@@ -548,18 +552,15 @@ defmodule SymphonyElixir.Workspace do
 
   defp run_remote_command(worker_host, script, timeout_ms)
        when is_binary(worker_host) and is_binary(script) and is_integer(timeout_ms) and timeout_ms > 0 do
-    task =
-      Task.async(fn ->
-        SSH.run(worker_host, script, stderr_to_stdout: true)
-      end)
+    case SSH.start_port(worker_host, script) do
+      {:ok, port} ->
+        case SymphonyElixir.ProcessGroup.run(port, timeout_ms) do
+          {:ok, result} -> {:ok, result}
+          {:error, :timeout} -> {:error, {:workspace_hook_timeout, "remote_command", timeout_ms}}
+        end
 
-    case Task.yield(task, timeout_ms) do
-      {:ok, result} ->
-        result
-
-      nil ->
-        Task.shutdown(task, :brutal_kill)
-        {:error, {:workspace_hook_timeout, "remote_command", timeout_ms}}
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

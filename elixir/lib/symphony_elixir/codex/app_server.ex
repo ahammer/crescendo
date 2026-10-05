@@ -54,6 +54,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, port} <- start_port(expanded_workspace, worker_host, dynamic_tool_binding, session_env) do
+      :ok = SymphonyElixir.ProcessGroup.protect(port)
       metadata = port_metadata(port, worker_host)
 
       with {:ok, policies} <- session_policies(expanded_workspace, worker_host),
@@ -1476,7 +1477,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       _ ->
         try do
-          Port.close(port)
+          SymphonyElixir.ProcessGroup.stop(port)
           :ok
         rescue
           ArgumentError ->

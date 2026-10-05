@@ -33,12 +33,12 @@ defmodule SymphonyElixirWeb.Redaction do
 
       payload
       |> Map.update(:running, [], &scrub.(&1, fn entry -> running(entry) end))
-      |> Map.update(:retrying, [], &scrub.(&1, fn entry -> %{entry | error: nil, workspace_path: nil} end))
+      |> Map.update(:retrying, [], &scrub.(&1, fn entry -> entry |> Map.merge(%{error: nil, workspace_path: nil}) |> Map.drop([:startup]) end))
       |> Map.update(:blocked, [], &scrub.(&1, fn entry -> blocked(entry) end))
       |> update_in([:upcoming, :ready], &scrub.(&1, fn item -> %{item | title: @hidden} end))
       |> update_in([:upcoming, :waiting], &scrub.(&1, fn item -> %{item | title: @hidden} end))
       |> update_in([:pull_requests, :items], &scrub.(&1, fn pull -> pull(pull) end))
-      |> update_in([:usage, :activity], &scrub.(&1, fn event -> Map.drop(event, [:summary, :title]) end))
+      |> update_in([:usage, :activity], &scrub.(&1, fn event -> Map.drop(event, [:summary, :title, :startup, :run_id, :worker_pid]) end))
       |> update_in([:usage, :images], &drop_projects(&1, redacted))
     end
   end
@@ -74,7 +74,11 @@ defmodule SymphonyElixirWeb.Redaction do
     |> Map.replace(:transcript, [])
   end
 
-  defp blocked(entry), do: %{entry | error: nil, workspace_path: nil, session_id: nil, last_message: nil}
+  defp blocked(entry) do
+    entry
+    |> Map.merge(%{error: nil, workspace_path: nil, session_id: nil, last_message: nil})
+    |> Map.drop([:startup, :run_id, :worker_pid])
+  end
 
   defp pull(pull) do
     pull

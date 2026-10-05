@@ -343,6 +343,7 @@ defmodule SymphonyElixirWeb.Presenter do
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path)
     }
+    |> with_startup(entry)
   end
 
   defp blocked_entry_payload(entry) do
@@ -361,6 +362,7 @@ defmodule SymphonyElixirWeb.Presenter do
       last_message: summarize_message(entry.last_codex_message),
       last_event_at: iso8601(entry.last_codex_timestamp)
     }
+    |> with_startup(entry)
   end
 
   defp running_issue_payload(running) do
@@ -391,6 +393,7 @@ defmodule SymphonyElixirWeb.Presenter do
       worker_host: Map.get(retry, :worker_host),
       workspace_path: Map.get(retry, :workspace_path)
     }
+    |> with_startup(retry)
   end
 
   defp blocked_issue_payload(blocked) do
@@ -405,7 +408,17 @@ defmodule SymphonyElixirWeb.Presenter do
       last_message: summarize_message(blocked.last_codex_message),
       last_event_at: iso8601(blocked.last_codex_timestamp)
     }
+    |> with_startup(blocked)
   end
+
+  defp with_startup(payload, %{startup: startup} = entry) when is_map(startup) do
+    payload
+    |> Map.merge(Map.take(entry, [:startup, :run_id, :worker_pid]))
+    |> Map.put(:startup_attempt, entry[:count] || entry[:startup_attempt])
+    |> Map.put(:retry_at, entry[:due_at_ms])
+  end
+
+  defp with_startup(payload, _entry), do: payload
 
   defp workspace_path(issue_identifier, running, retry, blocked) do
     (running && Map.get(running, :workspace_path)) ||
