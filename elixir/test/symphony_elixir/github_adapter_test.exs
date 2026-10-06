@@ -297,7 +297,7 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
              )
   end
 
-  test "client clears labels and retires items with their draft pull requests" do
+  test "client clears labels and retires only an item's owned draft pull requests" do
     parent = self()
 
     request_fun = fn method, path, _params, body, _settings ->
@@ -312,7 +312,23 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
                raw_pull(20, "OWNER", "octo/repo", %{"draft" => true, "body" => "Symphony issue: #5"}),
                raw_pull(21, "OWNER", "octo/repo", %{"draft" => true, "body" => "Unrelated #50", "head" => %{"sha" => "s", "ref" => "symphony/issue-5", "repo" => %{"full_name" => "octo/repo"}}}),
                raw_pull(22, "OWNER", "octo/repo", %{"draft" => false, "body" => "Closes #5"}),
-               raw_pull(23, "OWNER", "octo/repo", %{"draft" => true, "body" => "Fixes #50"})
+               raw_pull(23, "OWNER", "octo/repo", %{"draft" => true, "body" => "Fixes #50"}),
+               raw_pull(24, "OWNER", "octo/repo", %{
+                 "draft" => true,
+                 "body" => "Required validation failure tracked in #5.\n\nSymphony issue: #4",
+                 "head" => %{"ref" => "symphony/issue-4"}
+               }),
+               raw_pull(25, "OWNER", "octo/repo", %{"draft" => true, "body" => "Retain issue-5 findings"}),
+               raw_pull(26, "OWNER", "octo/repo", %{"draft" => true, "body" => "Closes #5"}),
+               raw_pull(27, "OWNER", "octo/repo", %{"draft" => true, "body" => "fixes #5"}),
+               raw_pull(28, "OWNER", "octo/repo", %{"draft" => true, "body" => "Resolved #5"}),
+               raw_pull(29, "OWNER", "octo/repo", %{"draft" => true, "body" => "Crescendo issue: #5"}),
+               raw_pull(30, "OWNER", "octo/repo", %{
+                 "draft" => true,
+                 "body" => "#5 is a dependency",
+                 "head" => %{"ref" => "symphony/issue-50"}
+               }),
+               raw_pull(31, "OWNER", "octo/repo", %{"draft" => true, "body" => "Will not close #5"})
              ]
            }}
 
@@ -332,8 +348,16 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
     assert_receive {:github_write, "PATCH", "/repos/octo/repo/issues/5", %{"state" => "closed", "state_reason" => "not_planned"}}
     assert_receive {:github_write, "PATCH", "/repos/octo/repo/pulls/20", %{"state" => "closed"}}
     assert_receive {:github_write, "PATCH", "/repos/octo/repo/pulls/21", %{"state" => "closed"}}
+    assert_receive {:github_write, "PATCH", "/repos/octo/repo/pulls/26", %{"state" => "closed"}}
+    assert_receive {:github_write, "PATCH", "/repos/octo/repo/pulls/27", %{"state" => "closed"}}
+    assert_receive {:github_write, "PATCH", "/repos/octo/repo/pulls/28", %{"state" => "closed"}}
+    assert_receive {:github_write, "PATCH", "/repos/octo/repo/pulls/29", %{"state" => "closed"}}
     refute_receive {:github_write, "PATCH", "/repos/octo/repo/pulls/22", _}
     refute_receive {:github_write, "PATCH", "/repos/octo/repo/pulls/23", _}
+    refute_receive {:github_write, "PATCH", "/repos/octo/repo/pulls/24", _}
+    refute_receive {:github_write, "PATCH", "/repos/octo/repo/pulls/25", _}
+    refute_receive {:github_write, "PATCH", "/repos/octo/repo/pulls/30", _}
+    refute_receive {:github_write, "PATCH", "/repos/octo/repo/pulls/31", _}
 
     assert :ok = GitHubClient.retire_for_test(%Issue{id: "22", kind: :pull_request}, "Capped.", tracker_settings(), request_fun)
     assert_receive {:github_write, "PATCH", "/repos/octo/repo/pulls/22", %{"state" => "closed"}}

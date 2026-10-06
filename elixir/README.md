@@ -408,6 +408,11 @@ the issue, and if it still fails Symphony closes the issue as not planned along 
 requests. Pull requests that reach `max_pr_runs` without merging are closed too. Add `symphony:hold` to any issue or pull request
 to stop and hold it. Handled pull request heads and the research cooldown survive restarts.
 
+GitHub retirement closes only owned drafts: a body line starting with `Closes #N`, `Fixes #N`,
+`Resolves #N` (including singular/past forms), `Symphony issue: #N` or `Crescendo issue: #N`,
+or an `issue-N` branch segment with an optional hyphenated suffix. Dependency mentions, other
+issue numbers and non-draft PRs do not establish draft ownership.
+
 Startup failures before a session is admitted are an exception to delivery exhaustion: they retain
 the issue and dependencies, retry twice after 10/20 seconds, then expose a startup block with a
 30-minute recovery probe. Correct the environment and leave the item ready, or change the relevant

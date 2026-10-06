@@ -2562,7 +2562,11 @@ Autopilot never parks work waiting for an operator.
   verified part and file a follow-up for the rest), or close the item as not planned.
 - When an item reaches `max_item_attempts` failed attempts, the orchestrator retires it through the
   tracker: a comment with the last blocker, closing it as not planned, and closing its open draft
-  pull requests (those referencing `#N` or on an `issue-N` branch).
+  pull requests. GitHub draft ownership requires a body line beginning with a closing keyword
+  (`close`, `fix`, `resolve`, or their past/third-person forms) followed by `#N`, a
+  `Symphony issue: #N` or `Crescendo issue: #N` line, or an `issue-N` branch segment with an
+  optional hyphenated suffix. Matching is number-exact; incidental dependency references and
+  non-draft pull requests MUST remain open.
 - Adapters implement the optional tracker writes `clear_label/2` and `retire/2`; an adapter without
   them reports `unsupported_tracker_operation` and the item is retried on the next poll.
 

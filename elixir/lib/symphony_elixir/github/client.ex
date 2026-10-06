@@ -83,23 +83,25 @@ defmodule SymphonyElixir.GitHub.Client do
   end
 
   # Drafts left behind by an issue's worker would otherwise linger forever:
-  # close every open draft that references the issue or uses its branch.
+  # close drafts with explicit ownership, never incidental dependency references.
   defp close_draft_pulls(_settings, _request_fun, %Issue{kind: :pull_request}), do: :ok
 
   defp close_draft_pulls(settings, request_fun, %Issue{id: id}) do
-    reference = ~r/#{Regex.escape("#" <> id)}\b|issue-#{Regex.escape(id)}\b/
+    number = Regex.escape(id)
+    reference = ~r/^\s*(?:(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+|(?:Symphony|Crescendo) issue:\s*)##{number}\b/im
+    branch = ~r/(?:^|\/)issue-#{number}(?:-|$)/
     reason = "Closed by Symphony: issue ##{id} was retired after exhausting its attempts."
 
     with {:ok, pulls} <- fetch_raw_pull_pages(settings, request_fun, 1, []) do
       pulls
-      |> Enum.filter(&draft_for_issue?(&1, reference))
+      |> Enum.filter(&draft_for_issue?(&1, reference, branch))
       |> Enum.reduce_while(:ok, &close_pull(&1, &2, settings, request_fun, reason))
     end
   end
 
-  defp draft_for_issue?(pull, reference) do
+  defp draft_for_issue?(pull, reference, branch) do
     pull["draft"] == true and
-      (Regex.match?(reference, pull["body"] || "") or Regex.match?(reference, get_in(pull, ["head", "ref"]) || ""))
+      (Regex.match?(reference, pull["body"] || "") or Regex.match?(branch, get_in(pull, ["head", "ref"]) || ""))
   end
 
   defp close_pull(pull, :ok, settings, request_fun, reason) do
