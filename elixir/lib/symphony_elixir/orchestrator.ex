@@ -1300,7 +1300,7 @@ defmodule SymphonyElixir.Orchestrator do
     cond do
       Map.get(state.autopilot, :retired_items, %{})[issue.id] == true -> :retired
       issue.kind == :issue and settings.blocked_label in Issue.label_names(issue) -> :blocked
-      issue.kind == :issue and Autopilot.exhausted?(state.autopilot, Autopilot.delivery_key(issue), settings) -> :exhausted
+      Autopilot.exhausted?(state.autopilot, Autopilot.delivery_key(issue), settings) -> :exhausted
       review_capped?(state, issue, settings) -> :review_capped
       true -> :active
     end

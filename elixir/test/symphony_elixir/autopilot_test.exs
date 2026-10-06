@@ -1042,7 +1042,7 @@ defmodule SymphonyElixir.AutopilotTest do
       refute MapSet.member?(state.claimed, "3")
     end
 
-    test "a pull request at its review cap is retired" do
+    test "a pull request at its review cap is retired and can resume after closure" do
       write_autopilot_workflow!(autopilot: %{max_pr_runs: 1})
       Application.delete_env(:symphony_elixir, :memory_tracker_writes)
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [pull_request("8", "sha-9")])
@@ -1050,12 +1050,41 @@ defmodule SymphonyElixir.AutopilotTest do
 
       :sys.replace_state(pid, fn state ->
         handled = %{"8" => %{runs: 1, head_sha: "sha-8"}}
-        %{state | autopilot: %{state.autopilot | pr_handled: handled, tasks: cooled_tasks()}}
+        attempts = %{"8" => 2, "123" => 3, "handoff:123:partial_delivery:456" => 3}
+        autopilot = %{state.autopilot | pr_handled: handled, item_attempts: attempts, tasks: cooled_tasks()}
+        %{state | autopilot: %{autopilot | retired_items: %{"123" => true}}}
       end)
 
       send(pid, :run_poll_cycle)
       assert :sys.get_state(pid).running == %{}
       assert Enum.any?(Application.get_env(:symphony_elixir, :memory_tracker_writes), &match?({:retire, "8", _}, &1))
+
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).autopilot.pr_handled == %{}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [pull_request("8", "sha-10")])
+      send(pid, :run_poll_cycle)
+      assert %{item_attempt: 1} = :sys.get_state(pid).running["8"]
+      assert admit_running(pid, "8").autopilot.pr_handled["8"].runs == 1
+      assert :sys.get_state(pid).autopilot.item_attempts == %{"123" => 3, "handoff:123:partial_delivery:456" => 3}
+      assert :sys.get_state(pid).autopilot.retired_items == %{"123" => true}
+    end
+
+    test "a pull request with exhausted failed attempts retries retirement" do
+      write_autopilot_workflow!()
+      Application.delete_env(:symphony_elixir, :memory_tracker_writes)
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [pull_request("8", "sha-8")])
+      {pid, _name} = start_orchestrator!()
+      cool_down_research(pid)
+
+      # A failed retirement leaves an exhausted item open for the next poll.
+      :sys.replace_state(pid, fn state ->
+        autopilot = %{state.autopilot | pr_handled: %{"8" => %{runs: 1}}, item_attempts: %{"8" => 3}}
+        %{state | autopilot: autopilot}
+      end)
+
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).running == %{}
+      assert [{:retire, "8", _}] = Application.get_env(:symphony_elixir, :memory_tracker_writes, [])
     end
 
     test "research waits while the backlog is full" do

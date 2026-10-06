@@ -88,13 +88,16 @@ defmodule SymphonyElixir.Autopilot do
   def dispatched_head(%Issue{kind: :pull_request, pull_request: %{head_sha: head_sha}}), do: head_sha
   def dispatched_head(%Issue{}), do: nil
 
-  @doc "Drops closed pull request records; delivery budgets survive closure and reopening."
+  @doc "Drops closed pull request records; issue delivery budgets survive closure and reopening."
   @spec prune_pull_requests(state(), [Issue.t()]) :: state()
   def prune_pull_requests(state, open_issues) do
     open_prs = for %Issue{kind: :pull_request, id: id} <- open_issues, into: MapSet.new(), do: id
+    closed_prs = Enum.reject(Map.keys(state.pr_handled), &MapSet.member?(open_prs, &1))
 
     state
     |> Map.put(:pr_handled, Map.filter(state.pr_handled, fn {id, _} -> MapSet.member?(open_prs, id) end))
+    |> Map.put(:item_attempts, Map.drop(item_attempts(state), closed_prs))
+    |> Map.update(:retired_items, %{}, &Map.drop(&1, closed_prs))
   end
 
   @doc """

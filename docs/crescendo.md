@@ -453,7 +453,7 @@ The existing Operations DETS ledger separates three observations:
 - `attempt_failed` (or `blocked` without autopilot) measures a blocked item attempt, independently
   of its run ending. New facts retain the work item, item-attempt number and last recorded run ID.
   The durable item/attempt/run key prevents duplicate counting while distinguishing new attempts
-  after a closed item reopens and its retry budget resets.
+  after a closed PR reopens and its retry budget resets. Issue budgets persist across closure.
 - `item_disposition` records scoped acceptance or retirement. `merged` accepts the observed PR's
   scope; it does not claim full product acceptance. For deliveries without a PR, a closed issue
   carrying `<prefix>:delivery:verified-existing` accepts verified existing work; a closed issue with
@@ -593,6 +593,9 @@ to unrelated work. Unrelated issues and PR budgets retain their existing behavio
 Running successors stop if authorization is removed or their proof is rebound. Restoring the original
 authorization continues the same budget. Final-attempt throttling also uses that budget, so a
 successor's last attempt retains the configured exception to the daily spending limit.
+
+Closed PRs still clear their review runs, failed attempts and retirement markers so reopened PRs can
+resume review. An exhausted open PR retries failed retirement writes on subsequent polls.
 
 Admission is read-only at GitHub: rejected duplicates are not delivery owners and cannot trigger
 blocked-marker consumption, validation workers or retirement (including draft closure). Their
