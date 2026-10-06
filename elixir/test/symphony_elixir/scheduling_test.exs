@@ -107,23 +107,31 @@ defmodule SymphonyElixir.SchedulingTest do
 
   test "global research waits for an idle service, holding it meanwhile, then has it to itself" do
     s = Scheduling.new(3, [{"metalrain", 1, nil, "global"}, {"nubu3d", 1, nil, "project"}])
+    assert Scheduling.research_hold(s, 0) == nil
     assert {:ok, s} = Scheduling.acquire(s, "nubu3d", "GH-1", :issue, 0)
 
     assert {:wait, "waiting for the service to go idle for research", s, []} = Scheduling.acquire(s, "metalrain", "research:qa", :research, 1_000)
     assert {:wait, "the service is held for metalrain's research", s, []} = Scheduling.acquire(s, "nubu3d", "GH-2", :issue, 2_000)
     assert Scheduling.free_for(s, "nubu3d", 2_000) == 0
+    assert Scheduling.research_hold(s, 2_000) == %{project: "metalrain", phase: "reserved"}
 
     # A reservation that is not renewed lapses.
+    assert Scheduling.research_hold(s, 90_999) == %{project: "metalrain", phase: "reserved"}
+    assert Scheduling.research_hold(s, 91_000) == nil
     assert {:ok, _s} = Scheduling.acquire(s, "nubu3d", "GH-2", :issue, 91_001)
 
     {s, _wake} = Scheduling.release(s, "nubu3d", "GH-1")
     assert {:ok, s} = Scheduling.acquire(s, "metalrain", "research:qa", :research, 3_000)
     assert s.reservation == nil
+    assert Scheduling.research_hold(s, 4_000) == %{project: "metalrain", phase: "running"}
     assert {:wait, "metalrain is researching with the service to itself", _s, []} = Scheduling.acquire(s, "nubu3d", "GH-3", :pull_request, 4_000)
 
     # Research in other modes is an ordinary run.
     s = Scheduling.new(2, [{"a", 1, nil, "project"}, {"b", 1, nil, "none"}])
     assert {:ok, s} = Scheduling.acquire(s, "a", "research:x", :research, 0)
+    assert Scheduling.research_hold(s, 0) == nil
+    assert {:ok, none} = Scheduling.acquire(s, "b", "research:y", :research, 0)
+    assert Scheduling.research_hold(none, 0) == nil
     assert {:ok, _s} = Scheduling.acquire(s, "b", "GH-1", :issue, 0)
   end
 

@@ -138,6 +138,18 @@ defmodule SymphonyElixir.Scheduling do
   @spec used(t()) :: non_neg_integer()
   def used(schedule), do: schedule.projects |> Map.values() |> Enum.map(&map_size(&1.held)) |> Enum.sum()
 
+  @doc "The current global research hold, excluding expired reservations and project-only research."
+  @spec research_hold(t(), integer()) :: %{project: String.t(), phase: String.t()} | nil
+  def research_hold(schedule, now_ms) do
+    schedule = expire_reservation(schedule, now_ms)
+
+    cond do
+      project = global_research(schedule, nil) -> %{project: project, phase: "running"}
+      schedule.reservation -> %{project: schedule.reservation.project, phase: "reserved"}
+      true -> nil
+    end
+  end
+
   # Global research holds the service; a reservation keeps it for the project that asked.
   defp exclusive_block(schedule, id) do
     cond do
