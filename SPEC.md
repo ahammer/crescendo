@@ -2598,7 +2598,7 @@ Operations history MUST distinguish run endings, blocked item attempts and scope
 not necessarily failure; reconciliation after acceptance MUST retain run time and recorded cost.
 New facts SHOULD retain the work item, run ID and item-attempt number. Historical attribution that
 was never recorded MUST remain unknown rather than inferred from nearby timestamps.
-Run identity MUST distinguish blocked attempts when an item's attempt counter resets after reopening.
+Run identity MUST distinguish blocked attempts when a pull request's attempt counter resets after reopening.
 
 A blocked attempt MUST count once independently of its run ending. Dispositions distinguish merged
 PR scope, verified existing work, split delivery with unmet follow-ups, retirement and unknown
@@ -2649,3 +2649,26 @@ expires with the existing 90-day history. A resumed thread fences its previous r
 Codex 0.160.0 provides cumulative token-usage notifications, not a `thread/read` usage snapshot.
 No turn may be launched solely for telemetry. See [the bounded reconciliation procedure and
 coverage limits](docs/crescendo.md#terminal-thread-usage-reconciliation).
+
+## Canonical final-attempt handoffs (Crescendo extension)
+
+Final-attempt issue prompts append the [canonical handoff contract](docs/crescendo.md#canonical-final-attempt-handoffs-crescendo-extension). Unchanged outcomes reuse
+one canonical root and its bounded attempt budget. Closed issue attempts and retirement dispositions
+survive polling and restarts; an issue number, diagnostic evidence or unmerged PR grants no renewal.
+Investigations and accepted reduced slices remain possible within the bounded policy.
+
+GitHub admits one successor only after matching authorization records on the closed root and successor,
+verified merged partial delivery or a newly completed native prerequisite. Root plus native proof owns
+the budget; proof replay cannot reset it. Running successors stop when authorization is removed or
+rebound, and final-attempt throttling uses that same budget. Held or otherwise unroutable successors
+cannot reserve an unbound proof budget; holding an already bound successor preserves its ownership.
+Closed PRs still clear their review runs, failed attempts and retirement markers so reopened PRs can
+resume review. An exhausted open PR retries failed retirement writes on subsequent polls.
+Invalid and legacy unproven replacements fail admission closed without retiring their PRs or altering
+evidence, labels, holds or native edges.
+Required capabilities, dependencies and unique source/evidence must survive worker/groomer disposition.
+A root ends delivered, explicitly declined, or retried within policy. Local prompt rollout remains
+the operator's responsibility; the dashboard stays read-only. No arbitrary prose equivalence or
+historical migration is inferred.
+Legacy replacement headings prevent an issue from declaring itself a canonical root, including
+when its record would otherwise authorize another successor.

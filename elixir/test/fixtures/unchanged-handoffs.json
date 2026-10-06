@@ -1,0 +1,14 @@
+{
+  "provenance": "Sanitized offline GH-49 retrospective summaries with explicit replacement headings; no production source/accepted change between these gas-owner replacements. Bodies intentionally omit unrelated historical evidence.",
+  "gas_owner": [
+    {"number":1184,"body":"Complete gas owner; all seven acceptance groups remain required"},
+    {"number":1187,"body":"## Full required replacement of unaccepted #1184\nNothing is accepted; diagnostic PR #1186 closes unmerged."},
+    {"number":1192,"body":"<!-- symphony-replacement: issue-1187/attempt-3/full-gas-owner -->\n## Required complete replacement of unaccepted #1187\nThe issue branch is source-identical with no production implementation and no PR. Every production outcome remains unaccepted."}
+  ],
+  "quiet_window": {
+    "acceptance_chain": [1162,1164,1165,1166,1167],
+    "canonical_owner": 1168,
+    "required_external_outcome": "Owner-confirmed quiet window unavailable; three failed attempts; retired not_planned then reopened by grooming",
+    "dependent_successors": [1170,1171,1172,1173]
+  }
+}

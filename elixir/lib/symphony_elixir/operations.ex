@@ -823,7 +823,7 @@ defmodule SymphonyElixir.Operations do
     end)
   end
 
-  @empty_autopilot %{pr_handled: %{}, tasks: %{}, item_attempts: %{}}
+  @empty_autopilot %{pr_handled: %{}, tasks: %{}, item_attempts: %{}, handoff_owners: %{}, retired_items: %{}}
 
   @doc """
   Autopilot memory that must survive restarts: the head commit and run count
@@ -831,7 +831,7 @@ defmodule SymphonyElixir.Operations do
   time, and each item's failed attempts. State saved before per-task
   schedules starts every task fresh.
   """
-  @spec autopilot_state(handle()) :: %{pr_handled: map(), tasks: map(), item_attempts: map()}
+  @spec autopilot_state(handle()) :: SymphonyElixir.Autopilot.state()
   def autopilot_state(nil), do: @empty_autopilot
 
   def autopilot_state(table) do

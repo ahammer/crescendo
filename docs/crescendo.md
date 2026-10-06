@@ -462,7 +462,7 @@ The existing Operations DETS ledger separates three observations:
 - `attempt_failed` (or `blocked` without autopilot) measures a blocked item attempt, independently
   of its run ending. New facts retain the work item, item-attempt number and last recorded run ID.
   The durable item/attempt/run key prevents duplicate counting while distinguishing new attempts
-  after a closed item reopens and its retry budget resets.
+  after a closed PR reopens and its retry budget resets. Issue budgets persist across closure.
 - `item_disposition` records scoped acceptance or retirement. `merged` accepts the observed PR's
   scope; it does not claim full product acceptance. For deliveries without a PR, a closed issue
   carrying `<prefix>:delivery:verified-existing` accepts verified existing work; a closed issue with
@@ -558,3 +558,66 @@ cover usage on either side of worker removal/terminal events, failure/interrupti
 stale events, compaction estimates, restart, redispatch, resumed-thread fencing and retention.
 Separately launched helper/reviewer threads remain unobserved (`helper_usage_coverage: unknown`);
 recorded parent-thread estimates must not be described as complete whole-project cost.
+
+## Canonical final-attempt handoffs (Crescendo extension)
+
+An issue number is a dispatch identity, not authorization for a new outcome budget. Final-attempt
+issue prompts append the canonical handoff contract. Keep one canonical root issue for the unmet
+outcome, its source SHAs, unique evidence, acceptance dispositions and required native dependency
+and capability edges. Diagnostics, investigations and unmerged PRs do not count as accepted progress.
+Investigations and reduced slices can run within the existing bounded attempt policy. The root
+ends delivered, explicitly declined with a reason, or retried within `max_item_attempts`.
+
+Unchanged blockers reuse that root; do not create/promote ready replacements or reopen a declined
+root without a changed prerequisite. Closed issue attempt budgets and retirement dispositions
+survive polling and Operations restarts. Reopening a retired root does not repeat validation or
+retirement. A blocked native prerequisite closed `not_planned` remains unsatisfied.
+
+After accepted partial delivery or a newly completed external prerequisite, grooming can authorize
+one fresh successor. Put the identical record in the closed canonical root's body and the new
+successor's body (the root is the immutable `owner`; it cannot itself point to another owner):
+
+```html
+<!-- crescendo:handoff {"owner":123,"change":"partial_delivery","evidence":456,"scope":"Accepted fixture validity; exact production remainder remains required"} -->
+```
+
+`partial_delivery` requires a merged repository PR `evidence`, newer than the root's creation, with
+an explicit closing line for that root. `scope` records the accepted slice and exact remainder;
+the matching root record is grooming's acceptance authorization. A merged diagnostic PR alone is
+not authorization. `prerequisite` instead requires the evidence issue to remain a native blocked-by
+edge of the root, closed explicitly `completed` after the root's closure. Record owner-confirmed
+external evidence on that prerequisite; a closed unaccepted prerequisite does not qualify.
+
+GitHub validates the record during polling and dispatch refresh, including retry. Missing or
+invalid proof fails admission closed. Legacy Markdown headings naming a `replacement of #N` or
+`remainder from #N` also require the record; such an issue cannot name itself as the canonical owner
+or authorize further successors as a new root. Ordinary incidental references are unaffected. The
+budget is keyed by root, proof kind and native proof number, excluding editable prose. Operations
+binds it to the first admitted successor; another issue number, wording edit, closure, restart or
+replay of the proof cannot renew attempts. A held or otherwise unroutable successor cannot reserve
+an unbound proof budget; holding an already bound successor preserves its binding. Worker blocked
+markers still settle against that budget. Removing a bound successor's record cannot convert it
+to unrelated work. Unrelated issues and PR budgets retain their existing behavior.
+
+Running successors stop if authorization is removed or their proof is rebound. Restoring the original
+authorization continues the same budget. Final-attempt throttling also uses that budget, so a
+successor's last attempt retains the configured exception to the daily spending limit.
+
+Closed PRs still clear their review runs, failed attempts and retirement markers so reopened PRs can
+resume review. An exhausted open PR retries failed retirement writes on subsequent polls.
+
+Admission is read-only at GitHub: rejected duplicates are not delivery owners and cannot trigger
+blocked-marker consumption, validation workers or retirement (including draft closure). Their
+bodies, PRs, labels and native edges stay intact for grooming to consolidate into the root. Before
+any administrative supersession, grooming must preserve unique evidence on the root, add any
+required native edges to the admitted successor before removing an old edge, and retain the root
+edge as historical disposition. The service does not infer equivalent outcomes from arbitrary
+prose or migrate historical chains automatically. Explicit holds and dependency owners remain
+intact. The dashboard remains strictly read-only.
+
+Local prompt deployment belongs to the operator. Replace any instruction to file ready replacements
+on a final attempt with: “Reuse the canonical unmet-outcome owner. Unchanged blockers and diagnostic
+evidence do not grant fresh attempts. Preserve required native edges, source and evidence there;
+deliver an accepted reduced slice, explicitly decline the remainder, or use bounded retries. Only
+grooming may admit one successor after verified accepted partial delivery or a newly completed
+native prerequisite, using the matching `crescendo:handoff` record on root and successor.”

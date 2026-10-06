@@ -15,7 +15,7 @@ defmodule SymphonyElixir.AutopilotTest do
     max_item_attempts: 3
   }
 
-  @empty %{pr_handled: %{}, tasks: %{}, item_attempts: %{}}
+  @empty %{pr_handled: %{}, tasks: %{}, item_attempts: %{}, handoff_owners: %{}, retired_items: %{}}
 
   defmodule CiClient do
     def fetch_commit_ci_state(sha) do
@@ -103,7 +103,7 @@ defmodule SymphonyElixir.AutopilotTest do
       refute Autopilot.final_run?(state, %Issue{kind: :research, id: "5"}, @settings)
 
       assert Autopilot.prune_pull_requests(state, [%Issue{id: "5"}]).item_attempts == %{"5" => 3}
-      assert Autopilot.prune_pull_requests(state, []).item_attempts == %{}
+      assert Autopilot.prune_pull_requests(state, []).item_attempts == %{"5" => 3}
       # State persisted before attempts were tracked still loads.
       assert Autopilot.failed_attempts(Map.delete(@empty, :item_attempts), "5") == 0
     end
@@ -120,7 +120,7 @@ defmodule SymphonyElixir.AutopilotTest do
     test "final and item attempt numbers render into prompts" do
       write_workflow_file!(Workflow.workflow_file_path(), prompt: "{{ item_attempt }}{% if final_attempt %} final{% endif %}")
       assert PromptBuilder.build_prompt(%Issue{identifier: "GH-1"}) == "1"
-      assert PromptBuilder.build_prompt(%Issue{identifier: "GH-1"}, item_attempt: 3, final_attempt: true) == "3 final"
+      assert PromptBuilder.build_prompt(%Issue{identifier: "GH-1"}, item_attempt: 3, final_attempt: true) =~ "3 final\n\n## Canonical outcome handoff"
     end
   end
 
@@ -534,7 +534,9 @@ defmodule SymphonyElixir.AutopilotTest do
         saved = %{
           pr_handled: %{"7" => %{runs: 1, head_sha: "sha"}},
           tasks: %{"testing" => %{finished_at: ~U[2026-09-25 00:00:00Z], attempts: 0, retry_at: nil, last: :delivered}},
-          item_attempts: %{"9" => 2}
+          item_attempts: %{"9" => 2},
+          handoff_owners: %{},
+          retired_items: %{}
         }
 
         :ok = Operations.save_autopilot_state(table, saved)
@@ -841,11 +843,11 @@ defmodule SymphonyElixir.AutopilotTest do
       send(pid, :run_poll_cycle)
       assert Orchestrator.snapshot(name, 5_000).operations.daily == operations.daily
 
-      # Closure clears the retry budget; a reopened item starts at attempt one again.
+      # Closure retains the delivery budget; reopening continues the bounded outcome.
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
       send(pid, :run_poll_cycle)
       reopened = :sys.get_state(pid).running["1"]
-      assert reopened.item_attempt == 1
+      assert reopened.item_attempt == 2
       send(pid, {:DOWN, reopened.ref, :process, reopened.pid, :normal})
       Process.exit(reopened.pid, :kill)
       assert :sys.get_state(pid).running == %{}
@@ -920,6 +922,105 @@ defmodule SymphonyElixir.AutopilotTest do
       state = :sys.get_state(pid)
       assert state.running == %{}
       assert Enum.any?(Application.get_env(:symphony_elixir, :memory_tracker_writes), &match?({:retire, "1", _}, &1))
+      writes = Application.get_env(:symphony_elixir, :memory_tracker_writes)
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).running == %{}
+      assert Application.get_env(:symphony_elixir, :memory_tracker_writes) == writes
+
+      # Reopening the retired owner cannot repeat retirement or validation work.
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [blocked])
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).running == %{}
+      assert Application.get_env(:symphony_elixir, :memory_tracker_writes) == writes
+    end
+
+    test "running successors stop when their handoff record is removed or rebound" do
+      write_autopilot_workflow!(max_concurrent_agents: 1)
+      Application.delete_env(:symphony_elixir, :memory_tracker_writes)
+      key = "handoff:123:partial_delivery:456"
+      issue = %Issue{id: "124", identifier: "GH-124", title: "Successor", state: "open", dispatchable: true, delivery_key: key}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      {pid, _name} = start_orchestrator!()
+      cool_down_research(pid)
+      :sys.replace_state(pid, fn state -> %{state | autopilot: Map.put(state.autopilot, :item_attempts, %{key => 2})} end)
+      send(pid, :run_poll_cycle)
+
+      for edited_key <- [nil, "handoff:123:partial_delivery:999"] do
+        entry = :sys.get_state(pid).running[issue.id]
+        assert entry.issue.delivery_key == key
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | delivery_key: edited_key}])
+        send(pid, :run_poll_cycle)
+        state = :sys.get_state(pid)
+        assert state.running == %{}
+        refute Process.alive?(entry.pid)
+        refute MapSet.member?(state.claimed, issue.id)
+        assert state.autopilot.handoff_owners == %{key => issue.id}
+        assert state.autopilot.item_attempts == %{key => 2}
+        assert Application.get_env(:symphony_elixir, :memory_tracker_writes, []) == []
+
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+        send(pid, :run_poll_cycle)
+        assert %{item_attempt: 3, final_attempt: true} = :sys.get_state(pid).running[issue.id]
+      end
+    end
+
+    test "a held successor cannot reserve another successor's verified budget" do
+      write_autopilot_workflow!(max_concurrent_agents: 1)
+      Application.delete_env(:symphony_elixir, :memory_tracker_writes)
+      key = "handoff:123:partial_delivery:456"
+      held = %Issue{id: "124", identifier: "GH-124", title: "Held successor", state: "open", dispatchable: true, delivery_key: key, labels: ["symphony:hold"]}
+      ready = %{held | id: "125", identifier: "GH-125", title: "Ready successor", labels: []}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [held])
+      {pid, _name} = start_orchestrator!()
+      cool_down_research(pid)
+      send(pid, :run_poll_cycle)
+      state = :sys.get_state(pid)
+      assert state.running == %{}
+      assert state.autopilot.handoff_owners == %{}
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [held, ready])
+      send(pid, :run_poll_cycle)
+      state = :sys.get_state(pid)
+      assert Map.keys(state.running) == [ready.id]
+      assert state.autopilot.handoff_owners == %{key => ready.id}
+      assert state.autopilot.item_attempts == %{}
+      assert Application.get_env(:symphony_elixir, :memory_tracker_writes, []) == []
+
+      # Holding an existing owner preserves its binding; unholding the duplicate cannot steal it.
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{held | labels: []}, %{ready | labels: ["symphony:hold"]}])
+      send(pid, :run_poll_cycle)
+      state = :sys.get_state(pid)
+      assert state.running == %{}
+      assert state.autopilot.handoff_owners == %{key => ready.id}
+      assert Application.get_env(:symphony_elixir, :memory_tracker_writes, []) == []
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [ready])
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).running[ready.id].item_attempt == 1
+
+      # A worker's blocked marker still settles against its bound delivery budget.
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{ready | labels: ["symphony:blocked"]}])
+      send(pid, :run_poll_cycle)
+      state = :sys.get_state(pid)
+      assert state.running[ready.id].item_attempt == 2
+      assert state.autopilot.item_attempts == %{key => 1}
+      assert state.autopilot.handoff_owners == %{key => ready.id}
+      assert Application.get_env(:symphony_elixir, :memory_tracker_writes, []) == [{:clear_label, ready.id, "symphony:blocked"}]
+    end
+
+    test "held items, rejected successors and dependency owners bypass settlement writes" do
+      write_autopilot_workflow!(max_concurrent_agents: 1)
+      Application.delete_env(:symphony_elixir, :memory_tracker_writes)
+      held = %Issue{id: "10", identifier: "GH-10", title: "Held", state: "open", dispatchable: true, labels: ["symphony:blocked", "symphony:hold"]}
+      rejected = %{held | id: "11", identifier: "GH-11", dispatchable: false, labels: ["symphony:blocked"]}
+      dependency = %{held | id: "12", identifier: "GH-12", dispatchable: false, labels: [], blocked_by: [%{id: "13", state: "open"}]}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [held, rejected, dependency])
+      {pid, _name} = start_orchestrator!()
+      cool_down_research(pid)
+      :sys.replace_state(pid, fn state -> %{state | autopilot: Map.put(state.autopilot, :item_attempts, %{"10" => 3, "11" => 3, "12" => 3})} end)
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).running == %{}
+      assert Application.get_env(:symphony_elixir, :memory_tracker_writes, []) == []
     end
 
     test "exhausted crash retries count as a failed attempt instead of blocking" do
@@ -941,7 +1042,7 @@ defmodule SymphonyElixir.AutopilotTest do
       refute MapSet.member?(state.claimed, "3")
     end
 
-    test "a pull request at its review cap is retired" do
+    test "a pull request at its review cap is retired and can resume after closure" do
       write_autopilot_workflow!(autopilot: %{max_pr_runs: 1})
       Application.delete_env(:symphony_elixir, :memory_tracker_writes)
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [pull_request("8", "sha-9")])
@@ -949,12 +1050,41 @@ defmodule SymphonyElixir.AutopilotTest do
 
       :sys.replace_state(pid, fn state ->
         handled = %{"8" => %{runs: 1, head_sha: "sha-8"}}
-        %{state | autopilot: %{state.autopilot | pr_handled: handled, tasks: cooled_tasks()}}
+        attempts = %{"8" => 2, "123" => 3, "handoff:123:partial_delivery:456" => 3}
+        autopilot = %{state.autopilot | pr_handled: handled, item_attempts: attempts, tasks: cooled_tasks()}
+        %{state | autopilot: %{autopilot | retired_items: %{"123" => true}}}
       end)
 
       send(pid, :run_poll_cycle)
       assert :sys.get_state(pid).running == %{}
       assert Enum.any?(Application.get_env(:symphony_elixir, :memory_tracker_writes), &match?({:retire, "8", _}, &1))
+
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).autopilot.pr_handled == %{}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [pull_request("8", "sha-10")])
+      send(pid, :run_poll_cycle)
+      assert %{item_attempt: 1} = :sys.get_state(pid).running["8"]
+      assert admit_running(pid, "8").autopilot.pr_handled["8"].runs == 1
+      assert :sys.get_state(pid).autopilot.item_attempts == %{"123" => 3, "handoff:123:partial_delivery:456" => 3}
+      assert :sys.get_state(pid).autopilot.retired_items == %{"123" => true}
+    end
+
+    test "a pull request with exhausted failed attempts retries retirement" do
+      write_autopilot_workflow!()
+      Application.delete_env(:symphony_elixir, :memory_tracker_writes)
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [pull_request("8", "sha-8")])
+      {pid, _name} = start_orchestrator!()
+      cool_down_research(pid)
+
+      # A failed retirement leaves an exhausted item open for the next poll.
+      :sys.replace_state(pid, fn state ->
+        autopilot = %{state.autopilot | pr_handled: %{"8" => %{runs: 1}}, item_attempts: %{"8" => 3}}
+        %{state | autopilot: autopilot}
+      end)
+
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).running == %{}
+      assert [{:retire, "8", _}] = Application.get_env(:symphony_elixir, :memory_tracker_writes, [])
     end
 
     test "research waits while the backlog is full" do

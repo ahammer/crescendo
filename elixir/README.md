@@ -682,7 +682,8 @@ Daily state API rows add `stopped`, `blocked_attempts`, `accepted_deliveries`, `
 `unknown_dispositions`. New attempt/disposition events retain their work item, attempt and last
 recorded run ID; missing historical attribution is `unknown`. Counts cover the retained event ring;
 durable idempotency keys survive restart. Keys for blocked attempts include run IDs, so resetting
-the retry budget on reopening retains new attempts. Plain issue closure has unknown acceptance.
+the retry budget on PR reopening retains new attempts. Issue budgets persist across closure.
+Plain issue closure has unknown acceptance.
 For accepted issue work without a merged PR, apply `<prefix>:delivery:verified-existing` or
 `<prefix>:delivery:split` after validation and document scoped evidence in the workpad; `not_planned`
 is retirement. See [the detailed semantics](../docs/crescendo.md#durable-outcome-facts).
@@ -730,3 +731,26 @@ reported aggregate gap. Graceful teardown flushes supported queued events; force
 prevent observation. No new turn or token-usage RPC is used. See [reconciliation and coverage
 limits](../docs/crescendo.md#terminal-thread-usage-reconciliation) before replaying copied native
 records into an offline scratch ledger.
+
+## Canonical final-attempt handoffs (Crescendo extension)
+
+Final-attempt issue prompts append the [canonical handoff contract](../docs/crescendo.md#canonical-final-attempt-handoffs-crescendo-extension). Unchanged outcomes reuse
+one canonical root and its bounded attempt budget. Closed issue attempts and retirement dispositions
+survive polling and restarts; an issue number, diagnostic evidence or unmerged PR grants no renewal.
+Investigations and accepted reduced slices remain possible within the bounded policy.
+
+GitHub admits one successor only after matching authorization records on the closed root and successor,
+verified merged partial delivery or a newly completed native prerequisite. Root plus native proof owns
+the budget; proof replay cannot reset it. Running successors stop when authorization is removed or
+rebound, and final-attempt throttling uses that same budget. Held or otherwise unroutable successors
+cannot reserve an unbound proof budget; holding an already bound successor preserves its ownership.
+Closed PRs still clear their review runs, failed attempts and retirement markers so reopened PRs can
+resume review. An exhausted open PR retries failed retirement writes on subsequent polls.
+Invalid and legacy unproven replacements fail admission closed without retiring their PRs or altering
+evidence, labels, holds or native edges.
+Required capabilities, dependencies and unique source/evidence must survive worker/groomer disposition.
+A root ends delivered, explicitly declined, or retried within policy. Local prompt rollout remains
+the operator's responsibility; the dashboard stays read-only. No arbitrary prose equivalence or
+historical migration is inferred.
+Legacy replacement headings prevent an issue from declaring itself a canonical root, including
+when its record would otherwise authorize another successor.
