@@ -334,3 +334,13 @@ Use this exact structure for the persistent workpad comment and keep it updated 
 
 - <only include when something was confusing during execution>
 ````
+
+
+## Final-attempt handoff
+
+Reuse the canonical unmet-outcome issue. Diagnostics and unchanged external blockers do not authorize
+a fresh ready replacement. Preserve required native edges, source and unique evidence on the owner;
+deliver an accepted reduced slice, explicitly decline the unmet remainder, or retry through the
+bounded policy. A fresh successor requires grooming authorization and verified accepted partial
+PR delivery or a newly completed native prerequisite under the `crescendo:handoff` contract in
+[README.md](README.md#canonical-final-attempt-handoffs-crescendo-extension).

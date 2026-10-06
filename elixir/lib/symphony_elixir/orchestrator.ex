@@ -1171,7 +1171,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp record_failed_attempt(state, %Issue{} = issue, reason) do
     settings = Config.settings!().autopilot
-    {autopilot, attempts} = Autopilot.record_failed_attempt(state.autopilot, issue.id)
+    {autopilot, attempts} = Autopilot.record_failed_attempt(state.autopilot, Autopilot.delivery_key(issue))
 
     Logger.info("Autopilot attempt failed: #{issue_context(issue)} attempt=#{attempts}/#{settings.max_item_attempts} reason=#{inspect(reason)}")
 
@@ -1201,13 +1201,14 @@ defmodule SymphonyElixir.Orchestrator do
           Config.settings!().labels.prefix
         )
 
+        state = put_autopilot(state, Map.update(state.autopilot, :retired_items, %{issue.id => true}, &Map.put(&1, issue.id, true)))
         cleanup_issue_workspace(issue)
+        state
 
       {:error, error} ->
         Logger.warning("Autopilot could not retire #{issue_context(issue)}: #{inspect(error)}; retrying next poll")
+        state
     end
-
-    state
   end
 
   # A stopped task delivers no :DOWN, so its run is closed here; otherwise the
@@ -1260,6 +1261,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp settle_autopilot_items(%State{} = state, issues) do
     settings = Config.settings!().autopilot
 
+    {autopilot, issues} = Autopilot.admit_handoffs(state.autopilot, issues)
+    state = put_autopilot(state, autopilot)
+
     if settings.enabled do
       {kept, state} = Enum.flat_map_reduce(issues, state, &settle_autopilot_item(&2, &1, settings))
       {state, kept}
@@ -1271,6 +1275,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp settle_autopilot_item(state, %Issue{} = issue, settings) do
     case autopilot_item_status(state, issue, settings) do
       :blocked -> consume_blocked_marker(state, issue, settings)
+      :retired -> {[], state}
       :exhausted -> {[], retire_item(state, issue, "attempts exhausted")}
       :review_capped -> {[], retire_item(state, issue, "review run cap reached without merging")}
       :active -> {[issue], state}
@@ -1278,10 +1283,19 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp autopilot_item_status(state, issue, settings) do
+    excluded = List.delete(Config.settings!().tracker.excluded_labels, settings.blocked_label)
+    eligible = Issue.routable?(issue, Config.settings!().tracker.required_labels, excluded)
+
+    if Map.has_key?(state.running, issue.id) or not Issue.tracker_backed?(issue) or not eligible,
+      do: :active,
+      else: delivery_item_status(state, issue, settings)
+  end
+
+  defp delivery_item_status(state, issue, settings) do
     cond do
-      Map.has_key?(state.running, issue.id) or not Issue.tracker_backed?(issue) -> :active
+      Map.get(state.autopilot, :retired_items, %{})[issue.id] == true -> :retired
       issue.kind == :issue and settings.blocked_label in Issue.label_names(issue) -> :blocked
-      issue.kind == :issue and Autopilot.exhausted?(state.autopilot, issue.id, settings) -> :exhausted
+      issue.kind == :issue and Autopilot.exhausted?(state.autopilot, Autopilot.delivery_key(issue), settings) -> :exhausted
       review_capped?(state, issue, settings) -> :review_capped
       true -> :active
     end
@@ -1299,7 +1313,9 @@ defmodule SymphonyElixir.Orchestrator do
       :ok ->
         state = record_failed_attempt(state, issue, "worker reported a blocker (see workpad)")
         remaining = %{issue | labels: List.delete(issue.labels, settings.blocked_label)}
-        {if(Autopilot.exhausted?(state.autopilot, issue.id, settings), do: [], else: [remaining]), state}
+        exhausted = Autopilot.exhausted?(state.autopilot, Autopilot.delivery_key(issue), settings)
+        kept = if exhausted, do: [], else: [remaining]
+        {kept, state}
 
       {:error, error} ->
         Logger.warning("Could not clear #{settings.blocked_label} on #{issue_context(issue)}: #{inspect(error)}")
@@ -1331,7 +1347,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp sort_issues_for_dispatch(issues, autopilot \\ %{}) when is_list(issues) do
     Enum.sort_by(issues, fn
       %Issue{} = issue ->
-        {kind_rank(issue.kind), Autopilot.failed_attempts(autopilot, issue.id), priority_rank(issue.priority), issue_created_at_sort_key(issue), issue.identifier || issue.id || ""}
+        {kind_rank(issue.kind), Autopilot.failed_attempts(autopilot, Autopilot.delivery_key(issue)), priority_rank(issue.priority), issue_created_at_sort_key(issue),
+         issue.identifier || issue.id || ""}
 
       _ ->
         {kind_rank(nil), 0, priority_rank(nil), issue_created_at_sort_key(nil), ""}
@@ -1366,10 +1383,16 @@ defmodule SymphonyElixir.Orchestrator do
       !Map.has_key?(state.running, issue.id) and
       !Map.has_key?(state.retry_attempts, issue.id) and
       !Map.has_key?(state.blocked, issue.id) and
+      handoff_owner?(issue, state.autopilot) and
       Startup.ready?(state.startup_failures[issue.id]) and
       Autopilot.pull_request_ready?(issue, state.autopilot, Config.settings!().autopilot) and
       dispatch_admission(state, issue) == :ok
   end
+
+  defp handoff_owner?(%Issue{delivery_key: nil, id: id}, autopilot),
+    do: not Enum.any?(Map.get(autopilot, :handoff_owners, %{}), fn {_key, owner} -> owner == id end)
+
+  defp handoff_owner?(issue, autopilot), do: Map.get(autopilot, :handoff_owners, %{})[issue.delivery_key] == issue.id
 
   defp state_slots_available?(%Issue{state: issue_state}, running) when is_map(running) do
     limit = Config.max_concurrent_agents_for_state(issue_state)
@@ -1538,7 +1561,7 @@ defmodule SymphonyElixir.Orchestrator do
   # swap the model or hold the item; a route error still fails in the runner.
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, {worker_host, route}) do
     settings = Config.settings!().autopilot
-    item_attempt = Autopilot.failed_attempts(state.autopilot, issue.id) + 1
+    item_attempt = Autopilot.failed_attempts(state.autopilot, Autopilot.delivery_key(issue)) + 1
     final_attempt = settings.enabled and Autopilot.final_run?(state.autopilot, issue, settings)
     selected = selected_route(route)
     run_id = Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
@@ -2280,6 +2303,7 @@ defmodule SymphonyElixir.Orchestrator do
     candidate_issue?(issue, active_state_set(), terminal_state_set()) and
       not MapSet.member?(state.claimed, issue.id) and
       not Map.has_key?(state.blocked, issue.id) and
+      handoff_owner?(issue, state.autopilot) and
       Startup.ready?(state.startup_failures[issue.id]) and
       Autopilot.pull_request_ready?(issue, state.autopilot, Config.settings!().autopilot)
   end
@@ -2884,10 +2908,21 @@ defmodule SymphonyElixir.Orchestrator do
 
   # The route and a service slot are settled before a run starts; either can make it wait.
   defp admit_run(%State{} = state, %Issue{} = issue, class) do
-    with {:ok, route} <- routed(select_route(state, issue)),
+    with :ok <- delivery_admission(state, issue),
+         {:ok, route} <- routed(select_route(state, issue)),
          {:ok, state} <- acquire_slot(state, issue, class) do
       {:ok, state, route}
     end
+  end
+
+  defp delivery_admission(state, issue) do
+    settings = Config.settings!().autopilot
+    exhausted = settings.enabled and Autopilot.exhausted?(state.autopilot, Autopilot.delivery_key(issue), settings)
+    retired = Map.get(state.autopilot, :retired_items, %{})[issue.id] == true
+
+    if handoff_owner?(issue, state.autopilot) and not exhausted and not retired,
+      do: :ok,
+      else: {:wait, "canonical delivery budget unavailable"}
   end
 
   defp routed({:wait, _reason} = wait), do: wait
@@ -2948,7 +2983,7 @@ defmodule SymphonyElixir.Orchestrator do
       pull_request: settings.autopilot.review_route
     }
 
-    item_attempt = Autopilot.failed_attempts(state.autopilot, issue.id) + 1
+    item_attempt = Autopilot.failed_attempts(state.autopilot, Autopilot.delivery_key(issue)) + 1
     avoid = if is_map(state.throttle), do: state.throttle.avoid, else: %{}
     ModelRouting.select_for_run(settings.codex.routing, fixed_routes, issue, item_attempt, avoid: avoid)
   end

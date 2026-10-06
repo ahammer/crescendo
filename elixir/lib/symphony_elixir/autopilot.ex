@@ -11,6 +11,8 @@ defmodule SymphonyElixir.Autopilot do
   alias SymphonyElixir.Tracker.Issue
 
   @type state :: %{
+          optional(:handoff_owners) => %{optional(String.t()) => String.t()},
+          optional(:retired_items) => %{optional(String.t()) => boolean()},
           pr_handled: %{optional(String.t()) => map()},
           tasks: %{optional(String.t()) => map()},
           item_attempts: %{optional(String.t()) => pos_integer()}
@@ -86,15 +88,13 @@ defmodule SymphonyElixir.Autopilot do
   def dispatched_head(%Issue{kind: :pull_request, pull_request: %{head_sha: head_sha}}), do: head_sha
   def dispatched_head(%Issue{}), do: nil
 
-  @doc "Drops pull request and attempt records for items that are no longer open."
+  @doc "Drops closed pull request records; delivery budgets survive closure and reopening."
   @spec prune_pull_requests(state(), [Issue.t()]) :: state()
   def prune_pull_requests(state, open_issues) do
     open_prs = for %Issue{kind: :pull_request, id: id} <- open_issues, into: MapSet.new(), do: id
-    open_items = for %Issue{id: id} <- open_issues, into: MapSet.new(), do: id
 
     state
     |> Map.put(:pr_handled, Map.filter(state.pr_handled, fn {id, _} -> MapSet.member?(open_prs, id) end))
-    |> Map.put(:item_attempts, state |> item_attempts() |> Map.filter(fn {id, _} -> MapSet.member?(open_items, id) end))
   end
 
   @doc """
@@ -125,7 +125,7 @@ defmodule SymphonyElixir.Autopilot do
   a pull request's last review run before the cap retires it.
   """
   @spec final_run?(state(), Issue.t(), map()) :: boolean()
-  def final_run?(state, %Issue{kind: :issue, id: id}, autopilot_settings), do: final_attempt?(state, id, autopilot_settings)
+  def final_run?(state, %Issue{kind: :issue} = issue, autopilot_settings), do: final_attempt?(state, delivery_key(issue), autopilot_settings)
 
   def final_run?(state, %Issue{kind: :pull_request, id: id}, autopilot_settings) do
     runs = state.pr_handled |> Map.get(id, %{}) |> Map.get(:runs, 0)
@@ -133,6 +133,35 @@ defmodule SymphonyElixir.Autopilot do
   end
 
   def final_run?(_state, %Issue{}, _autopilot_settings), do: false
+
+  @doc "Stable delivery budget identity, independent of a successor's issue number."
+  @spec delivery_key(Issue.t()) :: String.t()
+  def delivery_key(%Issue{delivery_key: key, id: id}), do: key || id
+
+  @doc "Binds each verified successor budget to one ticket, including across restarts."
+  @spec admit_handoffs(state(), [Issue.t()]) :: {state(), [Issue.t()]}
+  def admit_handoffs(state, issues) do
+    {issues, owners} = Enum.map_reduce(issues, Map.get(state, :handoff_owners, %{}), &admit_handoff_item/2)
+    {Map.put(state, :handoff_owners, owners), issues}
+  end
+
+  defp admit_handoff_item(%Issue{kind: :issue, dispatchable: true, delivery_key: key} = issue, owners)
+       when is_binary(key) do
+    root = key |> String.split(":") |> Enum.at(1)
+    rebound = Enum.any?(owners, fn {bound_key, id} -> id == root or (id == issue.id and bound_key != key) end)
+    owner = Map.get(owners, key, issue.id)
+
+    if rebound,
+      do: {%{issue | dispatchable: false}, owners},
+      else: {%{issue | dispatchable: owner == issue.id}, Map.put(owners, key, owner)}
+  end
+
+  defp admit_handoff_item(%Issue{kind: :issue} = issue, owners) do
+    bound = Enum.any?(owners, fn {key, id} -> id == issue.id and key != issue.delivery_key end)
+    {%{issue | dispatchable: issue.dispatchable and not bound}, owners}
+  end
+
+  defp admit_handoff_item(issue, owners), do: {issue, owners}
 
   defp item_attempts(state), do: Map.get(state, :item_attempts, %{})
 

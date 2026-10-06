@@ -4,7 +4,7 @@ defmodule SymphonyElixir.GitHub.Client do
   """
 
   require Logger
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.{Config, Handoff}
   alias SymphonyElixir.GitHub.ETagCache
   alias SymphonyElixir.Tracker.Issue
 
@@ -581,6 +581,7 @@ defmodule SymphonyElixir.GitHub.Client do
 
   defp fetch_dependencies(issues, tracker_settings, settings, request_fun) do
     required_labels = Map.get(tracker_settings, :required_labels, [])
+    settings = Map.put(settings, :excluded_labels, Map.get(tracker_settings, :excluded_labels, []))
 
     Enum.reduce_while(issues, {:ok, []}, fn issue, {:ok, acc} ->
       case fetch_dependencies_for_issue(issue, required_labels, settings, request_fun) do
@@ -598,10 +599,80 @@ defmodule SymphonyElixir.GitHub.Client do
     if issue.kind == :issue and Issue.routable?(issue, required_labels) and issue.state == "open" do
       with {:ok, blockers} <- fetch_blockers(settings, issue.id, request_fun, 1, []) do
         dispatchable = Enum.all?(blockers, &satisfied_blocker?/1)
-        {:ok, %{issue | blocked_by: blockers, dispatchable: dispatchable}}
+        admit_handoff(%{issue | blocked_by: blockers, dispatchable: dispatchable}, settings, request_fun)
       end
     else
       {:ok, issue}
+    end
+  end
+
+  # Admission only reads tracker evidence. It never rewrites dependencies, closes
+  # successors or touches their PRs; the worker/groomer preserves the disposition.
+  defp admit_handoff(issue, settings, request_fun) do
+    case Handoff.record(issue) do
+      nil ->
+        {:ok, issue}
+
+      :invalid ->
+        {:ok, %{issue | dispatchable: false}}
+
+      %{"owner" => owner} = record ->
+        if Integer.to_string(owner) == issue.id, do: {:ok, issue}, else: verify_handoff(issue, record, settings, request_fun)
+    end
+  end
+
+  defp verify_handoff(issue, record, settings, request_fun) do
+    owner = record["owner"]
+
+    with {:ok, %{"state" => "closed"} = raw_owner} <-
+           request_with_settings("GET", repository_issue_path(settings, owner), %{}, nil, settings, request_fun, true),
+         %Issue{} = canonical <- normalize_issue(raw_owner, settings.repo),
+         ^record <- Handoff.record(canonical),
+         nil <- Issue.excluded_label(canonical, settings.excluded_labels),
+         {:ok, blockers} <- fetch_blockers(settings, Integer.to_string(owner), request_fun, 1, []),
+         true <- dependencies_preserved?(blockers, issue.blocked_by),
+         true <- valid_handoff_evidence?(record, raw_owner, blockers, settings, request_fun) do
+      {:ok, %{issue | delivery_key: Handoff.budget_key(record)}}
+    else
+      _ -> {:ok, %{issue | dispatchable: false}}
+    end
+  end
+
+  defp valid_handoff_evidence?(%{"change" => "partial_delivery", "owner" => owner, "evidence" => number}, raw_owner, _blockers, settings, request_fun) do
+    path = "#{repository_pulls_path(settings)}/#{number}"
+    reference = ~r/^\s*(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+##{owner}\b/im
+
+    case request_with_settings("GET", path, %{}, nil, settings, request_fun, true) do
+      {:ok, %{"merged_at" => at, "body" => body}} when is_binary(at) and is_binary(body) ->
+        Regex.match?(reference, body) and later?(at, raw_owner["created_at"])
+
+      _ ->
+        false
+    end
+  end
+
+  defp valid_handoff_evidence?(%{"change" => "prerequisite", "evidence" => number}, raw_owner, blockers, settings, request_fun) do
+    case request_with_settings("GET", repository_issue_path(settings, number), %{}, nil, settings, request_fun, true) do
+      {:ok, %{"id" => id, "state" => "closed", "state_reason" => "completed", "closed_at" => at}} ->
+        Enum.any?(blockers, &(&1.id == to_string(id) and &1.identifier == "GH-#{number}")) and later?(at, raw_owner["closed_at"])
+
+      _ ->
+        false
+    end
+  end
+
+  defp dependencies_preserved?(canonical, successor) do
+    Enum.all?(canonical, fn blocker ->
+      satisfied_blocker?(blocker) or Enum.any?(successor, &(&1.id == blocker.id))
+    end)
+  end
+
+  defp later?(at, baseline) do
+    with %DateTime{} = at <- parse_datetime(at),
+         %DateTime{} = baseline <- parse_datetime(baseline) do
+      DateTime.compare(at, baseline) == :gt
+    else
+      _ -> false
     end
   end
 

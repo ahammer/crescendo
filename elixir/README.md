@@ -725,3 +725,18 @@ reported aggregate gap. Graceful teardown flushes supported queued events; force
 prevent observation. No new turn or token-usage RPC is used. See [reconciliation and coverage
 limits](../docs/crescendo.md#terminal-thread-usage-reconciliation) before replaying copied native
 records into an offline scratch ledger.
+
+## Canonical final-attempt handoffs (Crescendo extension)
+
+Final-attempt issue prompts append the [canonical handoff contract](../docs/crescendo.md#canonical-final-attempt-handoffs-crescendo-extension). Unchanged outcomes reuse
+one canonical root and its bounded attempt budget. Closed issue attempts and retirement dispositions
+survive polling and restarts; an issue number, diagnostic evidence or unmerged PR grants no renewal.
+Investigations and accepted reduced slices remain possible within the bounded policy.
+
+GitHub admits one successor only after matching authorization records on the closed root and successor,
+verified merged partial delivery or a newly completed native prerequisite. Root plus native proof owns
+the budget; proof replay cannot reset it. Invalid and legacy unproven replacements fail admission closed
+without retiring their PRs or altering evidence, labels, holds or native edges. Required capabilities,
+dependencies and unique source/evidence must survive worker/groomer disposition. A root ends delivered,
+explicitly declined, or retried within policy. Local prompt rollout remains the operator's responsibility;
+the dashboard stays read-only. No arbitrary prose equivalence or historical migration is inferred.

@@ -27,17 +27,23 @@ defmodule SymphonyElixir.PromptBuilder do
       @render_opts
     )
     |> IO.iodata_to_binary()
-    |> append_sections(issue, workflow)
+    |> append_sections(issue, workflow, opts)
   end
 
   # Generated sections follow the template, so repository guidelines and task
   # rules reach every prompt without template edits. Guidelines are plain
   # text, never rendered as a template.
-  defp append_sections(prompt, issue, {:ok, workflow}) do
-    [prompt, deliverables(issue), task_scope(issue), guidelines(workflow)]
+  defp append_sections(prompt, issue, {:ok, workflow}, opts) do
+    [prompt, deliverables(issue), task_scope(issue), guidelines(workflow), handoff(issue, opts)]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n\n")
   end
+
+  defp handoff(%{kind: :issue}, opts) do
+    if Keyword.get(opts, :final_attempt, false), do: SymphonyElixir.Handoff.instructions()
+  end
+
+  defp handoff(_issue, _opts), do: nil
 
   defp guidelines(workflow) do
     case Map.get(workflow.prompt_templates, "guidelines") do
