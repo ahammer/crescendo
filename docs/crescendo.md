@@ -446,6 +446,28 @@ This adds no configuration, control or write endpoint.
 
 There are no write routes.
 
+Five-minute capacity samples retain an `admission` observation from the Governor: `source: governor`,
+`scope: service`, ISO8601 `observed_at`, shared `slots`, Governor-held `busy` slots, `draining`, and
+`research_hold` (public project ID and `reserved`/`running` phase, or null). Project-only and
+non-exclusive research are not global holds. Missing Governors and legacy samples have null
+admission evidence; nothing is backfilled or inferred from worker counts.
+
+Service `usage.samples` carries one whole latest admission observation per bucket, with `observed_by`
+identifying its recording project. Shared slots never sum across projects. `project_samples` retains
+each selected project's independent counts, observation time and admission evidence. Aggregate counts
+have `counts_scope: selected_projects`; `sample_status: partial` makes aggregate numeric counts null
+when a selected project has no sample or its snapshot failed; sparklines omit these partial buckets.
+Filtering never implies service-wide worker occupancy. Bucket `at` is not an observation time:
+compare timestamps before attribution;
+counts and holds from different polls are not one simultaneous fact. Holds show observed state, not
+exact lost execution time or the cause of an older interval.
+
+These fields use the existing latest-poll-per-bucket storage and retention: 48 hours in durable
+Operations DETS, 12 hours in the default projection, and 48 hours with `history=full`. Restart retains
+observations but never reconstructs older holds. Only capacity, public project IDs and phases are
+published; task details and paths are excluded. Dashboard/API remain read-only; admission policy,
+dispatch, fairness, weights, budgets and local configuration are unchanged.
+
 Non-object Codex diagnostics remain in the worker's last-message summary. They do not stop the
 project or free its workers: model/turn bookkeeping and optional notification capture validate
 object envelopes and fields, then continue processing later valid notifications.

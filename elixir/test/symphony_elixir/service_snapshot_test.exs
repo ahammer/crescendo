@@ -226,7 +226,10 @@ defmodule SymphonyElixirWeb.ServiceSnapshotTest do
            ] = ops.daily
 
     assert today.spend_by_model == %{"gpt-6-sol" => 1_000_000}
-    assert ops.samples == [%{at: "2026-09-27T10:00:00Z", running: 2, ready: 4, spend_micro: 2_000_000}]
+    assert [sample] = ops.samples
+    assert %{at: "2026-09-27T10:00:00Z", running: 2, ready: 4, spend_micro: 2_000_000} = sample
+    assert sample.admission == nil
+    assert length(sample.project_samples) == 2
     assert ops.median_run_seconds == %{"issue" => 800, "pull_request" => 300}
     assert [%{project: "metalrain"}, %{project: "nubu3d"}] = Enum.sort_by(ops.images, & &1.project)
 
@@ -238,6 +241,31 @@ defmodule SymphonyElixirWeb.ServiceSnapshotTest do
              %{project: "metalrain", today_usd_micro: 1_000_000, days_usd_micro: 1_000_000},
              %{project: "nubu3d", today_usd_micro: 2_000_000, days_usd_micro: 5}
            ]
+  end
+
+  test "sample capacity is one whole observation and project counts keep their scope" do
+    observation = %{observed_at: "2026-09-27T10:01:00Z", source: "governor", scope: "service", slots: 3, busy: 2, draining: false, research_hold: nil}
+    later = %{observation | observed_at: "2026-09-27T10:02:00Z", busy: 1, draining: true}
+    sample = %{at: "2026-09-27T10:00:00Z", running: 0, ready: 2, admission: observation}
+    first = snapshot(%{operations: operations(%{samples: [sample]})})
+    second = snapshot(%{operations: operations(%{samples: [%{sample | running: 1, admission: later}]})})
+    merged = ServiceSnapshot.merge([{"one", first}, {"two", second}], nil)
+    assert [row] = merged.operations.samples
+    assert row.running == 1
+    assert row.ready == 4
+    assert row.admission == Map.put(later, :observed_by, "two")
+    assert [%{project: "one", running: 0}, %{project: "two", running: 1}] = row.project_samples
+
+    for results <- [[{"one", first}], [{"one", first}, {"two", :timeout}]] do
+      assert [partial] = ServiceSnapshot.merge(results, nil).operations.samples
+      assert partial.ready == if(length(results) == 1, do: 2, else: nil)
+      assert hd(partial.project_samples).ready == 2
+      assert partial.counts_scope == "selected_projects"
+      assert partial.admission == Map.put(observation, :observed_by, "one")
+      assert length(partial.project_samples) == 1
+    end
+
+    assert ServiceSnapshot.merge([], nil).operations.samples == []
   end
 
   test "without a Governor, slots add up and the newest project quota shows" do

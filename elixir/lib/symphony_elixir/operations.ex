@@ -1184,7 +1184,9 @@ defmodule SymphonyElixir.Operations do
     |> Enum.filter(fn {bucket, _sample} -> bucket > newest - window_buckets end)
     |> Enum.sort_by(&elem(&1, 0))
     |> Enum.map(fn {bucket, sample} ->
-      Map.put(sample, :at, DateTime.from_unix!(bucket * @sample_seconds) |> DateTime.to_iso8601())
+      sample
+      |> Map.put_new(:admission, nil)
+      |> Map.put(:at, DateTime.from_unix!(bucket * @sample_seconds) |> DateTime.to_iso8601())
     end)
   end
 

@@ -18,7 +18,7 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
       retrying: tagged(snapshots, :retrying),
       blocked: tagged(snapshots, :blocked),
       codex_totals: snapshots |> Enum.map(fn {_id, snapshot} -> snapshot[:codex_totals] || %{} end) |> sum(),
-      operations: operations(snapshots, opts),
+      operations: operations(snapshots, opts, length(results)),
       operations_error: joined(snapshots, fn snapshot -> snapshot[:operations_error] end),
       upcoming: upcoming(snapshots, governor),
       autopilot: autopilot(snapshots),
@@ -127,7 +127,7 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
     |> Enum.max_by(& &1.observed_at, DateTime, fn -> nil end)
   end
 
-  defp operations(snapshots, opts) do
+  defp operations(snapshots, opts, project_count) do
     ops = for {id, snapshot} <- snapshots, operations = snapshot[:operations], do: {id, operations}
     all = Enum.map(ops, &elem(&1, 1))
 
@@ -143,7 +143,7 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
       by_model: by_model(all),
       activity: activity(ops, opts),
       daily: daily(all),
-      samples: samples(all),
+      samples: samples(ops, project_count),
       median_run_seconds: medians(all),
       by_task: by_task(all),
       images: images(ops),
@@ -251,12 +251,36 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
     |> Enum.sort_by(& &1.date)
   end
 
-  defp samples(all) do
-    all
-    |> Enum.flat_map(&(&1[:samples] || []))
+  # Project counts retain their scope. One whole Governor observation wins;
+  # shared slot counts never add, and observations from different polls never join.
+  defp samples(ops, project_count) do
+    ops
+    |> Enum.flat_map(fn {id, operations} ->
+      Enum.map(operations[:samples] || [], &Map.put(&1, :project, id))
+    end)
     |> Enum.group_by(& &1[:at])
-    |> Enum.map(fn {_at, samples} -> sum(samples) end)
+    |> Enum.map(fn {_at, samples} ->
+      admission =
+        samples
+        |> Enum.filter(&is_map(&1[:admission]))
+        |> Enum.max_by(& &1.admission.observed_at, fn -> nil end)
+
+      complete = length(samples) == project_count
+      counts = samples |> Enum.map(&Map.drop(&1, [:admission, :observed_at, :project])) |> sum()
+
+      counts = if complete, do: counts, else: unknown_counts(counts)
+
+      counts
+      |> Map.put(:counts_scope, "selected_projects")
+      |> Map.put(:sample_status, if(complete, do: "complete", else: "partial"))
+      |> Map.put(:project_samples, samples)
+      |> Map.put(:admission, admission && Map.put(admission.admission, :observed_by, admission.project))
+    end)
     |> Enum.sort_by(&to_string(&1[:at]))
+  end
+
+  defp unknown_counts(counts) do
+    Map.new(counts, fn {key, value} -> {key, if(is_number(value), do: nil, else: value)} end)
   end
 
   defp medians(all) do

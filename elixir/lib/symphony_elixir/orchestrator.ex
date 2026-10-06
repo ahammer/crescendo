@@ -2721,6 +2721,8 @@ defmodule SymphonyElixir.Orchestrator do
     upcoming = upcoming_issues(state)
 
     Operations.record_sample(state.operations, %{
+      observed_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+      admission: Governor.observe(),
       running: map_size(state.running),
       ready: length(upcoming.ready),
       waiting: length(upcoming.waiting),
