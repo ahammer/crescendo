@@ -78,6 +78,61 @@ defmodule SymphonyElixir.GovernorTest do
     assert %{slots: 0, draining: true} = Governor.checkin("a", 0, 1)
   end
 
+  test "capacity observations follow reservation, expiry, research and drain lifecycle", %{service: service, state_root: root} do
+    assert Governor.observe() == nil
+
+    global = %{
+      service
+      | project_list:
+          Enum.map(service.project_list, fn project ->
+            if project.id == "a", do: %{project | research_exclusive: "global"}, else: project
+          end)
+    }
+
+    start_supervised!({Governor, global})
+    Governor.checkin("a", 0, 0)
+    Governor.checkin("b", 0, 0)
+    assert :ok = Governor.acquire("b", "private-task", :issue)
+    assert {:wait, _} = Governor.acquire("a", "research:secret", :research)
+    reserved = Governor.observe()
+    assert %{slots: 2, busy: 1, source: "governor", scope: "service", draining: false} = reserved
+    assert reserved.research_hold == %{project: "a", phase: "reserved"}
+    assert {:ok, _, _} = DateTime.from_iso8601(reserved.observed_at)
+    refute inspect(reserved) =~ "secret"
+    refute inspect(reserved) =~ "private-task"
+    refute inspect(reserved) =~ root
+
+    # Place the real Governor's reservation exactly at the expiry boundary.
+    :sys.replace_state(Governor, fn state ->
+      put_in(state.schedule.reservation.until_ms, System.monotonic_time(:millisecond))
+    end)
+
+    assert Governor.observe().research_hold == nil
+    assert {:wait, _} = Governor.acquire("a", "research:secret", :research)
+    Governor.release("b", "private-task")
+    assert :ok = Governor.acquire("a", "research:secret", :research)
+    assert %{busy: 1, research_hold: %{project: "a", phase: "running"}} = Governor.observe()
+    Governor.release("a", "research:secret")
+    assert %{busy: 0, research_hold: nil} = Governor.observe()
+    assert :ok = Governor.acquire("b", "research:none", :research)
+    assert Governor.observe().research_hold == nil
+    Governor.release("b", "research:none")
+
+    File.mkdir_p!(root)
+    File.write!(Path.join(root, "drain"), "")
+    assert Governor.observe().draining
+    File.rm!(Path.join(root, "drain"))
+    refute Governor.observe().draining
+    stop_supervised!(Governor)
+    assert Governor.observe() == nil
+
+    start_supervised!({Governor, service})
+    Governor.checkin("a", 0, 0)
+    Governor.checkin("b", 0, 0)
+    assert :ok = Governor.acquire("a", "research:project", :research)
+    assert Governor.observe().research_hold == nil
+  end
+
   test "the newest quota is shared and survives a restart", %{service: service, state_root: state_root} do
     start_supervised!({Governor, service})
     newer = quota(75)

@@ -67,6 +67,17 @@ defmodule SymphonyElixir.Governor do
   @spec snapshot() :: map()
   def snapshot, do: GenServer.call(__MODULE__, :snapshot)
 
+  @doc "A credential-free service capacity observation; unavailable Governors remain unknown."
+  @spec observe() :: map() | nil
+  def observe do
+    snapshot()
+    |> Map.take([:observed_at, :slots, :busy, :draining, :research_hold])
+    |> Map.put(:source, "governor")
+    |> Map.put(:scope, "service")
+  catch
+    :exit, _reason -> nil
+  end
+
   @impl true
   def init(service) do
     schedule_probe(0)
@@ -124,6 +135,7 @@ defmodule SymphonyElixir.Governor do
 
     {:reply,
      %{
+       observed_at: DateTime.to_iso8601(now),
        slots: state.schedule.slots,
        busy: Scheduling.used(state.schedule),
        projects: projects,

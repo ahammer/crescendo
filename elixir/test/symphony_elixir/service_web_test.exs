@@ -137,6 +137,22 @@ defmodule SymphonyElixir.ServiceWebTest do
       refute Jason.encode!(state["throttle"]) =~ "research:qa"
     end
 
+    for id <- ["alpha", "beta"] do
+      pid = GenServer.whereis(SymphonyElixir.Project.via(id, :orchestrator))
+      send(pid, :run_poll_cycle)
+      :sys.get_state(pid)
+    end
+
+    recorded = json_response(get(build_conn(), "/api/v1/state?history=full"), 200)
+    sample = List.last(recorded["usage"]["samples"])
+    assert sample["admission"]["slots"] == 2
+    assert sample["admission"]["busy"] == 1
+    assert sample["admission"]["research_hold"] == %{"project" => "beta", "phase" => "reserved"}
+    assert length(sample["project_samples"]) == 2
+    refute Jason.encode!(sample) =~ "research:qa"
+    filtered = json_response(get(build_conn(), "/api/v1/state?project=alpha&history=full"), 200)
+    assert length(List.last(filtered["usage"]["samples"])["project_samples"]) == 1
+
     alpha = GenServer.whereis(SymphonyElixir.Project.via("alpha", :orchestrator))
     :ok = :sys.suspend(alpha)
 
@@ -144,6 +160,9 @@ defmodule SymphonyElixir.ServiceWebTest do
       state = json_response(get(build_conn(), "/api/v1/state"), 200)
       assert state["snapshot_status"] == "partial"
       assert state["counts"]["running"] == nil
+      assert List.last(state["usage"]["samples"])["sample_status"] == "partial"
+      assert List.last(state["usage"]["samples"])["running"] == nil
+      assert state["history"]["running"] == []
       assert dispatch_detail(state) =~ "counts unknown"
       assert dispatch_detail(state) =~ "Service reserved for beta research"
     after

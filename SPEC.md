@@ -1633,6 +1633,19 @@ Minimum endpoints:
     The default summary and dashboard use the newest 100 events and 12 hours of samples.
     History is bounded, not a guaranteed cycle or lifetime record; callers MUST check timestamps
     before treating a window as complete. Daily totals and 14-day task averages keep their existing windows.
+
+    Five-minute samples retain a credential-free Governor `admission` observation: `source: governor`,
+    `scope: service`, ISO8601 `observed_at`, shared `slots`, Governor-held `busy`, `draining`, and
+    `research_hold` (existing public project ID and `reserved`/`running` phase, or null). Project/none
+    research MUST NOT appear as a global hold; unavailable and legacy observations MUST remain null.
+    Service samples MUST select one whole latest observation per bucket with `observed_by` provenance,
+    never sum shared capacity or join different observation times. `project_samples` preserves each
+    selected project's counts and timestamps; aggregate counts have `counts_scope: selected_projects`.
+    Missing selected-project data makes numeric aggregates null (`sample_status: partial`); sparklines
+    omit partial buckets. Bucket `at` is not an observation time. These sampled observations MUST NOT
+    imply exact lost execution time, causality or historical backfill. The existing durable 48-hour
+    retention and public/private filtering apply across restart. No task details, secrets or paths
+    are published; the dashboard/API and admission policy remain unchanged.
   - Suggested response shape:
 
     ```json

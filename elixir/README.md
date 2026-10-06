@@ -494,6 +494,13 @@ The observability UI now runs on a minimal Phoenix stack:
   up to 2,000 events per selected project and 48 hours of five-minute samples. Check the oldest
   timestamps before claiming a complete cycle; daily totals and 14-day task averages keep their
   existing windows. The default API and dashboard show 100 events and 12 hours of samples.
+- Five-minute samples also retain timestamped Governor capacity observations (`admission`), including
+  shared held slots, deployment drains and global research phases. Unavailable and legacy observations
+  stay null. Service history keeps one whole latest observation per bucket and independent
+  `project_samples`; shared slots never sum. Partial buckets have unknown aggregate counts and are
+  omitted from sparklines. Filtered counts describe selected projects only. The existing 48-hour
+  durable retention and read-only/privacy boundaries apply. See the
+  [capacity evidence contract](../docs/crescendo.md#dashboard-and-api) before attributing intervals.
 - Dollar figures compare recorded tokens with standard short-context API prices dated
   September 24, 2026. They are estimates, not actual ChatGPT billing; unknown models remain
   unpriced. Recording starts with the first run after this version is deployed. The dashboard

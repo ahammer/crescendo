@@ -545,7 +545,11 @@ defmodule SymphonyElixirWeb.Presenter do
   # Five-minute samples are folded into 15-minute peaks so a 12-hour sparkline
   # stays readable (48 points).
   defp history_payload(usage) do
-    groups = usage |> Map.get(:samples, []) |> Enum.chunk_every(3)
+    groups =
+      usage
+      |> Map.get(:samples, [])
+      |> Enum.reject(&(&1[:sample_status] == "partial"))
+      |> Enum.chunk_every(3)
 
     for key <- [:running, :ready, :waiting, :attention, :open_prs, :spend_micro], into: %{} do
       {key, Enum.map(groups, fn group -> group |> Enum.map(&Map.get(&1, key, 0)) |> Enum.max() end)}

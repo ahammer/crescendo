@@ -271,6 +271,26 @@ defmodule SymphonyElixir.OperationsTest do
     assert length(recent.samples) == 1
     assert length(history.samples) == 4
     assert Enum.map(history.samples, & &1.at) == Enum.sort(Enum.map(history.samples, & &1.at))
+    assert Enum.all?(history.samples, &is_nil(&1.admission))
+
+    observation = %{
+      source: "governor",
+      scope: "service",
+      observed_at: DateTime.to_iso8601(DateTime.utc_now()),
+      slots: 3,
+      busy: 1,
+      draining: false,
+      research_hold: %{project: "public", phase: "reserved"}
+    }
+
+    Operations.record_sample(table, Map.put(sample, :admission, observation))
+    assert :dets.lookup(table, {:sample, bucket - 576}) == []
+    Operations.close(table)
+    {:ok, table} = Operations.open(path, :operations_history_test)
+    restarted = Operations.snapshot(table, history: true)
+    assert List.last(restarted.samples).admission == observation
+    assert length(restarted.samples) == 4
+    assert hd(restarted.samples).admission == nil
     assert history.daily == recent.daily
     assert %{activity: [], samples: []} = Operations.snapshot(nil, history: true)
   end
