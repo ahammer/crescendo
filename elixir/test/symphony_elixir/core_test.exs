@@ -1362,6 +1362,14 @@ defmodule SymphonyElixir.CoreTest do
     # An issue on its final attempt still runs, so it can deliver or close.
     final = %{state | autopilot: Map.put(state.autopilot, :item_attempts, %{"issue-budget" => 2})}
     assert Orchestrator.should_dispatch_issue_for_test(issue, final)
+
+    # A successor's final attempt belongs to its canonical budget, not its issue number.
+    key = "handoff:123:partial_delivery:456"
+    successor = %{issue | id: "124", delivery_key: key}
+    autopilot = Map.put(state.autopilot, :handoff_owners, %{key => successor.id})
+    refute Orchestrator.should_dispatch_issue_for_test(successor, %{state | autopilot: autopilot})
+    final = %{state | autopilot: Map.put(autopilot, :item_attempts, %{key => 2})}
+    assert Orchestrator.should_dispatch_issue_for_test(successor, final)
   end
 
   test "an issue whose model is backed off with no allowed step waits instead of dispatching" do

@@ -587,6 +587,10 @@ binds it to the first admitted successor; another issue number, wording edit, cl
 replay of the proof cannot renew attempts. Removing a bound successor's record cannot convert it
 to unrelated work. Unrelated issues and PR budgets retain their existing behavior.
 
+Running successors stop if authorization is removed or their proof is rebound. Restoring the original
+authorization continues the same budget. Final-attempt throttling also uses that budget, so a
+successor's last attempt retains the configured exception to the daily spending limit.
+
 Admission is read-only at GitHub: rejected duplicates are not delivery owners and cannot trigger
 blocked-marker consumption, validation workers or retirement (including draft closure). Their
 bodies, PRs, labels and native edges stay intact for grooming to consolidate into the root. Before

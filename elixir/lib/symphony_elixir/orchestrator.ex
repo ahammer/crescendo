@@ -798,7 +798,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         terminate_running_issue(state, issue.id, true)
 
-      !issue_routable?(issue) ->
+      !issue_routable?(issue) or not handoff_owner?(issue, state.autopilot) ->
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
 
         terminate_running_issue(state, issue.id, false)
@@ -2966,7 +2966,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_class(state, %Issue{} = issue) do
     settings = Config.settings!().autopilot
 
-    if settings.enabled and Autopilot.final_attempt?(state.autopilot, issue.id, settings),
+    if settings.enabled and Autopilot.final_attempt?(state.autopilot, Autopilot.delivery_key(issue), settings),
       do: :final_attempt,
       else: :issue
   end
