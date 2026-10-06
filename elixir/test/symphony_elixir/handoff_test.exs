@@ -47,6 +47,24 @@ defmodule SymphonyElixir.HandoffTest do
     assert Enum.filter([a, b], &Issue.routable?(&1, ["crescendo:ready"])) == []
   end
 
+  test "legacy replacements cannot claim their own issue number as a canonical root" do
+    replacement = raw(123, "## Replacement of #122\n" <> marker())
+    assert {:ok, [direct]} = poll([replacement])
+    owner = Map.merge(replacement, %{"state" => "closed", "created_at" => "2026-10-01T00:00:00Z"})
+    proof = %{"merged_at" => "2026-10-02T00:00:00Z", "body" => "Closes #123"}
+    responses = %{"/repos/octo/repo/issues/123" => owner, "/repos/octo/repo/pulls/456" => proof}
+    assert {:ok, [successor]} = poll([raw(124, marker())], responses)
+    assert [direct.dispatchable, successor.dispatchable] == [false, false]
+
+    authorized = marker(%{"owner" => 122})
+    root = raw(122, authorized) |> Map.merge(%{"state" => "closed", "created_at" => "2026-10-01T00:00:00Z"})
+    proof = %{proof | "body" => "Closes #122"}
+    responses = %{"/repos/octo/repo/issues/122" => root, "/repos/octo/repo/pulls/456" => proof}
+    assert {:ok, [verified]} = poll([raw(123, "## Replacement of #122\n" <> authorized)], responses)
+    assert verified.dispatchable
+    assert verified.delivery_key == "handoff:122:partial_delivery:456"
+  end
+
   test "fresh accepted partial delivery gets one budget and proof replay cannot restart it" do
     owner = raw(123, marker()) |> Map.merge(%{"state" => "closed", "created_at" => "2026-10-01T00:00:00Z"})
     proof = %{"merged_at" => "2026-10-02T00:00:00Z", "body" => "Closes #123"}

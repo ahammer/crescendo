@@ -581,7 +581,8 @@ external evidence on that prerequisite; a closed unaccepted prerequisite does no
 
 GitHub validates the record during polling and dispatch refresh, including retry. Missing or
 invalid proof fails admission closed. Legacy Markdown headings naming a `replacement of #N` or
-`remainder from #N` also require the record; ordinary incidental references are unaffected. The
+`remainder from #N` also require the record; such an issue cannot name itself as the canonical owner
+or authorize further successors as a new root. Ordinary incidental references are unaffected. The
 budget is keyed by root, proof kind and native proof number, excluding editable prose. Operations
 binds it to the first admitted successor; another issue number, wording edit, closure, restart or
 replay of the proof cannot renew attempts. Removing a bound successor's record cannot convert it

@@ -3,6 +3,8 @@ defmodule SymphonyElixir.Handoff do
 
   alias SymphonyElixir.Tracker.Issue
 
+  @replacement_heading ~r/^\s*\#+\s+[^\n]*(?:replacement of|remainder from)\s+[^\n]*#\d+/im
+
   @spec instructions() :: String.t()
   def instructions do
     """
@@ -29,9 +31,9 @@ defmodule SymphonyElixir.Handoff do
   end
 
   @spec record(Issue.t()) :: map() | :invalid | nil
-  def record(%Issue{kind: :issue, description: text}) when is_binary(text) do
+  def record(%Issue{kind: :issue, description: text, id: id}) when is_binary(text) do
     case Regex.scan(~r/<!--\s*crescendo:handoff\s+(.*?)\s*-->/s, text) do
-      [[_, json]] -> decode(json)
+      [[_, json]] -> json |> decode() |> validate_owner(id, text)
       [] -> if missing_record?(text), do: :invalid
       _ -> :invalid
     end
@@ -41,8 +43,14 @@ defmodule SymphonyElixir.Handoff do
 
   defp missing_record?(text) do
     Regex.match?(~r/<!--\s*crescendo:handoff\b/, text) or
-      Regex.match?(~r/^\s*\#+\s+[^\n]*(?:replacement of|remainder from)\s+[^\n]*#\d+/im, text)
+      Regex.match?(@replacement_heading, text)
   end
+
+  defp validate_owner(%{"owner" => owner} = record, id, text) do
+    if Integer.to_string(owner) == id and Regex.match?(@replacement_heading, text), do: :invalid, else: record
+  end
+
+  defp validate_owner(record, _id, _text), do: record
 
   defp decode(json) do
     case Jason.decode(json) do

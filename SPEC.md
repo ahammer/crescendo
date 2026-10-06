@@ -2658,3 +2658,5 @@ Required capabilities, dependencies and unique source/evidence must survive work
 A root ends delivered, explicitly declined, or retried within policy. Local prompt rollout remains
 the operator's responsibility; the dashboard stays read-only. No arbitrary prose equivalence or
 historical migration is inferred.
+Legacy replacement headings prevent an issue from declaring itself a canonical root, including
+when its record would otherwise authorize another successor.
