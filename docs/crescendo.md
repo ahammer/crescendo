@@ -585,7 +585,9 @@ invalid proof fails admission closed. Legacy Markdown headings naming a `replace
 or authorize further successors as a new root. Ordinary incidental references are unaffected. The
 budget is keyed by root, proof kind and native proof number, excluding editable prose. Operations
 binds it to the first admitted successor; another issue number, wording edit, closure, restart or
-replay of the proof cannot renew attempts. Removing a bound successor's record cannot convert it
+replay of the proof cannot renew attempts. A held or otherwise unroutable successor cannot reserve
+an unbound proof budget; holding an already bound successor preserves its binding. Worker blocked
+markers still settle against that budget. Removing a bound successor's record cannot convert it
 to unrelated work. Unrelated issues and PR budgets retain their existing behavior.
 
 Running successors stop if authorization is removed or their proof is rebound. Restoring the original

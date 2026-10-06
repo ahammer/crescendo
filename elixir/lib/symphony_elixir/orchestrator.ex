@@ -1261,7 +1261,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp settle_autopilot_items(%State{} = state, issues) do
     settings = Config.settings!().autopilot
 
-    {autopilot, issues} = Autopilot.admit_handoffs(state.autopilot, issues)
+    {autopilot, issues} = Autopilot.admit_handoffs(state.autopilot, issues, settlement_tracker(settings))
     state = put_autopilot(state, autopilot)
 
     if settings.enabled do
@@ -1283,12 +1283,17 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp autopilot_item_status(state, issue, settings) do
-    excluded = List.delete(Config.settings!().tracker.excluded_labels, settings.blocked_label)
-    eligible = Issue.routable?(issue, Config.settings!().tracker.required_labels, excluded)
+    tracker = settlement_tracker(settings)
+    eligible = Issue.routable?(issue, tracker.required_labels, tracker.excluded_labels)
 
     if Map.has_key?(state.running, issue.id) or not Issue.tracker_backed?(issue) or not eligible,
       do: :active,
       else: delivery_item_status(state, issue, settings)
+  end
+
+  defp settlement_tracker(settings) do
+    tracker = Config.settings!().tracker
+    %{tracker | excluded_labels: List.delete(tracker.excluded_labels, settings.blocked_label)}
   end
 
   defp delivery_item_status(state, issue, settings) do

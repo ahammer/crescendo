@@ -964,6 +964,50 @@ defmodule SymphonyElixir.AutopilotTest do
       end
     end
 
+    test "a held successor cannot reserve another successor's verified budget" do
+      write_autopilot_workflow!(max_concurrent_agents: 1)
+      Application.delete_env(:symphony_elixir, :memory_tracker_writes)
+      key = "handoff:123:partial_delivery:456"
+      held = %Issue{id: "124", identifier: "GH-124", title: "Held successor", state: "open", dispatchable: true, delivery_key: key, labels: ["symphony:hold"]}
+      ready = %{held | id: "125", identifier: "GH-125", title: "Ready successor", labels: []}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [held])
+      {pid, _name} = start_orchestrator!()
+      cool_down_research(pid)
+      send(pid, :run_poll_cycle)
+      state = :sys.get_state(pid)
+      assert state.running == %{}
+      assert state.autopilot.handoff_owners == %{}
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [held, ready])
+      send(pid, :run_poll_cycle)
+      state = :sys.get_state(pid)
+      assert Map.keys(state.running) == [ready.id]
+      assert state.autopilot.handoff_owners == %{key => ready.id}
+      assert state.autopilot.item_attempts == %{}
+      assert Application.get_env(:symphony_elixir, :memory_tracker_writes, []) == []
+
+      # Holding an existing owner preserves its binding; unholding the duplicate cannot steal it.
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{held | labels: []}, %{ready | labels: ["symphony:hold"]}])
+      send(pid, :run_poll_cycle)
+      state = :sys.get_state(pid)
+      assert state.running == %{}
+      assert state.autopilot.handoff_owners == %{key => ready.id}
+      assert Application.get_env(:symphony_elixir, :memory_tracker_writes, []) == []
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [ready])
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).running[ready.id].item_attempt == 1
+
+      # A worker's blocked marker still settles against its bound delivery budget.
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{ready | labels: ["symphony:blocked"]}])
+      send(pid, :run_poll_cycle)
+      state = :sys.get_state(pid)
+      assert state.running[ready.id].item_attempt == 2
+      assert state.autopilot.item_attempts == %{key => 1}
+      assert state.autopilot.handoff_owners == %{key => ready.id}
+      assert Application.get_env(:symphony_elixir, :memory_tracker_writes, []) == [{:clear_label, ready.id, "symphony:blocked"}]
+    end
+
     test "held items, rejected successors and dependency owners bypass settlement writes" do
       write_autopilot_workflow!(max_concurrent_agents: 1)
       Application.delete_env(:symphony_elixir, :memory_tracker_writes)

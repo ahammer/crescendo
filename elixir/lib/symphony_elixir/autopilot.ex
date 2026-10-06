@@ -138,10 +138,16 @@ defmodule SymphonyElixir.Autopilot do
   @spec delivery_key(Issue.t()) :: String.t()
   def delivery_key(%Issue{delivery_key: key, id: id}), do: key || id
 
-  @doc "Binds each verified successor budget to one ticket, including across restarts."
-  @spec admit_handoffs(state(), [Issue.t()]) :: {state(), [Issue.t()]}
-  def admit_handoffs(state, issues) do
-    {issues, owners} = Enum.map_reduce(issues, Map.get(state, :handoff_owners, %{}), &admit_handoff_item/2)
+  @doc "Binds each routable verified successor budget to one ticket, including across restarts."
+  @spec admit_handoffs(state(), [Issue.t()], map()) :: {state(), [Issue.t()]}
+  def admit_handoffs(state, issues, tracker \\ %{required_labels: [], excluded_labels: []}) do
+    {issues, owners} =
+      Enum.map_reduce(issues, Map.get(state, :handoff_owners, %{}), fn issue, owners ->
+        if Issue.routable?(issue, tracker.required_labels, tracker.excluded_labels),
+          do: admit_handoff_item(issue, owners),
+          else: {issue, owners}
+      end)
+
     {Map.put(state, :handoff_owners, owners), issues}
   end
 
