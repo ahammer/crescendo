@@ -155,6 +155,15 @@ warning. `ops/bin/deploy-state.py` validates deployment observations independent
 script. Its validation modes read JSON from stdin; its drain mode reads the state API and owns
 only the temporary drain flag and journal. It never restarts the service.
 
+The current service admission holds appear in `throttle.draining` (deployment drain) and
+`throttle.research_hold` (`null` or `{project, phase}`). A global research request waiting for
+idle reports `phase: reserved`; running global research reports `phase: running`. Reservations
+disappear at expiry, and project/none exclusivity does not create a global hold. The dashboard's
+Dispatch health detail explains these holds, including in project filters and partial snapshots.
+Only the already-public project ID is exposed, with no private work or task details. Admission
+policy stays unchanged; intentional holds are informational, and unknown counts remain unknown.
+These read-only current signals do not identify the cause of historical unused capacity.
+
 ## Commands
 
 These change local files, or a project's own repository through your `gh` login, never the

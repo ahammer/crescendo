@@ -534,7 +534,9 @@ defmodule SymphonyElixirWeb.Presenter do
       avoid: throttle.avoid |> Enum.sort() |> Enum.map(fn {model, reason} -> %{model: model, reason: reason} end),
       # A service's shared slots (absent for a single workflow).
       service_slots: throttle[:service_slots],
-      busy: throttle[:busy]
+      busy: throttle[:busy],
+      research_hold: throttle[:research_hold],
+      draining: throttle[:draining]
     }
   end
 
@@ -633,14 +635,22 @@ defmodule SymphonyElixirWeb.Presenter do
         _ -> ""
       end
 
-    check("Dispatch", "warning", "#{slots}Running and queue counts unknown")
+    check("Dispatch", "warning", dispatch_detail(snapshot, "#{slots}Running and queue counts unknown"))
   end
 
   defp dispatch_check(snapshot, settings) do
     max = (settings && settings.agent.max_concurrent_agents) || length(snapshot.running)
     queued = length(get_in(snapshot, [:upcoming, :ready]) || [])
-    check("Dispatch", "healthy", "#{length(snapshot.running)} of #{max} slots busy · #{queued} queued")
+    check("Dispatch", "healthy", dispatch_detail(snapshot, "#{length(snapshot.running)} of #{max} slots busy · #{queued} queued"))
   end
+
+  defp dispatch_detail(snapshot, detail),
+    do: [detail, dispatch_hold(snapshot[:throttle])] |> Enum.reject(&is_nil/1) |> Enum.join(" · ")
+
+  defp dispatch_hold(%{draining: true}), do: "Deployment drain holds new runs"
+  defp dispatch_hold(%{research_hold: %{project: project, phase: "reserved"}}), do: "Service reserved for #{project} research"
+  defp dispatch_hold(%{research_hold: %{project: project, phase: "running"}}), do: "Service held by #{project} research"
+  defp dispatch_hold(_throttle), do: nil
 
   # Holding work back is the throttle doing its job, so only a pause or the
   # budget's closing-only mode is worth a warning.

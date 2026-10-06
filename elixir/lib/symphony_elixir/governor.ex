@@ -128,6 +128,7 @@ defmodule SymphonyElixir.Governor do
        busy: Scheduling.used(state.schedule),
        projects: projects,
        reservation: state.schedule.reservation && state.schedule.reservation.project,
+       research_hold: Scheduling.research_hold(state.schedule, System.monotonic_time(:millisecond)),
        draining: draining?(state),
        spend_micro: total_spend(state),
        quota: state.quota,

@@ -17,7 +17,7 @@ defmodule SymphonyElixir.ServiceWebTest do
       write_workflow_file!(Path.join(dir, "WORKFLOW.md"), tracker_kind: "memory", tracker_excluded_labels: ["hold"])
     end
 
-    File.write!(Path.join(root, "crescendo.yml"), "paths: {state: state}\npool: {slots: 2}\nprojects: {alpha: {weight: 2}, beta: {redact: true}}")
+    File.write!(Path.join(root, "crescendo.yml"), "paths: {state: state}\npool: {slots: 2}\nprojects: {alpha: {weight: 2}, beta: {redact: true, research_exclusive: global}}")
     {:ok, service} = Service.load(Path.join(root, "crescendo.yml"))
 
     # A held issue shows in the queue without starting an agent.
@@ -122,6 +122,57 @@ defmodule SymphonyElixir.ServiceWebTest do
     {:ok, _view, html} = live(build_conn(), "/")
     assert html =~ "Revision unknown"
     refute html =~ "/commit/"
+  end
+
+  test "research reservations, running holds and deployment drains explain service admission" do
+    Governor.checkin("alpha", 0, 1)
+    Governor.checkin("beta", 0, 0)
+    assert :ok = Governor.acquire("alpha", "held-slot", :issue)
+    assert {:wait, "waiting for the service to go idle for research"} = Governor.acquire("beta", "research:qa", :research)
+
+    for query <- ["", "?project=alpha", "?project=beta&history=full"] do
+      state = json_response(get(build_conn(), "/api/v1/state" <> query), 200)
+      assert state["throttle"]["research_hold"] == %{"project" => "beta", "phase" => "reserved"}
+      assert dispatch_detail(state) =~ "Service reserved for beta research"
+      refute Jason.encode!(state["throttle"]) =~ "research:qa"
+    end
+
+    alpha = GenServer.whereis(SymphonyElixir.Project.via("alpha", :orchestrator))
+    :ok = :sys.suspend(alpha)
+
+    try do
+      state = json_response(get(build_conn(), "/api/v1/state"), 200)
+      assert state["snapshot_status"] == "partial"
+      assert state["counts"]["running"] == nil
+      assert dispatch_detail(state) =~ "counts unknown"
+      assert dispatch_detail(state) =~ "Service reserved for beta research"
+    after
+      :ok = :sys.resume(alpha)
+    end
+
+    Governor.release("alpha", "held-slot")
+    assert %{busy: 0} = Governor.snapshot()
+    assert :ok = Governor.acquire("beta", "research:qa", :research)
+    state = json_response(get(build_conn(), "/api/v1/state"), 200)
+    assert state["throttle"]["research_hold"] == %{"project" => "beta", "phase" => "running"}
+    assert dispatch_detail(state) =~ "Service held by beta research"
+    {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ "Service held by beta research"
+
+    Governor.release("beta", "research:qa")
+    assert %{busy: 0} = Governor.snapshot()
+    state = json_response(get(build_conn(), "/api/v1/state"), 200)
+    assert state["throttle"]["research_hold"] == nil
+    refute dispatch_detail(state) =~ "research"
+
+    drain = Path.join(Service.current().state_root, "drain")
+    File.write!(drain, "")
+    state = json_response(get(build_conn(), "/api/v1/state"), 200)
+    assert state["throttle"]["draining"] == true
+    assert dispatch_detail(state) =~ "Deployment drain holds new runs"
+    assert {:wait, "draining for a deploy"} = Governor.acquire("alpha", "next-slot", :issue)
+    File.rm!(drain)
+    assert json_response(get(build_conn(), "/api/v1/state"), 200)["throttle"]["draining"] == false
   end
 
   test "full history includes older work across projects with the usual privacy and filters" do
@@ -264,4 +315,7 @@ defmodule SymphonyElixir.ServiceWebTest do
       true -> Process.sleep(20) && wait_for(check, attempts - 1)
     end
   end
+
+  defp dispatch_detail(state),
+    do: state["health"]["coordinator"]["checks"] |> Enum.find(&(&1["name"] == "Dispatch")) |> Map.fetch!("detail")
 end

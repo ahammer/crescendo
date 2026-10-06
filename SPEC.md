@@ -1477,6 +1477,14 @@ A successful subsequent read clears the warning. Deployment drain and health val
 reject partial, filtered, or unknown project state and unknown Governor-held slot counts before
 treating an observation as safe.
 
+Service snapshots MUST also expose the Governor's current admission holds in `throttle`:
+`draining` is the deployment drain flag; `research_hold` is `null` or a map with the public
+project ID and `phase` (`reserved` while global research waits for idle, `running` while it holds
+the service). Expired reservations and research with project/none exclusivity MUST NOT appear
+as global holds. Dispatch health details show the hold, including in filtered and partial views,
+without inferring unknown counts or treating intentional admission policy as a health failure.
+These are current read-only signals, not historical attribution or dispatch controls.
+
 Crescendo routine deployments MUST bound a busy drain (default five minutes) and leave a dispatch
 pause (default thirty minutes) before another busy drain, including superseding candidates. An
 idle service MAY bypass the pause but MUST recheck after acquiring the hold. Retry deadlines and

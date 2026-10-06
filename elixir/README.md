@@ -531,6 +531,11 @@ The observability UI now runs on a minimal Phoenix stack:
   to `null`, and show an incomplete warning and unknown counts instead of idle/free slots.
   Health warns on incompleteness; dispatch can still report Governor-held service slots without
   inventing running or queue counts. The next successful snapshot clears the warning.
+  Service `throttle.draining` reports the deployment drain flag; `throttle.research_hold` is
+  `null` or `{project, phase}` for a current global research reservation (`reserved`) or running
+  hold (`running`). Expired reservations and project/none research are excluded. Dispatch health
+  details explain these holds in full, filtered and partial views without changing admission,
+  private-work redaction or unknown counts. These current signals do not backfill history.
   Deployment validators reject partial, filtered, or unknown project observations and unknown
   Governor-held slot counts. Routine deployment drains wait at most five minutes, then leave at
   least thirty minutes for dispatch before retrying busy work; newer candidates share the pause.
