@@ -458,7 +458,7 @@ defmodule SymphonyElixir.Operations do
           updated_at: updated_at,
           closed_at: observation.closed_at,
           labels: issue.labels,
-          handoff: retained_handoff(previous, issue),
+          handoff: retained_handoff(table, previous, issue),
           prefix: prefix,
           evidence_source: observation.evidence_source,
           observed_at: DateTime.to_iso8601(DateTime.utc_now())
@@ -475,8 +475,22 @@ defmodule SymphonyElixir.Operations do
     end)
   end
 
-  defp retained_handoff(%{handoff: %{} = handoff}, _issue), do: handoff
-  defp retained_handoff(_previous, issue), do: SymphonyElixir.Handoff.record(issue)
+  defp retained_handoff(_table, %{handoff: %{} = handoff}, _issue), do: handoff
+
+  defp retained_handoff(table, _previous, issue) do
+    dispatched =
+      :dets.match_object(table, {{:lineage_run, :_}, :_})
+      |> Enum.filter(fn {_, run} ->
+        run[:issue_id] == issue.id and run[:kind] == :issue and
+          run[:delivery_tracking] == true and is_map(run[:handoff])
+      end)
+      |> Enum.min_by(fn {{:lineage_run, id}, run} -> {run.started_s, id} end, fn -> nil end)
+
+    case dispatched do
+      {_, run} -> run.handoff
+      nil -> SymphonyElixir.Handoff.record(issue)
+    end
+  end
 
   defp newer_evidence?(nil, nil), do: false
   defp newer_evidence?(_new, nil), do: true

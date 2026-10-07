@@ -266,6 +266,55 @@ defmodule SymphonyElixir.OperationsTest do
     assert Enum.all?(association.sources, &is_nil(&1.run_id))
   end
 
+  test "dispatch handoffs survive removal before the first delivery observation and restart" do
+    alias SymphonyElixir.{Handoff, Tracker.Issue}
+    path = Path.join(System.tmp_dir!(), "dispatch-handoff-#{System.unique_integer([:positive])}.dets")
+    table = :dispatch_handoff_delivery_test
+
+    on_exit(fn ->
+      Operations.close(table)
+      File.rm(path)
+    end)
+
+    {:ok, ^table} = Operations.open(path, table)
+
+    for {id, owner, change, disposition} <- [
+          {"1", 1, "prerequisite", "repository_reported_completion"},
+          {"2", 99, "partial_delivery", "accepted_reduced_scope"}
+        ] do
+      record = %{"owner" => owner, "change" => change, "evidence" => 3, "scope" => "accepted slice; unmet remainder"}
+      original = %Issue{id: id, identifier: "GH-#{id}", description: "<!-- crescendo:handoff #{Jason.encode!(record)} -->"}
+      run_id = "worker-#{id}"
+
+      Operations.start_run(table, run_id, %{
+        issue_id: id,
+        issue_identifier: original.identifier,
+        kind: :issue,
+        delivery_key: if(to_string(owner) == id, do: nil, else: Handoff.budget_key(record)),
+        handoff: Handoff.record(original)
+      })
+
+      at = DateTime.to_iso8601(DateTime.utc_now())
+      if id == "2", do: Operations.finish_run(table, run_id, "completed", %{})
+      Operations.close(table)
+      {:ok, ^table} = Operations.open(path, table)
+
+      closed = %{original | description: nil, state: "closed", state_reason: "completed", updated_at: DateTime.utc_now()}
+      source = %{pr_number: 3, status: "merged", head_sha: "head", merge_commit_sha: "merge", merged_at: at, created_at: at}
+      observation = %{issue: closed, closed_at: at, sources: [source], evidence_source: "github"}
+      Operations.observe_delivery(table, observation, "crescendo")
+
+      association = Enum.find(Operations.snapshot(table).delivery_metrics.issue_associations, &(&1.issue_id == id))
+      assert association.canonical_owner == to_string(owner)
+      assert association.handoff == record
+      assert association.disposition == disposition
+      refute association.canonical_outcome_complete
+      assert [%{run_id: ^run_id}] = association.sources
+      # Scope text belongs to delivery lineage, not public dispatch or restart activity.
+      refute Enum.any?(Operations.snapshot(table).activity, &Map.has_key?(&1, :handoff))
+    end
+  end
+
   test "delivery evidence expires with retained attempts and ambiguous workers stay unknown" do
     alias SymphonyElixir.Tracker.Issue
     path = Path.join(System.tmp_dir!(), "delivery-retention-#{System.unique_integer([:positive])}.dets")

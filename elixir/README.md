@@ -135,8 +135,10 @@ Issue worker delivery evidence survives completion and restart in Operations' re
 `usage.delivery_metrics.issue_associations` exposes explicit worker-owned sources, merge SHAs,
 tracker observations, attempts and canonical outcome ownership. Reduced scope and retirement stay
 distinct from repository-reported completion; missing proof stays unknown. Source creation must
-identify a unique retained worker attempt. Historical unknown acceptance is not backfilled, and
-helper coverage remains unknown, so verified cost and latency stay null. See
+identify a unique retained worker attempt. Canonical handoffs captured at dispatch survive tracker
+edits before the first delivery observation, including removal of the record.
+Historical unknown acceptance is not backfilled, and helper coverage remains unknown, so verified
+cost and latency stay null. See
 [retained delivery evidence](../docs/crescendo.md#retained-issue-delivery-evidence) for the contract.
 
 `developer_instructions` appends explicitly reviewed service-owned rules to existing configured

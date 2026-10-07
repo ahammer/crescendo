@@ -938,17 +938,34 @@ defmodule SymphonyElixir.AutopilotTest do
       write_autopilot_workflow!(max_concurrent_agents: 1)
       Application.delete_env(:symphony_elixir, :memory_tracker_writes)
       key = "handoff:123:partial_delivery:456"
-      issue = %Issue{id: "124", identifier: "GH-124", title: "Successor", state: "open", dispatchable: true, delivery_key: key}
+      record = %{"owner" => 123, "change" => "partial_delivery", "evidence" => 456, "scope" => "accepted slice; unmet remainder"}
+
+      issue = %Issue{
+        id: "124",
+        identifier: "GH-124",
+        title: "Successor",
+        state: "open",
+        dispatchable: true,
+        delivery_key: key,
+        description: "<!-- crescendo:handoff #{Jason.encode!(record)} -->"
+      }
+
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
-      {pid, _name} = start_orchestrator!()
+      path = Path.join(Path.dirname(Workflow.workflow_file_path()), "handoff.dets")
+      {pid, _name} = start_orchestrator!(operations_path: path, operations_table: :autopilot_handoff_delivery_test)
       cool_down_research(pid)
       :sys.replace_state(pid, fn state -> %{state | autopilot: Map.put(state.autopilot, :item_attempts, %{key => 2})} end)
       send(pid, :run_poll_cycle)
+      state = :sys.get_state(pid)
+
+      assert [{_, %{handoff: ^record, delivery_key: ^key}}] =
+               :dets.lookup(state.operations, {:lineage_run, state.running[issue.id].run_id})
 
       for edited_key <- [nil, "handoff:123:partial_delivery:999"] do
         entry = :sys.get_state(pid).running[issue.id]
         assert entry.issue.delivery_key == key
-        Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | delivery_key: edited_key}])
+        edited = %{issue | delivery_key: edited_key, description: nil}
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, [edited])
         send(pid, :run_poll_cycle)
         state = :sys.get_state(pid)
         assert state.running == %{}

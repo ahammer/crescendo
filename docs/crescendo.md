@@ -594,6 +594,8 @@ and PR observations. Ownership requires an explicit closing directive, a same-re
 branch (`crescendo/<number>-...`, `symphony/<number>-...` or `issue-<number>-...`) and PR creation
 during a unique retained worker attempt. Titles and incidental references provide no ownership proof.
 The original source/run association stays fixed across later review, merge, reopen and redispatch.
+Canonical handoffs are captured at worker dispatch and survive tracker edits before the first
+delivery observation, including removal of the handoff record.
 
 The projection retains tracker observations, source and merge SHAs, evidence sources and timestamps,
 attempts and canonical handoff ownership. Duplicate observations are idempotent; older tracker or
