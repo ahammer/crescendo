@@ -704,10 +704,12 @@ Ordinary notifications drain during RPC waits; tool/approval requests use their
 normal handlers, and terminal/input events and startup cumulative usage remain in the bounded
 control queue (4 MiB / 1,024 entries). Codex 0.160.0 generated schema excerpts are checked in under
 `test/fixtures/codex-0.160.0-output-schema.json`. Diagnostic copies of supported text deltas,
-agent message text and command `aggregatedOutput` retain at most 16 KiB per field with an explicit
-truncation marker; raw diagnostic copies are also bounded. Executed commands, tool arguments,
-RPC results, usage, model reroutes and terminal status are never truncated. Existing dashboard
-transcript entry/output limits still apply.
+agent message text, command `aggregatedOutput`, notification command text (including
+`commandActions` copies), file-change diffs and turn-level aggregated diffs retain at most 16 KiB
+per field with an explicit truncation marker; raw diagnostic copies are also bounded. Only passive
+notification copies are shortened: executable tool/approval requests retain their original commands
+and arguments. RPC results, usage, model reroutes, item identity/status and terminal status are never
+truncated. Existing dashboard transcript entry/output limits still apply.
 
 A frame over 16 MiB, a response or irreducible control payload over 4 MiB, or saturation of the
 control queue fails closed. Overflow diagnostics record the guard, observed bytes/count, phase,
