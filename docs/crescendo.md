@@ -583,6 +583,36 @@ stale events, compaction estimates, restart, redispatch, resumed-thread fencing 
 Separately launched helper/reviewer threads remain unobserved (`helper_usage_coverage: unknown`);
 recorded parent-thread estimates must not be described as complete whole-project cost.
 
+
+## Retained issue delivery evidence
+
+Issue delivery associations are retained in the existing Operations lineage and exposed read-only
+as `usage.delivery_metrics.issue_associations` (with project tags in service snapshots). The GitHub
+inventory task follows prospectively tracked issue workers throughout retained run history, even
+after completion, reconciliation or restart. Each inventory refresh rotates through at most ten
+retained issue scopes, so delivery reconciliation cannot sweep every historical scope each minute.
+It reads paginated issue cross-reference timelines
+and PR observations. Ownership requires an explicit closing directive, a same-repository worker
+branch (`crescendo/<number>-...`, `symphony/<number>-...` or `issue-<number>-...`) and PR creation
+during a unique retained worker attempt. Titles and incidental references provide no ownership proof.
+The original source/run association stays fixed across later review, merge, reopen and redispatch.
+Canonical handoffs and split scope are captured at worker dispatch and terminal reconciliation.
+Scope observed while a worker was active survives tracker edits before the first delivery
+observation, including removal of the handoff record or split label.
+Malformed handoff evidence retained from closure keeps acceptance unknown after marker removal.
+
+The projection retains tracker observations, source and merge SHAs, evidence sources and timestamps,
+attempts and canonical handoff ownership. Duplicate observations are idempotent; older tracker or
+source timestamps cannot replace newer evidence. Completion with an owned merged source is
+`repository_reported_completion`; proven split/handoff scope is `accepted_reduced_scope`, never
+completion of the broader canonical outcome. Not-planned closure is `retirement`; closure without
+proof is `unknown_acceptance`. Reopen is `open` and preserves earlier observations and sources.
+These are repository-reported associations, not independently verified acceptance. Missing proof
+and helper usage remain explicit. Verified delivery count, cost and latency stay null, and unknown
+historical runs are not backfilled into accepted deliveries. Associations expire with the retained 90-day worker history; private-project associations are
+removed from the public projection. No public mutation control or local configuration change is
+introduced.
+
 ## Canonical final-attempt handoffs (Crescendo extension)
 
 An issue number is a dispatch identity, not authorization for a new outcome budget. Final-attempt

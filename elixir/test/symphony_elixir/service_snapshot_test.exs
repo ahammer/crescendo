@@ -49,7 +49,12 @@ defmodule SymphonyElixirWeb.ServiceSnapshotTest do
               estimated_credits_micros: 100,
               estimated_usd_micros: nil
             },
-            delivery_metrics: %{runs_recorded: 1, accepted_delivery_cost: nil}
+            delivery_metrics: %{
+              runs_recorded: 1,
+              accepted_delivery_cost: nil,
+              # Associations preserve unknown proof through the service projection.
+              issue_associations: [%{issue_identifier: "GH-1", disposition: "unknown_acceptance", verified_cost: nil}]
+            }
           })
       })
 
@@ -80,6 +85,7 @@ defmodule SymphonyElixirWeb.ServiceSnapshotTest do
 
     assert usage.cost_basis == "api_equivalent_estimate"
     assert usage.delivery_metrics.accepted_delivery_cost == nil
+    assert [%{project: "one", issue_identifier: "GH-1", verified_cost: nil}] = usage.delivery_metrics.issue_associations
     assert ServiceSnapshot.merge([{"one", first}], nil).operations.account_usage.coverage == "complete"
     assert ServiceSnapshot.merge([], nil).operations.account_usage.estimated_credits_micros == nil
   end

@@ -216,6 +216,12 @@ defmodule SymphonyElixir.GitHub.Client do
        %{
          status: if(payload["merged_at"], do: "merged", else: payload["state"] || "unknown"),
          head_sha: get_in(payload, ["head", "sha"]),
+         head_ref: get_in(payload, ["head", "ref"]),
+         head_repo: get_in(payload, ["head", "repo", "full_name"]),
+         body: payload["body"],
+         draft: payload["draft"] == true,
+         created_at: payload["created_at"],
+         updated_at: payload["updated_at"],
          merged_at: payload["merged_at"],
          merge_commit_sha: payload["merge_commit_sha"],
          author: get_in(payload, ["user", "login"]),
@@ -223,6 +229,74 @@ defmodule SymphonyElixir.GitHub.Client do
          pr_url: payload["html_url"]
        }}
     end
+  end
+
+  @doc "Reads explicit worker source and tracker disposition evidence; mentions and titles are not ownership."
+  @spec fetch_delivery_observation(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def fetch_delivery_observation(id, opts \\ []) do
+    tracker = Keyword.get_lazy(opts, :tracker_settings, fn -> Config.settings!().tracker end)
+    request_fun = Keyword.get(opts, :request_fun, &perform_request/5)
+
+    with {:ok, settings} <- settings(tracker),
+         {:ok, raw} when is_map(raw) <- delivery_issue(settings, request_fun, id),
+         {:ok, timeline} <- delivery_timeline(settings, request_fun, id, 1, []),
+         {:ok, sources} <- delivery_sources(timeline, settings, request_fun, id) do
+      issue = normalize_issue(raw, settings.repo)
+      {:ok, %{issue: issue, closed_at: raw["closed_at"], sources: sources, evidence_source: "github_issue_and_cross_reference"}}
+    else
+      {:ok, _} -> {:error, :github_unknown_payload}
+      error -> error
+    end
+  end
+
+  defp delivery_issue(settings, request_fun, id) do
+    request_with_settings("GET", repository_issue_path(settings, id), %{}, nil, settings, request_fun, true)
+  end
+
+  defp delivery_timeline(settings, request_fun, id, page, acc) do
+    path = "#{repository_issue_path(settings, id)}/timeline"
+
+    case request_with_settings("GET", path, %{"per_page" => @page_size, "page" => page}, nil, settings, request_fun, false) do
+      {:ok, events} when is_list(events) and length(events) == @page_size ->
+        delivery_timeline(settings, request_fun, id, page + 1, acc ++ events)
+
+      {:ok, events} when is_list(events) ->
+        {:ok, acc ++ events}
+
+      {:ok, _} ->
+        {:error, :github_unknown_payload}
+
+      error ->
+        error
+    end
+  end
+
+  defp delivery_sources(timeline, settings, request_fun, id) do
+    timeline
+    |> Enum.flat_map(fn event ->
+      source = get_in(event, ["source", "issue"]) || %{}
+
+      if event["event"] == "cross-referenced" and is_map(source["pull_request"]) and
+           get_in(source, ["repository", "full_name"]) == settings.repo, do: [source["number"]], else: []
+    end)
+    |> Enum.uniq()
+    |> Enum.reduce_while({:ok, []}, fn number, {:ok, acc} ->
+      opts = [tracker_settings: %{provider: %{"repo" => settings.repo, "token" => settings.token, "api_url" => settings.api_url}}, request_fun: request_fun]
+
+      case fetch_pull_observation(number, opts) do
+        {:ok, source} -> {:cont, {:ok, if(owned_delivery_source?(source, id, settings.repo), do: [source | acc], else: acc)}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp owned_delivery_source?(source, id, repo) do
+    number = Regex.escape(id)
+    closes = ~r/^\s*(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+##{number}\b/im
+    branch = ~r/^(?:(?:crescendo|symphony)\/#{number}-|(?:.*\/)?issue-#{number}(?:-|$))/
+
+    source[:head_repo] == repo and Regex.match?(closes, source[:body] || "") and
+      Regex.match?(branch, source[:head_ref] || "")
   end
 
   @doc false

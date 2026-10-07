@@ -40,7 +40,14 @@ defmodule SymphonyElixirWeb.Redaction do
       |> update_in([:pull_requests, :items], &scrub.(&1, fn pull -> pull(pull) end))
       |> update_in([:usage, :activity], &scrub.(&1, fn event -> Map.drop(event, [:summary, :title, :startup, :run_id, :worker_pid]) end))
       |> update_in([:usage, :images], &drop_projects(&1, redacted))
+      |> update_in([:usage], &redact_deliveries(&1, redacted))
     end
+  end
+
+  defp redact_deliveries(usage, redacted) do
+    Map.update(usage, :delivery_metrics, %{}, fn metrics ->
+      Map.update(metrics, :issue_associations, [], &drop_projects(&1, redacted))
+    end)
   end
 
   # A private project's pictures would show its work, so they are dropped outright.

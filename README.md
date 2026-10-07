@@ -21,6 +21,7 @@ implements its [specification](SPEC.md). On top of the Symphony reference implem
   Dispatch details show global research reservations, running holds and deployment drains.
 - **Thread usage accounting** that reconciles late terminal events and survives worker restarts,
   with native billing coverage and conservative, opt-in issue-thread resumption.
+  Retained issue delivery evidence links explicit worker sources and tracker dispositions.
   API estimates remain distinct from verified costs.
   See the [token-cache plan and rollout gates](elixir/docs/token_cache_optimization_plan.md).
 

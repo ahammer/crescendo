@@ -50,6 +50,18 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
     end
   end
 
+  defmodule DeliveryGitHubClient do
+    alias SymphonyElixir.GitHub.Client
+    def fetch_issues_by_states(_), do: {:ok, []}
+    def fetch_issues_by_ids(_), do: {:ok, []}
+    def fetch_open_pull_requests, do: {:ok, []}
+
+    def fetch_delivery_observation(id) do
+      {tracker, request} = Agent.get(__MODULE__, & &1)
+      Client.fetch_delivery_observation(id, tracker_settings: tracker, request_fun: request)
+    end
+  end
+
   setup do
     github_client_module = Application.get_env(:symphony_elixir, :github_client_module)
 
@@ -787,6 +799,141 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
              get_in(snapshot, [:pull_requests, :items]) == [expected_pull] and
                get_in(snapshot, [:upcoming, :waiting]) == [expected_issue]
            end)
+  end
+
+  test "retained issue workers reconcile explicit merged sources and closure through OTP after restart" do
+    alias SymphonyElixir.Operations
+    path = Path.join(System.tmp_dir!(), "delivery-#{System.unique_integer([:positive])}.dets")
+    table = :github_delivery_test
+
+    on_exit(fn ->
+      Operations.close(table)
+      File.rm(path)
+    end)
+
+    {:ok, ^table} = Operations.open(path, table)
+    Operations.start_run(table, "original", %{issue_id: "42", issue_identifier: "GH-42", kind: :issue, item_attempt: 1})
+    created_at = DateTime.to_iso8601(DateTime.utc_now())
+    Operations.finish_run(table, "original", "completed", %{})
+
+    for number <- 100..109 do
+      id = to_string(number)
+      Operations.start_run(table, id, %{issue_id: id, issue_identifier: "GH-#{id}", kind: :issue})
+      Operations.finish_run(table, id, "completed", %{})
+    end
+
+    Operations.close(table)
+
+    at = DateTime.utc_now() |> DateTime.add(1) |> DateTime.to_iso8601()
+    issue = Map.merge(raw_issue(42), %{"state" => "closed", "state_reason" => "completed", "closed_at" => at, "updated_at" => at})
+
+    pull =
+      raw_pull(12, "OWNER", "octo/repo", %{
+        "head" => %{"sha" => "owned-head", "ref" => "crescendo/42-water", "repo" => %{"full_name" => "octo/repo"}},
+        "body" => "Closes #42",
+        "created_at" => created_at,
+        "updated_at" => at,
+        "merged_at" => at,
+        "merge_commit_sha" => "merged-source",
+        "state" => "closed"
+      })
+
+    request = fn "GET", endpoint, _params, nil, _settings ->
+      body =
+        case endpoint do
+          "/repos/octo/repo/issues/42" -> issue
+          "/repos/octo/repo/issues/42/timeline" -> [delivery_reference(12), delivery_reference(12), delivery_reference(13)]
+          "/repos/octo/repo/pulls/12" -> pull
+          "/repos/octo/repo/pulls/13" -> Map.put(pull, "body", "Depends on #42")
+          _ -> nil
+        end
+
+      {:ok, %{status: 200, body: body}}
+    end
+
+    agent_start = {Agent, :start_link, [fn -> {tracker_settings(), request} end, [name: DeliveryGitHubClient]]}
+    start_supervised!(%{id: DeliveryGitHubClient, start: agent_start})
+    write_github_workflow!(Workflow.workflow_file_path(), "test-token")
+    Application.put_env(:symphony_elixir, :github_client_module, DeliveryGitHubClient)
+    supervisor = Module.concat(__MODULE__, :DeliverySupervisor)
+    orchestrator = Module.concat(__MODULE__, :DeliveryOrchestrator)
+    start_supervised!({Task.Supervisor, name: supervisor})
+    opts = [name: orchestrator, task_supervisor: supervisor, operations_path: path, operations_table: table]
+    start_supervised!({Orchestrator, opts})
+
+    assert Enum.any?(1..40, fn _ ->
+             state = :sys.get_state(orchestrator)
+             if is_nil(state.pulls_observed_at), do: Process.sleep(25)
+             state.pulls_observed_at != nil
+           end)
+
+    assert :sys.get_state(orchestrator).delivery_cursor == 10
+    assert Orchestrator.snapshot(orchestrator, 5_000).operations.delivery_metrics.issue_associations == []
+    :sys.replace_state(orchestrator, &%{&1 | next_pulls_due_at_ms: System.monotonic_time(:millisecond)})
+    send(orchestrator, :run_poll_cycle)
+
+    assert Enum.any?(1..40, fn _ ->
+             associations = Orchestrator.snapshot(orchestrator, 5_000).operations.delivery_metrics.issue_associations
+             if associations == [], do: Process.sleep(25)
+             associations != []
+           end)
+
+    association = hd(Orchestrator.snapshot(orchestrator, 5_000).operations.delivery_metrics.issue_associations)
+    assert association.disposition == "repository_reported_completion"
+    assert association.canonical_outcome_complete
+    assert [%{run_id: "original", head_sha: "owned-head", merge_commit_sha: "merged-source"}] = association.sources
+    assert [%{run_id: "original", status: "completed", item_attempt: 1}] = association.attempts
+    assert association.helper_usage_coverage == "unknown"
+    assert association.verified_cost == nil
+    assert association.verified_latency == nil
+    assert association.closed_at == at
+  end
+
+  test "delivery evidence reads paginate timelines and preserve errors instead of manufacturing proof" do
+    raw = raw_issue(42)
+    reference = delivery_reference(12)
+    pull = raw_pull(12, "OWNER", "octo/repo", %{"body" => "Fixes #42", "head" => %{"ref" => "issue-42-water", "repo" => %{"full_name" => "octo/repo"}}})
+
+    request = fn "GET", path, params, nil, _ ->
+      body =
+        case path do
+          "/repos/octo/repo/issues/42" -> raw
+          "/repos/octo/repo/issues/42/timeline" -> if(params["page"] == 1, do: List.duplicate(reference, 100), else: [])
+          "/repos/octo/repo/pulls/12" -> pull
+        end
+
+      {:ok, %{status: 200, body: body}}
+    end
+
+    opts = [tracker_settings: tracker_settings(), request_fun: request]
+    assert {:ok, %{sources: [%{pr_number: 12}]}} = GitHubClient.fetch_delivery_observation("42", opts)
+
+    for failure <- [{:error, :unavailable}, {:ok, %{status: 200, body: []}}] do
+      bad = fn "GET", _, _, nil, _ -> failure end
+      assert {:error, _} = GitHubClient.fetch_delivery_observation("42", Keyword.put(opts, :request_fun, bad))
+    end
+
+    for endpoint <- ["timeline", "pulls/12"], response <- [{:error, :unavailable}, {:ok, %{status: 200, body: nil}}] do
+      bad = fn method, path, params, body, settings ->
+        if String.ends_with?(path, endpoint), do: response, else: request.(method, path, params, body, settings)
+      end
+
+      assert {:error, _} = GitHubClient.fetch_delivery_observation("42", Keyword.put(opts, :request_fun, bad))
+    end
+
+    assert {:ok, %{sources: []}} =
+             GitHubClient.fetch_delivery_observation(
+               "42",
+               Keyword.put(opts, :request_fun, fn method, path, params, body, settings ->
+                 if String.ends_with?(path, "timeline"),
+                   do: {:ok, %{status: 200, body: [%{"event" => "commented"}]}},
+                   else: request.(method, path, params, body, settings)
+               end)
+             )
+  end
+
+  defp delivery_reference(number) do
+    %{"event" => "cross-referenced", "source" => %{"issue" => %{"number" => number, "pull_request" => %{}, "repository" => %{"full_name" => "octo/repo"}}}}
   end
 
   defp tracker_settings(provider_overrides \\ %{}) do
