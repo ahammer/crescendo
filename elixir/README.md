@@ -138,6 +138,7 @@ distinct from repository-reported completion; missing proof stays unknown. Sourc
 identify a unique retained worker attempt. Canonical handoffs and split scope captured at dispatch
 or terminal reconciliation survive tracker edits before the first delivery observation, including
 removal of the record or label.
+Malformed handoff evidence retained from closure keeps acceptance unknown after marker removal.
 Historical unknown acceptance is not backfilled, and helper coverage remains unknown, so verified
 cost and latency stay null. See
 [retained delivery evidence](../docs/crescendo.md#retained-issue-delivery-evidence) for the contract.

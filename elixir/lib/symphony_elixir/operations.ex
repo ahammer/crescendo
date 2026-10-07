@@ -497,7 +497,7 @@ defmodule SymphonyElixir.Operations do
   defp retained_handoff(runs, previous, issue) do
     dispatched =
       runs
-      |> Enum.filter(fn {_, run} -> is_map(run[:handoff]) end)
+      |> Enum.filter(fn {_, run} -> is_map(run[:handoff]) or run[:handoff] == :invalid end)
       |> Enum.min_by(fn {{:lineage_run, id}, run} -> {run.started_s, id} end, fn -> nil end)
 
     case dispatched do

@@ -1431,6 +1431,7 @@ The original source/run association stays fixed across later review, merge, reop
 Canonical handoffs and split scope are captured at worker dispatch and terminal reconciliation.
 Scope observed while a worker was active survives tracker edits before the first delivery
 observation, including removal of the handoff record or split label.
+Malformed handoff evidence retained from closure keeps acceptance unknown after marker removal.
 
 The projection retains tracker observations, source and merge SHAs, evidence sources and timestamps,
 attempts and canonical handoff ownership. Duplicate observations are idempotent; older tracker or

@@ -357,7 +357,9 @@ defmodule SymphonyElixir.OperationsTest do
 
     for {id, labels, description, disposition} <- [
           {"1", ["#{prefix}:delivery:split"], nil, "accepted_reduced_scope"},
-          {"2", [], ~s(<!-- crescendo:handoff {"owner":2,"change":"prerequisite","evidence":3,"scope":"accepted slice; unmet remainder"} -->), "repository_reported_completion"}
+          {"2", [], ~s(<!-- crescendo:handoff {"owner":2,"change":"prerequisite","evidence":3,"scope":"accepted slice; unmet remainder"} -->), "repository_reported_completion"},
+          {"3", [], "<!-- crescendo:handoff {} -->", "unknown_acceptance"},
+          {"4", [], "<!-- crescendo:handoff {} -->", "unknown_acceptance"}
         ] do
       run_id = "worker-#{id}"
       Operations.start_run(table, run_id, %{issue_id: id, issue_identifier: "GH-#{id}", kind: :issue})
@@ -377,13 +379,13 @@ defmodule SymphonyElixir.OperationsTest do
       edited = %{terminal | labels: [], description: nil}
       observation = %{issue: edited, sources: [source], closed_at: at, evidence_source: "github"}
       # Existing inventory evidence must also be corrected without requiring a successful newer read.
-      if id == "2", do: Operations.observe_delivery(table, observation, prefix)
+      if id in ["2", "4"], do: Operations.observe_delivery(table, observation, prefix)
       Operations.disposition(table, Map.from_struct(terminal), prefix)
       Operations.finish_run(table, run_id, "stopped", %{})
       Operations.close(table)
       {:ok, ^table} = Operations.open(path, table)
 
-      if id == "2" do
+      if id in ["2", "4"] do
         retained = Enum.find(Operations.snapshot(table).delivery_metrics.issue_associations, &(&1.issue_id == id))
         assert retained.handoff == Handoff.record(terminal)
         refute retained.canonical_outcome_complete
@@ -395,6 +397,7 @@ defmodule SymphonyElixir.OperationsTest do
       association = Enum.find(Operations.snapshot(table).delivery_metrics.issue_associations, &(&1.issue_id == id))
       assert association.disposition == disposition
       assert association.handoff == Handoff.record(terminal)
+      assert association.acceptance_proof == if(disposition == "unknown_acceptance", do: "incomplete", else: "repository_reported")
       refute association.canonical_outcome_complete
       assert [%{run_id: ^run_id}] = association.sources
       assert [%{run_id: ^run_id, status: "stopped"}] = association.attempts
