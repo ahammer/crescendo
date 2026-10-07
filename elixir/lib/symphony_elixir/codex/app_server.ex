@@ -1475,6 +1475,9 @@ defmodule SymphonyElixir.Codex.AppServer do
     update_in(payload, ["params", "delta"], &bound_text/1)
   end
 
+  defp bound_output(payload, "turn/diff/updated"),
+    do: update_in(payload, ["params", "diff"], &bound_text/1)
+
   defp bound_output(payload, method) when method in ["item/started", "item/completed"] do
     update_in(payload, ["params", "item"], &bound_item/1)
   end
@@ -1485,13 +1488,22 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp bound_output(payload, _method), do: payload
 
-  defp bound_item(%{"type" => "commandExecution"} = item),
-    do: Map.update(item, "aggregatedOutput", nil, &bound_text/1)
+  defp bound_item(%{"type" => "commandExecution"} = item) do
+    item
+    |> Map.update("aggregatedOutput", nil, &bound_text/1)
+    |> Map.update("command", nil, &bound_text/1)
+    |> Map.update("commandActions", [], &bound_copies(&1, "command"))
+  end
+
+  defp bound_item(%{"type" => "fileChange"} = item),
+    do: Map.update(item, "changes", [], &bound_copies(&1, "diff"))
 
   defp bound_item(%{"type" => "agentMessage"} = item),
     do: Map.update(item, "text", nil, &bound_text/1)
 
   defp bound_item(item), do: item
+
+  defp bound_copies(entries, field), do: Enum.map(entries, &Map.update(&1, field, nil, fn text -> bound_text(text) end))
 
   defp bound_text(text) when is_binary(text) and byte_size(text) > @output_limit do
     prefix = text |> binary_part(0, @output_limit - 128) |> String.replace_invalid() |> :binary.copy()

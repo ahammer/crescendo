@@ -316,6 +316,16 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     end
 
     assert schema["CommandExecutionThreadItem"]["properties"]["aggregatedOutput"]["type"] == ["string", "null"]
+    assert schema["CommandExecutionThreadItem"]["properties"]["command"]["type"] == "string"
+    assert schema["CommandExecutionThreadItem"]["properties"]["commandActions"]["type"] == "array"
+
+    for action <- schema["CommandAction"]["oneOf"] do
+      assert action["properties"]["command"]["type"] == "string"
+    end
+
+    assert schema["FileChangeThreadItem"]["properties"]["changes"]["type"] == "array"
+    assert schema["FileUpdateChange"]["properties"]["diff"]["type"] == "string"
+    assert schema["TurnDiffUpdatedNotification"]["properties"]["diff"]["type"] == "string"
     assert schema["AgentMessageThreadItem"]["properties"]["text"]["type"] == "string"
     assert schema["DynamicToolCallParams"]["properties"]["arguments"] == true
   end
@@ -370,6 +380,77 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     assert output =~ "8240419 bytes"
     assert_receive {:single, %{event: :turn_completed}}
     refute_receive {:single, %{event: :turn_completed}}
+  end
+
+  test "large command and diff notifications preserve actions, usage and completion around the RPC response" do
+    fixture = native_fixture()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: Path.join(fixture.root, "workspaces"),
+      codex_command: "python3 #{Path.join(fixture.root, "server.py")}",
+      codex_approval_policy: "never"
+    )
+
+    parent = self()
+    handler = fn message -> send(parent, {:copies, message}) end
+
+    for response_first <- [false, true] do
+      change_fixture(fixture, %{"diagnostic_bytes" => 4_800_000, "response_first" => response_first, "tool_before_response" => true})
+
+      executor = fn "fixture", arguments ->
+        send(parent, {:original_arguments, arguments})
+        %{"success" => true, "output" => "done"}
+      end
+
+      assert {:ok, session} = AppServer.start_session(fixture.workspace)
+
+      try do
+        assert {:ok, _} = AppServer.run_turn(session, "task", fixture.issue, on_message: handler, tool_executor: executor)
+
+        for method <- ["item/started", "item/completed"] do
+          assert_receive {:copies, %{payload: %{"method" => ^method, "params" => %{"item" => command}}, raw: raw}}
+          assert command["type"] == "commandExecution"
+          assert command["exitCode"] == 2
+          assert command["status"] == "failed"
+          assert command["aggregatedOutput"] == "argument list too long"
+          assert [%{"type" => "unknown", "command" => action}] = command["commandActions"]
+
+          for copy <- [command["command"], action, raw] do
+            assert byte_size(copy) <= 16_384
+            assert copy =~ "output truncated"
+            assert String.valid?(copy)
+            assert :binary.referenced_byte_size(copy) == byte_size(copy)
+          end
+
+          assert_receive {:copies, %{payload: %{"method" => ^method, "params" => %{"item" => change}}}}
+          assert change["status"] == "completed"
+          assert [%{"path" => "evidence.json", "kind" => %{"type" => "add"}, "diff" => diff}] = change["changes"]
+          assert byte_size(diff) <= 16_384
+          assert diff =~ "4800000 bytes"
+        end
+
+        assert_receive {:copies, %{payload: %{"method" => "turn/diff/updated", "params" => %{"diff" => diff}}}}
+        assert byte_size(diff) <= 16_384
+        assert diff =~ "4800000 bytes"
+        assert_receive {:original_arguments, %{"original" => original}}
+        assert original == String.duplicate("x", 20_000)
+        refute_receive {:original_arguments, _}
+        assert_receive {:copies, %{payload: %{"method" => "thread/tokenUsage/updated"}} = usage}
+        assert Usage.snapshot(usage).total.total_tokens == 120
+
+        assert_receive {:copies, %{event: :turn_completed, payload: %{"params" => %{"turn" => turn}}}}
+        assert turn["status"] == "completed"
+        assert [command, change] = turn["items"]
+        assert command["exitCode"] == 2
+        assert byte_size(command["command"]) <= 16_384
+        assert byte_size(hd(command["commandActions"])["command"]) <= 16_384
+        assert byte_size(hd(change["changes"])["diff"]) <= 16_384
+        assert Process.get({session.port, :pending_bytes}, 0) == 0
+        refute_receive {:copies, %{event: :turn_completed}}
+      after
+        AppServer.stop_session(session)
+      end
+    end
   end
 
   test "slow partial frames cannot indefinitely reset the turn reader deadline" do
@@ -1074,6 +1155,7 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
             turn = 'turn-'+str(state['turns'])
             state['last_turn'] = turn
             result = {'turn':{'id':turn}}
+            items = []
             if cfg.get('response_first'): emit({'id':request['id'],'result':result})
             for n in range(cfg.get('output_burst',0)):
                 emit({'method':'item/commandExecution/outputDelta','params':{'threadId':thread,'turnId':turn,'itemId':'cmd','delta':'log'}})
@@ -1081,6 +1163,16 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
                 emit({'method':'item/commandExecution/outputDelta','params':{'threadId':thread,'turnId':turn,'itemId':'cmd','delta':'x'*cfg['output_bytes']}})
                 item = {'type':'commandExecution','id':'cmd','command':'echo original '+('x'*128),'cwd':workspace,'status':'completed','commandActions':[],'exitCode':0,'durationMs':1,'aggregatedOutput':'x'*cfg['output_bytes']}
                 emit({'method':'item/completed','params':{'threadId':thread,'turnId':turn,'completedAtMs':100,'item':item}})
+                items.append(item)
+            if cfg.get('diagnostic_bytes'):
+                text = 'x'*cfg['diagnostic_bytes']
+                command = {'type':'commandExecution','id':'large-command','command':text,'cwd':workspace,'status':'failed','commandActions':[{'type':'unknown','command':text}],'exitCode':2,'durationMs':1,'aggregatedOutput':'argument list too long'}
+                change = {'type':'fileChange','id':'large-change','status':'completed','changes':[{'path':'evidence.json','kind':{'type':'add'},'diff':text}]}
+                items.extend([command, change])
+                for notification in ('item/started','item/completed'):
+                    for item in (command, change):
+                        emit({'method':notification,'params':{'threadId':thread,'turnId':turn,'item':item}})
+                emit({'method':'turn/diff/updated','params':{'threadId':thread,'turnId':turn,'diff':text}})
             if cfg.get('tool_before_response'):
                 arguments = {'original':'x'*20000}
                 emit({'id':'call','method':'item/tool/call','params':{'threadId':thread,'turnId':turn,'callId':'call','tool':'fixture','arguments':arguments}})
@@ -1097,7 +1189,7 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
                 emit({'method':'model/rerouted','params':{'threadId':thread,'turnId':turn,'fromModel':'resolved-model','toModel':cfg['rerouted_model'],'reason':'highRiskCyberActivity'}})
             emit(usage(thread, state))
             emit({'method':'turn/completed','params':{'threadId':'foreign','turn':{'id':'foreign','items':[],'status':'completed'}}})
-            emit({'method':'turn/completed','params':{'threadId':thread,'turn':{'id':turn,'items':[item] if cfg.get('output_bytes') else [],'status':cfg.get('terminal_status','completed')}}})
+            emit({'method':'turn/completed','params':{'threadId':thread,'turn':{'id':turn,'items':items,'status':cfg.get('terminal_status','completed')}}})
         elif method == 'account/usage/read':
             if cfg.get('teardown_usage'):
                 state.setdefault('usage', {})[thread] = {'inputTokens':200, 'cachedInputTokens':160, 'outputTokens':40, 'reasoningOutputTokens':0, 'totalTokens':240}
