@@ -1651,6 +1651,7 @@ defmodule SymphonyElixir.Orchestrator do
           kind: issue.kind,
           delivery_key: issue.delivery_key,
           handoff: Handoff.record(issue),
+          reduced_scope: "#{Config.settings!().labels.prefix}:delivery:split" in issue.labels,
           review_head: entry.dispatched_head,
           requested_route: entry.route,
           item_attempt: item_attempt,

@@ -264,6 +264,33 @@ defmodule SymphonyElixir.OperationsTest do
     [association] = Operations.snapshot(table).delivery_metrics.issue_associations
     assert association.disposition == "unknown_acceptance"
     assert Enum.all?(association.sources, &is_nil(&1.run_id))
+
+    at = DateTime.to_iso8601(DateTime.utc_now())
+
+    invalid = %Issue{
+      id: "1",
+      identifier: "GH-1",
+      state: "closed",
+      state_reason: "completed",
+      updated_at: DateTime.utc_now(),
+      description: "<!-- crescendo:handoff {} -->"
+    }
+
+    source = %{
+      pr_number: System.unique_integer([:positive]),
+      status: "merged",
+      head_sha: "head",
+      merge_commit_sha: "merge",
+      created_at: at,
+      merged_at: at
+    }
+
+    Operations.observe_delivery(table, %{issue: invalid, sources: [source], closed_at: at, evidence_source: "github"}, "crescendo")
+    [association] = Operations.snapshot(table).delivery_metrics.issue_associations
+    assert Enum.any?(association.sources, &(&1.run_id == "new"))
+    assert association.handoff == :invalid
+    assert association.disposition == "unknown_acceptance"
+    refute association.canonical_outcome_complete
   end
 
   test "dispatch handoffs survive removal before the first delivery observation and restart" do
@@ -312,6 +339,67 @@ defmodule SymphonyElixir.OperationsTest do
       assert [%{run_id: ^run_id}] = association.sources
       # Scope text belongs to delivery lineage, not public dispatch or restart activity.
       refute Enum.any?(Operations.snapshot(table).activity, &Map.has_key?(&1, :handoff))
+    end
+  end
+
+  test "terminal reconciliation retains newly observed scope before inventory and restart" do
+    alias SymphonyElixir.{Handoff, Tracker.Issue}
+    path = Path.join(System.tmp_dir!(), "terminal-scope-#{System.unique_integer([:positive])}.dets")
+    table = :terminal_scope_delivery_test
+    prefix = "custom"
+
+    on_exit(fn ->
+      Operations.close(table)
+      File.rm(path)
+    end)
+
+    {:ok, ^table} = Operations.open(path, table)
+
+    for {id, labels, description, disposition} <- [
+          {"1", ["#{prefix}:delivery:split"], nil, "accepted_reduced_scope"},
+          {"2", [], ~s(<!-- crescendo:handoff {"owner":2,"change":"prerequisite","evidence":3,"scope":"accepted slice; unmet remainder"} -->), "repository_reported_completion"}
+        ] do
+      run_id = "worker-#{id}"
+      Operations.start_run(table, run_id, %{issue_id: id, issue_identifier: "GH-#{id}", kind: :issue})
+      at = DateTime.to_iso8601(DateTime.utc_now())
+
+      terminal = %Issue{
+        id: id,
+        identifier: "GH-#{id}",
+        state: "closed",
+        state_reason: "completed",
+        labels: labels,
+        description: description,
+        updated_at: DateTime.utc_now()
+      }
+
+      source = %{pr_number: 3, status: "merged", head_sha: "head", merge_commit_sha: "merge", created_at: at, merged_at: at}
+      edited = %{terminal | labels: [], description: nil}
+      observation = %{issue: edited, sources: [source], closed_at: at, evidence_source: "github"}
+      # Existing inventory evidence must also be corrected without requiring a successful newer read.
+      if id == "2", do: Operations.observe_delivery(table, observation, prefix)
+      Operations.disposition(table, Map.from_struct(terminal), prefix)
+      Operations.finish_run(table, run_id, "stopped", %{})
+      Operations.close(table)
+      {:ok, ^table} = Operations.open(path, table)
+
+      if id == "2" do
+        retained = Enum.find(Operations.snapshot(table).delivery_metrics.issue_associations, &(&1.issue_id == id))
+        assert retained.handoff == Handoff.record(terminal)
+        refute retained.canonical_outcome_complete
+      end
+
+      Operations.disposition(table, Map.from_struct(edited), prefix)
+      Operations.observe_delivery(table, observation, prefix)
+
+      association = Enum.find(Operations.snapshot(table).delivery_metrics.issue_associations, &(&1.issue_id == id))
+      assert association.disposition == disposition
+      assert association.handoff == Handoff.record(terminal)
+      refute association.canonical_outcome_complete
+      assert [%{run_id: ^run_id}] = association.sources
+      assert [%{run_id: ^run_id, status: "stopped"}] = association.attempts
+      assert association.verified_cost == nil
+      assert association.verified_latency == nil
     end
   end
 

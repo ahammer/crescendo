@@ -834,9 +834,15 @@ defmodule SymphonyElixir.AutopilotTest do
       second = :sys.get_state(pid).running["1"]
       assert second.item_attempt == 2
       Operations.usage(:autopilot_facts_test, second.run_id, "gpt-6-sol", %{input_tokens: 1_000_000}, "GH-1")
-      Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | state: "closed", labels: ["symphony:delivery:split"]}])
+      record = %{"owner" => 1, "change" => "prerequisite", "evidence" => 3, "scope" => "accepted slice; unmet remainder"}
+      terminal = %{issue | state: "closed", labels: ["symphony:delivery:split"], description: "<!-- crescendo:handoff #{Jason.encode!(record)} -->"}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [terminal])
       send(pid, :run_poll_cycle)
       assert :sys.get_state(pid).running == %{}
+
+      assert [{_, %{handoff: ^record, reduced_scope: true}}] =
+               :dets.lookup(:autopilot_facts_test, {:lineage_run, second.run_id})
+
       operations = Orchestrator.snapshot(name, 5_000).operations
       assert %{completed: 1, stopped: 1, blocked_attempts: 1, accepted_deliveries: 1} = List.last(operations.daily)
       assert operations.recorded.usd_micro == 1_000_000
@@ -947,6 +953,7 @@ defmodule SymphonyElixir.AutopilotTest do
         state: "open",
         dispatchable: true,
         delivery_key: key,
+        labels: ["symphony:delivery:split"],
         description: "<!-- crescendo:handoff #{Jason.encode!(record)} -->"
       }
 
@@ -958,7 +965,7 @@ defmodule SymphonyElixir.AutopilotTest do
       send(pid, :run_poll_cycle)
       state = :sys.get_state(pid)
 
-      assert [{_, %{handoff: ^record, delivery_key: ^key}}] =
+      assert [{_, %{handoff: ^record, delivery_key: ^key, reduced_scope: true}}] =
                :dets.lookup(state.operations, {:lineage_run, state.running[issue.id].run_id})
 
       for edited_key <- [nil, "handoff:123:partial_delivery:999"] do

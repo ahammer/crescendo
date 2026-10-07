@@ -2,7 +2,7 @@ defmodule SymphonyElixir.Operations do
   @moduledoc "Durable, bounded operational history for the web dashboard."
 
   require Logger
-  alias SymphonyElixir.Codex.Usage
+  alias SymphonyElixir.{Codex.Usage, Handoff, Tracker.Issue}
 
   @table :symphony_operations
   @event_limit 2_000
@@ -442,13 +442,15 @@ defmodule SymphonyElixir.Operations do
   @spec observe_delivery(handle(), map(), String.t()) :: :ok
   def observe_delivery(nil, _observation, _prefix), do: :ok
 
-  def observe_delivery(table, %{issue: %SymphonyElixir.Tracker.Issue{} = issue} = observation, prefix) do
+  def observe_delivery(table, %{issue: %Issue{} = issue} = observation, prefix) do
     safe_write(fn ->
       key = {:lineage_evidence, "issue", issue.id}
       previous = lookup(table, key, %{})
       updated_at = if issue.updated_at, do: DateTime.to_iso8601(issue.updated_at)
 
       if previous == %{} or newer_evidence?(updated_at, previous[:updated_at]) do
+        scope = retained_delivery_scope(delivery_runs(table, issue.id), previous, issue)
+
         value = %{
           issue_id: issue.id,
           issue_identifier: issue.identifier,
@@ -458,13 +460,13 @@ defmodule SymphonyElixir.Operations do
           updated_at: updated_at,
           closed_at: observation.closed_at,
           labels: issue.labels,
-          handoff: retained_handoff(table, previous, issue),
+          handoff: scope.handoff,
           prefix: prefix,
           evidence_source: observation.evidence_source,
           observed_at: DateTime.to_iso8601(DateTime.utc_now())
         }
 
-        value = Map.put(value, :reduced_scope, previous[:reduced_scope] == true or reduced_delivery?(value))
+        value = Map.put(value, :reduced_scope, previous[:reduced_scope] == true or scope.reduced_scope or reduced_delivery?(value))
         history = Map.take(value, [:state, :state_reason, :updated_at, :closed_at, :handoff, :reduced_scope, :evidence_source, :observed_at])
         value = Map.put(value, :tracker_observations, (previous[:tracker_observations] || []) ++ [history])
         :ok = :dets.insert(table, {key, value})
@@ -475,20 +477,32 @@ defmodule SymphonyElixir.Operations do
     end)
   end
 
-  defp retained_handoff(_table, %{handoff: %{} = handoff}, _issue), do: handoff
+  defp delivery_runs(table, issue_id) do
+    for {_, run} = entry <- :dets.match_object(table, {{:lineage_run, :_}, :_}),
+        run[:issue_id] == issue_id and run[:kind] == :issue,
+        do: entry
+  end
 
-  defp retained_handoff(table, _previous, issue) do
+  defp retained_delivery_scope(runs, previous, issue) do
+    runs = Enum.filter(runs, fn {_, run} -> run[:delivery_tracking] == true end)
+
+    %{
+      handoff: retained_handoff(runs, previous, issue),
+      reduced_scope: Enum.any?(runs, fn {_, run} -> run[:reduced_scope] == true end)
+    }
+  end
+
+  defp retained_handoff(_runs, %{handoff: %{} = handoff}, _issue), do: handoff
+
+  defp retained_handoff(runs, previous, issue) do
     dispatched =
-      :dets.match_object(table, {{:lineage_run, :_}, :_})
-      |> Enum.filter(fn {_, run} ->
-        run[:issue_id] == issue.id and run[:kind] == :issue and
-          run[:delivery_tracking] == true and is_map(run[:handoff])
-      end)
+      runs
+      |> Enum.filter(fn {_, run} -> is_map(run[:handoff]) end)
       |> Enum.min_by(fn {{:lineage_run, id}, run} -> {run.started_s, id} end, fn -> nil end)
 
     case dispatched do
       {_, run} -> run.handoff
-      nil -> SymphonyElixir.Handoff.record(issue)
+      nil -> Handoff.record(issue) || previous[:handoff]
     end
   end
 
@@ -546,9 +560,13 @@ defmodule SymphonyElixir.Operations do
       for {_, source} <- :dets.match_object(table, {{:lineage_evidence, "issue_source", {issue.issue_id, :_}}, :_}),
           do: source
 
-    runs =
-      for {{:lineage_run, id}, run} <- :dets.match_object(table, {{:lineage_run, :_}, :_}),
-          run[:issue_id] == issue.issue_id and run[:kind] == :issue,
+    runs = delivery_runs(table, issue.issue_id)
+    scope = retained_delivery_scope(runs, issue, %Issue{id: issue.issue_id})
+    issue = %{issue | handoff: scope.handoff}
+    issue = %{issue | reduced_scope: issue.reduced_scope or scope.reduced_scope or reduced_delivery?(issue)}
+
+    attempts =
+      for {{:lineage_run, id}, run} <- runs,
           do: Map.put(Map.take(run, [:item_attempt, :status, :started_s, :finished_s, :delivery_key]), :run_id, id)
 
     proven = is_binary(issue.closed_at) and Enum.any?(sources, &merged_worker_source?/1)
@@ -561,7 +579,7 @@ defmodule SymphonyElixir.Operations do
       canonical_owner: canonical_owner,
       disposition: disposition,
       sources: Enum.sort_by(sources, & &1.pr_number),
-      attempts: Enum.sort_by(runs, &{&1.started_s, &1.run_id}),
+      attempts: Enum.sort_by(attempts, &{&1.started_s, &1.run_id}),
       helper_usage_coverage: "unknown",
       acceptance_proof: if(disposition in ["accepted_reduced_scope", "repository_reported_completion"], do: "repository_reported", else: "incomplete"),
       canonical_outcome_complete: disposition == "repository_reported_completion" and is_nil(issue.handoff),
@@ -858,6 +876,8 @@ defmodule SymphonyElixir.Operations do
   @doc "Records a terminal item's scoped disposition; ordinary closure is unknown acceptance."
   @spec disposition(handle(), map(), String.t()) :: :ok
   def disposition(table, issue, prefix \\ "crescendo") do
+    retain_terminal_delivery_scope(table, issue, prefix)
+
     disposition =
       cond do
         issue[:state_reason] == "not_planned" -> "retirement"
@@ -872,6 +892,22 @@ defmodule SymphonyElixir.Operations do
       disposition: disposition,
       summary: "Terminal item: #{disposition}"
     })
+  end
+
+  defp retain_terminal_delivery_scope(nil, _issue, _prefix), do: :ok
+
+  defp retain_terminal_delivery_scope(table, issue, prefix) do
+    safe_write(fn ->
+      with %{run_id: id} <- lookup(table, {:item_run, issue.identifier}, nil),
+           %{kind: :issue, delivery_tracking: true} = run <- lookup(table, {:lineage_run, id}, nil),
+           true <- run[:issue_id] == issue[:id] do
+        handoff = retained_handoff([], run, struct(Issue, issue))
+        scope = %{handoff: handoff, labels: issue.labels, prefix: prefix}
+        scope = %{handoff: handoff, reduced_scope: run[:reduced_scope] == true or reduced_delivery?(scope)}
+        :ok = :dets.insert(table, {{:lineage_run, id}, Map.merge(run, scope)})
+        :ok = :dets.sync(table)
+      end
+    end)
   end
 
   defp correlate_item(table, kind, details) do
