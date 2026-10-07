@@ -136,6 +136,218 @@ defmodule SymphonyElixir.OperationsTest do
     assert List.last(Operations.snapshot(table).daily).blocked_attempts == 1
   end
 
+  test "delivery associations preserve attempts, unknowns and canonical remainder through stale replay and reopen" do
+    alias SymphonyElixir.Tracker.Issue
+    path = Path.join(System.tmp_dir!(), "delivery-facts-#{System.unique_integer([:positive])}.dets")
+    table = :delivery_facts_test
+
+    on_exit(fn ->
+      Operations.close(table)
+      File.rm(path)
+    end)
+
+    {:ok, ^table} = Operations.open(path, table)
+    assert Operations.delivery_issue_ids(nil) == []
+    assert :ok = Operations.observe_delivery(nil, %{}, "crescendo")
+    Operations.start_run(table, "one", %{issue_id: "1", issue_identifier: "GH-1", kind: :issue, item_attempt: 1})
+    created = DateTime.utc_now() |> DateTime.to_iso8601()
+    Operations.finish_run(table, "one", "completed", %{})
+
+    issue = %Issue{
+      id: "1",
+      identifier: "GH-1",
+      state: "closed",
+      state_reason: "completed",
+      updated_at: ~U[2026-10-07 08:00:00Z]
+    }
+
+    source = %{
+      pr_number: 2,
+      pr_url: nil,
+      head_sha: "first",
+      status: "open",
+      draft: true,
+      # Source creation ties ownership to the completed worker, not the delayed observation.
+      created_at: created,
+      updated_at: "2026-10-07T08:00:00Z",
+      merged_at: nil,
+      merge_commit_sha: nil
+    }
+
+    observe = fn item, sources ->
+      Operations.observe_delivery(table, %{issue: item, closed_at: "2026-10-07T08:00:00Z", sources: sources, evidence_source: "github_issue_and_cross_reference"}, "crescendo")
+    end
+
+    observe.(issue, [source])
+    association = fn -> hd(Operations.snapshot(table).delivery_metrics.issue_associations) end
+    assert association.().disposition == "unknown_acceptance"
+    refute association.().canonical_outcome_complete
+    Operations.close(table)
+    {:ok, ^table} = Operations.open(path, table)
+    merged = %{source | status: "merged", draft: false, head_sha: "delivered", updated_at: "2026-10-07T09:00:00Z", merged_at: "2026-10-07T09:00:00Z", merge_commit_sha: "merge"}
+    observe.(issue, [merged])
+    observe.(issue, [source])
+    observe.(issue, [merged])
+    assert [%{run_id: "one", head_sha: "delivered"}] = association.().sources
+    assert association.().disposition == "repository_reported_completion"
+    assert length(association.().tracker_observations) == 1
+    reopened = %{issue | state: "open", state_reason: nil, updated_at: ~U[2026-10-07 10:00:00Z]}
+    observe.(reopened, [])
+    observe.(issue, [])
+    assert association.().disposition == "open"
+    assert length(association.().sources) == 1
+    assert length(association.().tracker_observations) == 2
+    Operations.start_run(table, "two", %{issue_id: "1", issue_identifier: "GH-1", kind: :issue, item_attempt: 2})
+    Operations.finish_run(table, "two", "stopped", %{})
+    split = %{issue | updated_at: ~U[2026-10-07 11:00:00Z], labels: ["crescendo:delivery:split"]}
+    observe.(split, [])
+    assert association.().disposition == "accepted_reduced_scope"
+    refute association.().canonical_outcome_complete
+    assert length(association.().attempts) == 2
+    assert hd(association.().sources).run_id == "one"
+    retired = %{split | updated_at: ~U[2026-10-07 12:00:00Z], state_reason: "not_planned"}
+    observe.(retired, [])
+    assert association.().disposition == "retirement"
+    refute association.().canonical_outcome_complete
+    assert association.().acceptance_proof == "incomplete"
+    handoff = ~s(<!-- crescendo:handoff {"owner":99,"change":"partial_delivery","evidence":2,"scope":"slice; remainder open"} -->)
+    successor = %{issue | updated_at: ~U[2026-10-07 13:00:00Z], description: handoff}
+    observe.(successor, [])
+    assert association.().canonical_owner == "99"
+    assert association.().disposition == "accepted_reduced_scope"
+    refute association.().canonical_outcome_complete
+    observe.(%{issue | updated_at: ~U[2026-10-07 14:00:00Z]}, [])
+    assert association.().canonical_owner == "99"
+    assert association.().helper_usage_coverage == "unknown"
+    assert association.().verified_cost == nil
+    assert association.().verified_latency == nil
+    assert Operations.snapshot(table).delivery_metrics.verified_deliveries == nil
+  end
+
+  test "historical and outside-worker sources never gain accepted lineage" do
+    alias SymphonyElixir.Tracker.Issue
+    path = Path.join(System.tmp_dir!(), "unknown-delivery-#{System.unique_integer([:positive])}.dets")
+    table = :unknown_delivery_test
+
+    on_exit(fn ->
+      Operations.close(table)
+      File.rm(path)
+    end)
+
+    {:ok, ^table} = Operations.open(path, table)
+    Operations.start_run(table, "new", %{issue_id: "1", issue_identifier: "GH-1", kind: :issue})
+    :dets.insert(table, {{:lineage_run, "historical"}, %{issue_id: "2", kind: :issue, started_s: 0}})
+    assert Operations.delivery_issue_ids(table) == ["1"]
+
+    for created <- [nil, "2020-01-01T00:00:00Z", "2099-01-01T00:00:00Z"] do
+      issue = %Issue{
+        id: "1",
+        identifier: "GH-1",
+        state: "closed",
+        state_reason: "completed",
+        updated_at: DateTime.utc_now()
+      }
+
+      source = %{
+        pr_number: System.unique_integer([:positive]),
+        status: "merged",
+        head_sha: "head",
+        merge_commit_sha: "merge",
+        # Invalid/outside-worker creation cannot establish original run ownership.
+        merged_at: "2026-10-07T00:00:00Z",
+        created_at: created
+      }
+
+      Operations.observe_delivery(table, %{issue: issue, sources: [source], closed_at: nil, evidence_source: "github"}, "crescendo")
+    end
+
+    [association] = Operations.snapshot(table).delivery_metrics.issue_associations
+    assert association.disposition == "unknown_acceptance"
+    assert Enum.all?(association.sources, &is_nil(&1.run_id))
+  end
+
+  test "delivery evidence expires with retained attempts and ambiguous workers stay unknown" do
+    alias SymphonyElixir.Tracker.Issue
+    path = Path.join(System.tmp_dir!(), "delivery-retention-#{System.unique_integer([:positive])}.dets")
+    table = :delivery_retention_test
+
+    on_exit(fn ->
+      Operations.close(table)
+      File.rm(path)
+    end)
+
+    {:ok, ^table} = Operations.open(path, table)
+
+    for id <- ["first", "ambiguous"] do
+      Operations.start_run(table, id, %{issue_id: "1", issue_identifier: "GH-1", kind: :issue})
+    end
+
+    issue = %Issue{id: "1", identifier: "GH-1", state: "closed", state_reason: "completed"}
+
+    source = %{
+      pr_number: 2,
+      head_sha: "head",
+      merge_commit_sha: "merge",
+      status: "merged",
+      merged_at: "2026-10-07T00:00:00Z",
+      # Both retained worker windows contain this source: there is no unique owner.
+      created_at: DateTime.to_iso8601(DateTime.utc_now())
+    }
+
+    observation = %{issue: issue, closed_at: nil, sources: [source], evidence_source: "github"}
+    Operations.observe_delivery(table, observation, "crescendo")
+    Operations.observe_delivery(table, observation, "crescendo")
+    [association] = Operations.snapshot(table).delivery_metrics.issue_associations
+    assert association.disposition == "unknown_acceptance"
+    assert [%{run_id: nil}] = association.sources
+    assert length(association.tracker_observations) == 1
+
+    for id <- ["first", "ambiguous"] do
+      Operations.finish_run(table, id, "completed", %{})
+      [{key, run}] = :dets.lookup(table, {:lineage_run, id})
+      :dets.insert(table, {key, %{run | finished_s: 0}})
+    end
+
+    Operations.start_run(table, "prune", %{kind: :research})
+    Operations.finish_run(table, "prune", "completed", %{})
+    assert Operations.delivery_issue_ids(table) == []
+    assert Operations.snapshot(table).delivery_metrics.issue_associations == []
+    assert :dets.match_object(table, {{:lineage_evidence, "issue", :_}, :_}) == []
+    assert :dets.match_object(table, {{:lineage_evidence, "issue_source", :_}, :_}) == []
+  end
+
+  test "prerequisite handoff preserves the unmet canonical outcome even on the root" do
+    alias SymphonyElixir.Tracker.Issue
+    path = Path.join(System.tmp_dir!(), "prerequisite-delivery-#{System.unique_integer([:positive])}.dets")
+    table = :prerequisite_delivery_test
+
+    on_exit(fn ->
+      Operations.close(table)
+      File.rm(path)
+    end)
+
+    {:ok, ^table} = Operations.open(path, table)
+    Operations.start_run(table, "worker", %{issue_id: "1", issue_identifier: "GH-1", kind: :issue})
+    handoff = ~s(<!-- crescendo:handoff {"owner":1,"change":"prerequisite","evidence":3,"scope":"unmet remainder"} -->)
+
+    issue = %Issue{
+      id: "1",
+      identifier: "GH-1",
+      state: "closed",
+      state_reason: "completed",
+      # The root has an explicitly unmet remainder despite repository closure.
+      description: handoff
+    }
+
+    at = DateTime.to_iso8601(DateTime.utc_now())
+    source = %{pr_number: 2, status: "merged", head_sha: "head", merge_commit_sha: "merge", merged_at: at, created_at: at}
+    Operations.observe_delivery(table, %{issue: issue, closed_at: at, sources: [source], evidence_source: "github"}, "crescendo")
+    [association] = Operations.snapshot(table).delivery_metrics.issue_associations
+    assert association.disposition == "repository_reported_completion"
+    assert association.canonical_owner == "1"
+    refute association.canonical_outcome_complete
+  end
+
   test "prices come from the built-in table with configured models on top" do
     pricing = %{
       "as_of" => "2026-10-01",

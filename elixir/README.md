@@ -130,6 +130,15 @@ fresh thread. Persistence failures prevent reuse. The supported schemas were che
 0.156.1 and 0.160.0; native wire/resume probes used 0.160.0 with fake credentials and a loopback
 provider. SSH resumption remains disabled until remote checkout identity can be verified.
 
+
+Issue worker delivery evidence survives completion and restart in Operations' retained lineage.
+`usage.delivery_metrics.issue_associations` exposes explicit worker-owned sources, merge SHAs,
+tracker observations, attempts and canonical outcome ownership. Reduced scope and retirement stay
+distinct from repository-reported completion; missing proof stays unknown. Source creation must
+identify a unique retained worker attempt. Historical unknown acceptance is not backfilled, and
+helper coverage remains unknown, so verified cost and latency stay null. See
+[retained delivery evidence](../docs/crescendo.md#retained-issue-delivery-evidence) for the contract.
+
 `developer_instructions` appends explicitly reviewed service-owned rules to existing configured
 developer instructions. It preserves native base instructions. Do not move repository guidelines
 or work-item content into this channel. No provider cache-key or boundary override is exposed.

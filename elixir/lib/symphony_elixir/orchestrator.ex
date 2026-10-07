@@ -77,6 +77,7 @@ defmodule SymphonyElixir.Orchestrator do
       pulls_fetching: false,
       pulls_task_ref: nil,
       next_pulls_due_at_ms: 0,
+      delivery_cursor: 0,
       codex_totals: nil,
       codex_rate_limits: nil,
       codex_quota: nil,
@@ -242,6 +243,16 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info({:pull_requests_fetched, result}, state) do
     if state.pulls_task_ref, do: Process.demonitor(state.pulls_task_ref, [:flush])
     state = %{state | pulls_fetching: false, pulls_task_ref: nil}
+
+    result =
+      case result do
+        {:ok, pulls, statuses, deliveries} ->
+          Enum.each(deliveries, &Operations.observe_delivery(state.operations, &1, Config.settings!().labels.prefix))
+          {:ok, pulls, statuses}
+
+        other ->
+          other
+      end
 
     state =
       case result do
@@ -1637,6 +1648,7 @@ defmodule SymphonyElixir.Orchestrator do
           issue_identifier: issue.identifier,
           issue_url: issue.url,
           kind: issue.kind,
+          delivery_key: issue.delivery_key,
           review_head: entry.dispatched_head,
           requested_route: entry.route,
           item_attempt: item_attempt,
@@ -3215,11 +3227,21 @@ defmodule SymphonyElixir.Orchestrator do
 
     if Config.settings!().tracker.kind == "github" and not state.pulls_fetching and
          now_ms >= state.next_pulls_due_at_ms do
-      case start_pull_inventory_task(state.task_supervisor, state.pull_requests) do
+      retained_ids = Operations.delivery_issue_ids(state.operations) |> Enum.sort()
+
+      issue_ids =
+        Enum.take(
+          Enum.drop(retained_ids, state.delivery_cursor) ++
+            Enum.take(retained_ids, state.delivery_cursor),
+          10
+        )
+
+      case start_pull_inventory_task(state.task_supervisor, state.pull_requests, issue_ids) do
         {:ok, pid} ->
           %{
             state
             | pulls_fetching: true,
+              delivery_cursor: rem(state.delivery_cursor + 10, max(length(retained_ids), 1)),
               pulls_task_ref: Process.monitor(pid),
               next_pulls_due_at_ms: now_ms + 60_000
           }
@@ -3233,24 +3255,44 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp start_pull_inventory_task(supervisor, previous) do
+  defp start_pull_inventory_task(supervisor, previous, issue_ids) do
     recipient = self()
 
     Task.Supervisor.start_child(supervisor, fn ->
-      send(recipient, {:pull_requests_fetched, fetch_pull_inventory(previous)})
+      send(recipient, {:pull_requests_fetched, fetch_pull_inventory(previous, issue_ids)})
     end)
   end
 
-  defp fetch_pull_inventory(previous) do
+  defp fetch_pull_inventory(previous, issue_ids) do
     client = Application.get_env(:symphony_elixir, :github_client_module, GitHubClient)
 
     if function_exported?(client, :fetch_open_pull_requests, 0),
-      do: fetch_pulls_with_statuses(client, previous),
+      do: fetch_pulls_with_deliveries(client, previous, issue_ids),
       else: {:error, :pull_request_inventory_unavailable}
   rescue
     error -> {:error, Exception.message(error)}
   catch
     kind, reason -> {:error, {kind, reason}}
+  end
+
+  defp fetch_pulls_with_deliveries(client, previous, issue_ids) do
+    with {:ok, pulls, statuses} <- fetch_pulls_with_statuses(client, previous) do
+      deliveries =
+        if function_exported?(client, :fetch_delivery_observation, 1) do
+          Enum.flat_map(issue_ids, &fetch_delivery(client, &1))
+        else
+          []
+        end
+
+      {:ok, pulls, statuses, deliveries}
+    end
+  end
+
+  defp fetch_delivery(client, id) do
+    case client.fetch_delivery_observation(id) do
+      {:ok, %{issue: %Issue{}} = observation} -> [observation]
+      _ -> []
+    end
   end
 
   defp fetch_pulls_with_statuses(client, previous) do

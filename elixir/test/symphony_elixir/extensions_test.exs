@@ -380,6 +380,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "runs_recorded" => 0,
                  "review_heads_recorded" => 0,
                  "thread_links" => 0,
+                 "issue_associations" => [],
                  "helper_usage_coverage" => "unknown"
                },
                "today" => %{

@@ -137,7 +137,12 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
       cost_basis: "api_equivalent_estimate",
       account_usage: account_usage(all),
       accounting: accounting(all),
-      delivery_metrics: delivery_metrics(all),
+      delivery_metrics:
+        Map.put(
+          delivery_metrics(all),
+          :issue_associations,
+          for({id, operations} <- ops, association <- get_in(operations, [:delivery_metrics, :issue_associations]) || [], do: Map.put(association, :project, id))
+        ),
       today: all |> Enum.map(&(&1[:today] || %{})) |> sum(),
       recorded: all |> Enum.map(&(&1[:recorded] || %{})) |> sum(),
       by_model: by_model(all),

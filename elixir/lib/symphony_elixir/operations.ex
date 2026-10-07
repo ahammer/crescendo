@@ -75,6 +75,7 @@ defmodule SymphonyElixir.Operations do
       run =
         Map.merge(details, %{
           status: "running",
+          delivery_tracking: true,
           accounting_status: "incomplete",
           cache_write_status: "unknown",
           started_s: System.os_time(:second),
@@ -148,12 +149,24 @@ defmodule SymphonyElixir.Operations do
       {{{:lineage_run, :_}, %{finished_s: :"$1"}}, [{:<, :"$1", now - 90 * 86_400}], [true]}
     ])
 
+    prune_delivery_evidence(table)
+
     :dets.select_delete(table, [
       {{{:task, :_}, %{at_s: :"$1"}}, [{:<, :"$1", now - @task_days * 86_400}], [true]}
     ])
 
     event(table, kind, Map.merge(details, %{category: category, seconds: seconds, usd_micro: cost.usd_micro}))
     sync(table)
+  end
+
+  defp prune_delivery_evidence(table) do
+    ids = delivery_issue_ids(table)
+
+    evidence = :dets.match_object(table, {{:lineage_evidence, :_, :_}, :_})
+
+    for {key, value} <- evidence, elem(key, 1) in ["issue", "issue_source"], value.issue_id not in ids do
+      :dets.delete(table, key)
+    end
   end
 
   defp completed_boundary?("completed", _details), do: true
@@ -410,6 +423,158 @@ defmodule SymphonyElixir.Operations do
       :ok = :dets.insert(table, {{:lineage_evidence, kind, id}, value})
       :ok = :dets.sync(table)
     end)
+  end
+
+  @doc "Issue scopes with retained, prospectively tracked worker attempts."
+  @spec delivery_issue_ids(handle()) :: [String.t()]
+  def delivery_issue_ids(nil), do: []
+
+  def delivery_issue_ids(table) do
+    for {_, %{kind: :issue, delivery_tracking: true, issue_id: id}} <-
+          :dets.match_object(table, {{:lineage_run, :_}, :_}),
+        is_binary(id),
+        uniq: true do
+      id
+    end
+  end
+
+  @doc "Retains tracker and explicit worker-source evidence without inferring historical acceptance."
+  @spec observe_delivery(handle(), map(), String.t()) :: :ok
+  def observe_delivery(nil, _observation, _prefix), do: :ok
+
+  def observe_delivery(table, %{issue: %SymphonyElixir.Tracker.Issue{} = issue} = observation, prefix) do
+    safe_write(fn ->
+      key = {:lineage_evidence, "issue", issue.id}
+      previous = lookup(table, key, %{})
+      updated_at = if issue.updated_at, do: DateTime.to_iso8601(issue.updated_at)
+
+      if previous == %{} or newer_evidence?(updated_at, previous[:updated_at]) do
+        value = %{
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          issue_url: issue.url,
+          state: issue.state,
+          state_reason: issue.state_reason,
+          updated_at: updated_at,
+          closed_at: observation.closed_at,
+          labels: issue.labels,
+          handoff: retained_handoff(previous, issue),
+          prefix: prefix,
+          evidence_source: observation.evidence_source,
+          observed_at: DateTime.to_iso8601(DateTime.utc_now())
+        }
+
+        value = Map.put(value, :reduced_scope, previous[:reduced_scope] == true or reduced_delivery?(value))
+        history = Map.take(value, [:state, :state_reason, :updated_at, :closed_at, :handoff, :reduced_scope, :evidence_source, :observed_at])
+        value = Map.put(value, :tracker_observations, (previous[:tracker_observations] || []) ++ [history])
+        :ok = :dets.insert(table, {key, value})
+      end
+
+      Enum.each(observation.sources, &retain_delivery_source(table, issue.id, &1))
+      :ok = :dets.sync(table)
+    end)
+  end
+
+  defp retained_handoff(%{handoff: %{} = handoff}, _issue), do: handoff
+  defp retained_handoff(_previous, issue), do: SymphonyElixir.Handoff.record(issue)
+
+  defp newer_evidence?(nil, nil), do: false
+  defp newer_evidence?(_new, nil), do: true
+  defp newer_evidence?(nil, _old), do: false
+  defp newer_evidence?(new, old), do: new > old
+
+  defp retain_delivery_source(table, issue_id, source) do
+    key = {:lineage_evidence, "issue_source", {issue_id, source.pr_number}}
+    previous = lookup(table, key, %{})
+
+    if previous == %{} or newer_evidence?(source[:updated_at], previous[:updated_at]) do
+      run_id = previous[:run_id] || delivery_source_run(table, issue_id, source[:created_at])
+      value = source |> Map.take([:pr_number, :pr_url, :head_sha, :head_ref, :head_repo, :status, :draft, :created_at, :updated_at, :merged_at, :merge_commit_sha])
+
+      :ok =
+        :dets.insert(
+          table,
+          {key, Map.merge(value, %{issue_id: issue_id, run_id: run_id, evidence_source: "github_explicit_closing_directive_and_worker_branch", observed_at: DateTime.to_iso8601(DateTime.utc_now())})}
+        )
+    end
+  end
+
+  defp delivery_source_run(table, issue_id, created_at) do
+    case DateTime.from_iso8601(to_string(created_at)) do
+      {:ok, created, _} ->
+        :dets.match_object(table, {{:lineage_run, :_}, :_})
+        |> Enum.filter(fn {_, run} -> source_created_during_run?(run, issue_id, DateTime.to_unix(created)) end)
+        |> case do
+          [{{:lineage_run, id}, _}] -> id
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp source_created_during_run?(run, issue_id, created_s) do
+    run[:issue_id] == issue_id and run[:kind] == :issue and run[:delivery_tracking] == true and
+      run.started_s <= created_s and created_s <= (run[:finished_s] || System.os_time(:second))
+  end
+
+  defp delivery_associations(table) do
+    ids = delivery_issue_ids(table)
+
+    for {_, issue} <- :dets.match_object(table, {{:lineage_evidence, "issue", :_}, :_}), issue.issue_id in ids do
+      delivery_association(table, issue)
+    end
+  end
+
+  defp delivery_association(table, issue) do
+    sources =
+      for {_, source} <- :dets.match_object(table, {{:lineage_evidence, "issue_source", {issue.issue_id, :_}}, :_}),
+          do: source
+
+    runs =
+      for {{:lineage_run, id}, run} <- :dets.match_object(table, {{:lineage_run, :_}, :_}),
+          run[:issue_id] == issue.issue_id and run[:kind] == :issue,
+          do: Map.put(Map.take(run, [:item_attempt, :status, :started_s, :finished_s, :delivery_key]), :run_id, id)
+
+    proven = is_binary(issue.closed_at) and Enum.any?(sources, &merged_worker_source?/1)
+    disposition = delivery_disposition(issue, proven)
+    canonical_owner = if is_map(issue.handoff), do: to_string(issue.handoff["owner"]), else: issue.issue_id
+
+    issue
+    |> Map.drop([:labels, :prefix])
+    |> Map.merge(%{
+      canonical_owner: canonical_owner,
+      disposition: disposition,
+      sources: Enum.sort_by(sources, & &1.pr_number),
+      attempts: Enum.sort_by(runs, &{&1.started_s, &1.run_id}),
+      helper_usage_coverage: "unknown",
+      acceptance_proof: if(disposition in ["accepted_reduced_scope", "repository_reported_completion"], do: "repository_reported", else: "incomplete"),
+      canonical_outcome_complete: disposition == "repository_reported_completion" and is_nil(issue.handoff),
+      verified_cost: nil,
+      verified_latency: nil
+    })
+  end
+
+  defp merged_worker_source?(source) do
+    source.status == "merged" and source[:draft] != true and
+      Enum.all?([source[:head_sha], source[:merge_commit_sha], source[:merged_at], source[:run_id]], &is_binary/1)
+  end
+
+  defp reduced_delivery?(issue) do
+    "#{issue.prefix}:delivery:split" in issue.labels or
+      (is_map(issue.handoff) and issue.handoff["change"] == "partial_delivery")
+  end
+
+  defp delivery_disposition(issue, proven) do
+    cond do
+      issue.state != "closed" -> "open"
+      issue.state_reason == "not_planned" -> "retirement"
+      issue.handoff == :invalid -> "unknown_acceptance"
+      proven and issue.reduced_scope -> "accepted_reduced_scope"
+      proven and issue.state_reason == "completed" -> "repository_reported_completion"
+      true -> "unknown_acceptance"
+    end
   end
 
   @doc "Replaces a thread's native cumulative account estimate; null stays unknown."
@@ -1120,7 +1285,8 @@ defmodule SymphonyElixir.Operations do
       runs_recorded: 0,
       review_heads_recorded: 0,
       thread_links: 0,
-      helper_usage_coverage: "unknown"
+      helper_usage_coverage: "unknown",
+      issue_associations: []
     }
 
   defp delivery_snapshot(table) do
@@ -1141,7 +1307,8 @@ defmodule SymphonyElixir.Operations do
       review_heads_recorded: Enum.count(runs, &is_binary(&1[:review_head])),
       thread_links: Enum.sum(Enum.map(threads, &MapSet.size(&1.runs))),
       merge_observations: merges,
-      research_associations: research
+      research_associations: research,
+      issue_associations: delivery_associations(table)
     })
   end
 
