@@ -18,6 +18,10 @@ slot or machine lease. Parent exit cancels them; capacity releases only after pr
 Source reads are pinned to a Git commit and ignore replacement refs. Evidence is captured as
 bounded text through no-follow traversal. Shell, editing, browser, apps, MCP and nested
 agents are disabled, including capabilities forced by native model catalog metadata.
+Inherited MCP servers are disabled before native startup using one nested `mcp_servers` map.
+CLI map overrides are TOML inline tables; thread configuration carries the same nested JSON map.
+Server names remain literal keys, preserving punctuation and existing transport definitions with
+`enabled=false`. Invalid configuration fails closed without changing lead MCP configuration.
 Catalogs are passed in sealed anonymous memory files; no mutable catalog path or per-run file accumulates.
 Native approval and user-input requests are answered without contacting a human.
 
@@ -638,8 +642,9 @@ inventory task follows prospectively tracked issue workers throughout retained r
 after completion, reconciliation or restart. Each inventory refresh rotates through at most ten
 retained issue scopes, so delivery reconciliation cannot sweep every historical scope each minute.
 It reads paginated issue cross-reference timelines
-and PR observations. Ownership requires an explicit closing directive, a same-repository worker
-branch (`crescendo/<number>-...`, `symphony/<number>-...` or `issue-<number>-...`) and PR creation
+and PR observations. Ownership requires an explicit closing directive or an exact standalone
+`Symphony issue: #<number>` line, a same-repository worker branch (`crescendo/<number>-...`,
+`symphony/<number>-...` or optionally namespaced `issue-<number>` with an optional suffix) and PR creation
 during a unique retained worker attempt. Titles and incidental references provide no ownership proof.
 The original source/run association stays fixed across later review, merge, reopen and redispatch.
 Canonical handoffs and split scope are captured at worker dispatch and terminal reconciliation.

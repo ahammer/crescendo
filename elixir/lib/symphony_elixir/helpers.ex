@@ -286,10 +286,16 @@ defmodule SymphonyElixir.Helpers do
   end
 
   defp catalog_command(command, catalog, config) do
-    overrides = Enum.flat_map(config, fn {key, value} -> ["--config", key <> "=" <> Jason.encode!(value)] end)
+    overrides = Enum.flat_map(config, fn {key, value} -> ["--config", key <> "=" <> config_value(value)] end)
     argv = ["python3", "-c", @catalog_bootstrap, catalog] ++ OptionParser.split(command) ++ overrides
     Enum.map_join(argv, " ", &shell_escape/1)
   end
+
+  defp config_value(value) when is_map(value) do
+    "{" <> Enum.map_join(value, ",", fn {key, item} -> Jason.encode!(key) <> "=" <> config_value(item) end) <> "}"
+  end
+
+  defp config_value(value), do: Jason.encode!(value)
 
   defp native_command(context) do
     tokens = OptionParser.split(context.codex_settings.command)
@@ -301,11 +307,11 @@ defmodule SymphonyElixir.Helpers do
          {:ok, servers} when is_list(servers) <- Jason.decode(json),
          true <- Enum.all?(servers, &is_binary(&1["name"])),
          {:ok, catalog} <- model_catalog(:helper) do
-      disabled = Map.new(servers, &{"mcp_servers.#{Jason.encode!(&1["name"])}.enabled", false})
+      disabled = Map.new(servers, &{&1["name"], %{"enabled" => false}})
 
       config =
         Map.new(@disabled, &{"features.#{&1}", false})
-        |> Map.merge(disabled)
+        |> Map.put("mcp_servers", disabled)
         |> Map.merge(%{"web_search" => "disabled", "features.code_mode_host" => true})
         |> Map.merge(%{"agents.max_threads" => 1, "model_catalog_json" => "/proc/self/fd/198"})
 

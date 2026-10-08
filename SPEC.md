@@ -1424,8 +1424,9 @@ inventory task follows prospectively tracked issue workers throughout retained r
 after completion, reconciliation or restart. Each inventory refresh rotates through at most ten
 retained issue scopes, so delivery reconciliation cannot sweep every historical scope each minute.
 It reads paginated issue cross-reference timelines
-and PR observations. Ownership requires an explicit closing directive, a same-repository worker
-branch (`crescendo/<number>-...`, `symphony/<number>-...` or `issue-<number>-...`) and PR creation
+and PR observations. Ownership requires an explicit closing directive or an exact standalone
+`Symphony issue: #<number>` line, a same-repository worker branch (`crescendo/<number>-...`,
+`symphony/<number>-...` or optionally namespaced `issue-<number>` with an optional suffix) and PR creation
 during a unique retained worker attempt. Titles and incidental references provide no ownership proof.
 The original source/run association stays fixed across later review, merge, reopen and redispatch.
 Canonical handoffs and split scope are captured at worker dispatch and terminal reconciliation.
@@ -2716,3 +2717,12 @@ the operator's responsibility; the dashboard stays read-only. No arbitrary prose
 historical migration is inferred.
 Legacy replacement headings prevent an issue from declaring itself a canonical root, including
 when its record would otherwise authorize another successor.
+
+## Helper MCP isolation (Crescendo extension)
+
+Managed read-only helpers disable inherited MCP servers before native startup with a nested
+`mcp_servers` configuration map. Server names remain literal map keys, including punctuation;
+they are never encoded as quoted segments of a dotted override path. CLI map overrides use TOML
+inline tables, while thread configuration carries the same nested map through JSON. Existing
+transport definitions are preserved with `enabled=false`. Unknown or invalid configuration fails
+closed. Helpers expose only the curated source/evidence reads; lead MCP configuration is unchanged.

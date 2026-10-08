@@ -2,11 +2,36 @@
 import json
 import sys
 import os
+import tomllib
 
 observed, mode = sys.argv[1:3]
+inherited_servers = ["inherited-server", "dotted.server", 'quoted"server']
 if sys.argv[-3:] == ["mcp", "list", "--json"]:
-    print(json.dumps([{"name": "inherited-server", "enabled": True}]))
+    print(json.dumps([{"name": name, "enabled": True} for name in inherited_servers]))
     sys.exit(0)
+
+
+def merge(target, source):
+    for key, value in source.items():
+        if isinstance(value, dict):
+            merge(target.setdefault(key, {}), value)
+        else:
+            target[key] = value
+
+
+if mode in ("helper", "approval"):
+    config = {"mcp_servers": {name: {"command": "unused", "enabled": True} for name in inherited_servers}}
+    for index, arg in enumerate(sys.argv):
+        if arg != "--config":
+            continue
+        key, value = sys.argv[index + 1].split("=", 1)
+        override = tomllib.loads("value=" + value)["value"]
+        for part in reversed(key.split(".")):
+            override = {part: override}
+        merge(config, override)
+    if any("command" not in server or server.get("enabled", True) for server in config["mcp_servers"].values()):
+        print("Error: invalid or enabled inherited MCP transport", file=sys.stderr)
+        sys.exit(1)
 
 
 def emit(message):
