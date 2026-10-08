@@ -397,6 +397,60 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
              GitHubClient.fetch_issues_by_ids_for_test(["7"], tracker_settings(), request_fun, pull_policy())
   end
 
+  test "ordinary polling accepts legacy string autopilot channels" do
+    File.write!(Workflow.workflow_file_path(), """
+    ---
+    tracker:
+      kind: github
+      provider: {repo: octo/repo, token: test-token}
+      active_states: [open]
+      terminal_states: [closed]
+    autopilot:
+      enabled: true
+      channels: {qa: Read the product contracts}
+    ---
+    Review the repository.
+    """)
+
+    WorkflowStore.force_reload()
+    assert %SymphonyElixir.Config.Schema.Tracker{} = Config.settings!().tracker
+    assert {:ok, []} = GitHubClient.fetch_issues_by_states([])
+  end
+
+  test "startup cleanup and issue refresh accept the runtime tracker schema struct" do
+    tracker = struct(SymphonyElixir.Config.Schema.Tracker, tracker_settings())
+
+    empty = fn "GET", "/repos/octo/repo/issues", _params, nil, _settings ->
+      {:ok, %{status: 200, body: []}}
+    end
+
+    assert {:ok, []} = GitHubClient.fetch_issues_by_states_for_test(["closed"], tracker, empty)
+
+    issue = Map.put(raw_issue(42), "labels", [%{"name" => "symphony:ready"}])
+
+    requests = fn "GET", path, _params, nil, _settings ->
+      body = if String.ends_with?(path, "/blocked_by"), do: [], else: issue
+      {:ok, %{status: 200, body: body}}
+    end
+
+    assert {:ok, [refreshed]} = GitHubClient.fetch_issues_by_ids_for_test(["42"], tracker, requests)
+    assert %Issue{id: "42", dispatchable: true} = refreshed
+  end
+
+  test "planning dependencies retain unready blockers with the runtime tracker schema struct" do
+    tracker = struct(SymphonyElixir.Config.Schema.Tracker, tracker_settings()) |> Map.put(:planning_dependencies, true)
+    blocker = %{"id" => 7, "number" => 7, "state" => "open", "title" => "Required prerequisite"}
+
+    requests = fn "GET", path, _params, nil, _settings ->
+      body = if String.ends_with?(path, "/blocked_by"), do: [blocker], else: raw_issue(42)
+      {:ok, %{status: 200, body: body}}
+    end
+
+    assert {:ok, [issue]} = GitHubClient.fetch_issues_by_ids_for_test(["42"], tracker, requests)
+    refute issue.dispatchable
+    assert [%{id: "7", planning: %{"title" => "Required prerequisite"}}] = issue.blocked_by
+  end
+
   test "ready issues wait for native dependencies, including dependencies added before dispatch" do
     issue = Map.put(raw_issue(42), "labels", [%{"name" => "symphony:ready"}])
 
