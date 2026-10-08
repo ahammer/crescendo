@@ -883,8 +883,8 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
 
     pull =
       raw_pull(12, "OWNER", "octo/repo", %{
-        "head" => %{"sha" => "owned-head", "ref" => "crescendo/42-water", "repo" => %{"full_name" => "octo/repo"}},
-        "body" => "Closes #42",
+        "head" => %{"sha" => "owned-head", "ref" => "symphony/issue-42", "repo" => %{"full_name" => "octo/repo"}},
+        "body" => "Summary of the delivered scope.\n\nSymphony issue: #42\n",
         "created_at" => created_at,
         "updated_at" => at,
         "merged_at" => at,
@@ -936,11 +936,43 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
     assert association.disposition == "repository_reported_completion"
     assert association.canonical_outcome_complete
     assert [%{run_id: "original", head_sha: "owned-head", merge_commit_sha: "merged-source"}] = association.sources
+    assert hd(association.sources).evidence_source == "github_explicit_issue_declaration_and_worker_branch"
     assert [%{run_id: "original", status: "completed", item_attempt: 1}] = association.attempts
     assert association.helper_usage_coverage == "unknown"
     assert association.verified_cost == nil
     assert association.verified_latency == nil
     assert association.closed_at == at
+  end
+
+  test "non-closing ownership requires the exact issue line, worker branch and source repository" do
+    for {body, branch, repo, count} <- [
+          {"Symphony issue: #42", "symphony/issue-42", "octo/repo", 1},
+          {"Summary.\r\n\r\nSymphony issue: #42\r\n", "symphony/issue-42", "octo/repo", 1},
+          {"Symphony issue: #420", "symphony/issue-42", "octo/repo", 0},
+          {"Symphony issue: #42 (related)", "symphony/issue-42", "octo/repo", 0},
+          {"Mentions Symphony issue: #42", "symphony/issue-42", "octo/repo", 0},
+          {"Symphony issue: #41", "symphony/issue-42", "octo/repo", 0},
+          {"Symphony issue: #42", "symphony/issue-420", "octo/repo", 0},
+          {"Symphony issue: #42", "symphony/issue-42", "other/repo", 0}
+        ] do
+      pull = raw_pull(12, "OWNER", repo, %{"body" => body, "head" => %{"ref" => branch, "repo" => %{"full_name" => repo}}})
+
+      request = fn "GET", path, _params, nil, _settings ->
+        result =
+          case path do
+            "/repos/octo/repo/issues/42" -> raw_issue(42)
+            "/repos/octo/repo/issues/42/timeline" -> [delivery_reference(12)]
+            "/repos/octo/repo/pulls/12" -> pull
+          end
+
+        {:ok, %{status: 200, body: result}}
+      end
+
+      assert {:ok, %{sources: sources}} =
+               GitHubClient.fetch_delivery_observation("42", tracker_settings: tracker_settings(), request_fun: request)
+
+      assert length(sources) == count
+    end
   end
 
   test "delivery evidence reads paginate timelines and preserve errors instead of manufacturing proof" do

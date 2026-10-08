@@ -140,7 +140,13 @@ defmodule SymphonyElixir.HelpersTest do
     assert thread["config"]["agents.max_threads"] == 1
     assert thread["config"]["features.shell_tool"] == false
     assert thread["config"]["features.view_image"] == false
-    assert thread["config"]["mcp_servers.\"inherited-server\".enabled"] == false
+
+    assert thread["config"]["mcp_servers"] == %{
+             "inherited-server" => %{"enabled" => false},
+             "dotted.server" => %{"enabled" => false},
+             "quoted\"server" => %{"enabled" => false}
+           }
+
     refute File.exists?(Path.join(context.workspace, "escaped"))
 
     codex = %{codex | command: "python3 '#{peer}' '#{observed}' approval app-server"}

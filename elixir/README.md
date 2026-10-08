@@ -138,6 +138,8 @@ distinct from repository-reported completion; missing proof stays unknown. Sourc
 identify a unique retained worker attempt. Canonical handoffs and split scope captured at dispatch
 or terminal reconciliation survive tracker edits before the first delivery observation, including
 removal of the record or label.
+GitHub source ownership accepts a closing directive or an exact standalone `Symphony issue: #N`
+line with the matching same-repository worker branch. Incidental mentions provide no ownership.
 Malformed handoff evidence retained from closure keeps acceptance unknown after marker removal.
 Historical unknown acceptance is not backfilled, and helper coverage remains unknown, so verified
 cost and latency stay null. See
@@ -788,6 +790,10 @@ Metalrain evidence root. Read tools use the captured Git commit, reject replacem
 links and pathspecs, and bound source/evidence files to 128 KiB and returned text to 16 KiB.
 The helper has no shell, edits, browser, apps, MCP, nested delegation or machine lease.
 Its native JavaScript dispatcher calls only curated reads; native approval requests fail closed.
+Inherited MCP servers are disabled through a nested `mcp_servers` map before native startup.
+CLI map values use TOML inline tables, and thread configuration uses the same nested JSON map.
+Literal server names preserve punctuation without creating extra dotted-path entries; existing
+transport definitions remain intact with `enabled=false`. Invalid configuration fails closed.
 Private, bounded catalogs in sealed anonymous memory remove model metadata that otherwise
 forces patch/delegation capabilities; the user's catalog stays intact. The pinned CLI needs a populated model cache.
 Helpers are supervised with a 15-minute absolute deadline, unique usage lineage and cleanup

@@ -638,7 +638,7 @@ defmodule SymphonyElixir.Operations do
       :ok =
         :dets.insert(
           table,
-          {key, Map.merge(value, %{issue_id: issue_id, run_id: run_id, evidence_source: "github_explicit_closing_directive_and_worker_branch", observed_at: DateTime.to_iso8601(DateTime.utc_now())})}
+          {key, Map.merge(value, %{issue_id: issue_id, run_id: run_id, evidence_source: "github_explicit_issue_declaration_and_worker_branch", observed_at: DateTime.to_iso8601(DateTime.utc_now())})}
         )
     end
   end
