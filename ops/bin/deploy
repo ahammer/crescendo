@@ -90,17 +90,18 @@ outcome=swap_failed
 # 4. Swap and restart.
 cp "$env_file" "$env_file.before-$target"
 sed -i "s|^CRESCENDO_RELEASE=.*|CRESCENDO_RELEASE=\"$release\"|" "$env_file"
-systemctl --user restart "$unit"
 
 # 5. Healthy means the state API answers with every project's orchestrator running; otherwise roll back.
 healthy() {
   curl -fsS --max-time 10 "$state_url" | python3 "$(dirname "$0")/deploy-state.py" healthy
 }
 ok=0
-for _ in $(seq 1 24); do
-  sleep 5
-  if healthy; then ok=1; break; fi
-done
+if systemctl --user restart "$unit"; then
+  for _ in $(seq 1 24); do
+    sleep 5
+    if healthy; then ok=1; break; fi
+  done
+fi
 if [ "$ok" -ne 1 ]; then
   cp "$env_file.before-$target" "$env_file"
   systemctl --user restart "$unit"
