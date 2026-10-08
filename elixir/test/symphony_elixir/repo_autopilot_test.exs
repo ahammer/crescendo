@@ -6,6 +6,10 @@ defmodule SymphonyElixir.RepoAutopilotTest do
 
   @folder ".crescendo/autopilot"
 
+  test "an unobserved source revision stays unknown" do
+    assert {:error, :source_revision_unknown} = RepoAutopilot.revision("unknown-source-project")
+  end
+
   setup do
     root = Path.join(System.tmp_dir!(), "crescendo-repo-autopilot-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)

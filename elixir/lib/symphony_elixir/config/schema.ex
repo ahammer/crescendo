@@ -445,7 +445,7 @@ defmodule SymphonyElixir.Config.Schema do
 
     @prompt_kinds ["pull_request", "research"]
     @channel_name ~r/^[a-z0-9][a-z0-9-]*$/
-    @channel_keys ["focus", "prompt", "min_issues", "max_issues", "route", "effort", "every", "at", "when", "expectations", "delivers", "source"]
+    @channel_keys ["focus", "prompt", "min_issues", "max_issues", "route", "effort", "every", "at", "when", "expectations", "delivers", "source", "exclusive", "skip_unchanged"]
     @channel_error "names must be lowercase letters, digits, or dashes and map to focus text or " <>
                      "{focus, prompt, min_issues, max_issues, route, effort, every, when, expectations, delivers}"
 
@@ -532,7 +532,8 @@ defmodule SymphonyElixir.Config.Schema do
 
     defp valid_task_fields?(spec) do
       valid_delivers?(spec["delivers"]) and string_list?(spec["expectations"]) and
-        (is_nil(spec["effort"]) or is_binary(spec["effort"])) and spec["source"] in [nil, "local", "repo"]
+        (is_nil(spec["effort"]) or is_binary(spec["effort"])) and spec["source"] in [nil, "local", "repo"] and
+        spec["exclusive"] in [nil, "none", "global"] and spec["skip_unchanged"] in [nil, true, false]
     end
 
     defp string_list?(nil), do: true

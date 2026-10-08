@@ -178,6 +178,9 @@ defmodule SymphonyElixir.Operations do
   def task_category("PR-" <> _), do: "review"
   def task_category("research-marketing"), do: "marketing"
   def task_category("research" <> _), do: "research"
+  def task_category("helper-" <> _), do: "helper"
+  def task_category("reviewer-" <> _), do: "reviewer"
+  def task_category("planner-" <> _), do: "planner"
   def task_category(_identifier), do: "delivery"
 
   @spec usage(handle(), String.t() | nil, String.t() | nil, map()) :: :ok
@@ -204,6 +207,119 @@ defmodule SymphonyElixir.Operations do
     else
       :ok
     end
+  end
+
+  @doc "Retains bounded, unverified CLI observations without changing native usage or budget."
+  @spec import_auxiliary(handle(), Path.t() | nil) :: map()
+  def import_auxiliary(nil, _root), do: Usage.normalize(%{})
+  def import_auxiliary(_table, nil), do: Usage.normalize(%{})
+
+  def import_auxiliary(table, root) do
+    directory = Path.join(root, "auxiliary-usage")
+
+    files =
+      case File.ls(directory) do
+        {:ok, files} -> files
+        _ -> []
+      end
+
+    files
+    |> Enum.filter(&Regex.match?(~r/\A[a-f0-9]{32}\.json\z/, &1))
+    |> Enum.reject(&(:dets.member(table, {:auxiliary_seen, &1}) or :dets.member(table, {:external_usage, Path.rootname(&1)})))
+    |> Enum.take(64)
+    |> Enum.each(fn file ->
+      with {:ok, %{size: size, type: :regular}} when size <= 16_384 <- File.lstat(Path.join(directory, file)),
+           {:ok, bytes} <- File.open(Path.join(directory, file), [:read, :binary], &IO.binread(&1, 16_385)),
+           true <- is_binary(bytes) and byte_size(bytes) <= 16_384,
+           {:ok, report} <- Jason.decode(bytes),
+           {:ok, observation} <- external_observation(table, report, Path.rootname(file)) do
+        # A single immutable record makes replay safe even if the cursor write was interrupted.
+        :dets.insert_new(table, {{:external_usage, observation.run_id}, observation})
+      else
+        _ -> :dets.insert(table, {{:auxiliary_seen, file}, System.os_time(:second)})
+      end
+    end)
+
+    :dets.select_delete(table, [
+      {{{:external_usage, :_}, %{observed_s: :"$1"}}, [{:<, :"$1", System.os_time(:second) - 90 * 86_400}], [true]},
+      {{{:auxiliary_seen, :_}, :"$1"}, [{:<, :"$1", System.os_time(:second) - 90 * 86_400}], [true]}
+    ])
+
+    :dets.sync(table)
+    Usage.normalize(%{})
+  end
+
+  defp external_observation(table, report, id) do
+    with %{"run_id" => ^id, "parent_run_id" => parent, "role" => role, "model" => "gpt-6.1-sol", "effort" => "max", "source_sha" => sha, "observed_at_epoch" => epoch} <- report,
+         true <- role in ["reviewer", "planner"] and is_binary(sha) and Regex.match?(~r/\A[a-f0-9]{40}\z/, sha),
+         true <- recent_report_time?(epoch),
+         {:ok, at} <- DateTime.from_unix(trunc(epoch)),
+         %{issue_id: issue_id} = parent_run <- lookup(table, {:lineage_run, parent}, nil),
+         false <- :dets.member(table, {:lineage_run, id}) do
+      usage = external_terminal_usage(report)
+      rates = get_in(parent_run, [:accounting, :rates]) || @rates
+      price = external_price(usage, rates)
+      duration = report["elapsed_seconds"]
+
+      {:ok,
+       %{
+         run_id: id,
+         parent_run_id: parent,
+         parent_issue_id: issue_id,
+         role: role,
+         model: "gpt-6.1-sol",
+         effort: "max",
+         source_sha: sha,
+         observed_at: DateTime.to_iso8601(at),
+         observed_s: trunc(epoch),
+         accounting_date: at |> DateTime.to_date() |> Date.to_iso8601(),
+         usage: usage,
+         usd_micro: if(is_integer(price), do: div(price, 1_000_000)),
+         elapsed_seconds: external_duration(duration),
+         terminal_event: report["terminal_event"],
+         identity: "claimed",
+         attribution: "unverified_cli_report",
+         accounting_status: if(usage, do: "terminal_reported", else: "incomplete"),
+         account_credits: nil
+       }}
+    else
+      _ -> {:error, :invalid_external_observation}
+    end
+  end
+
+  defp recent_report_time?(epoch),
+    do: is_number(epoch) and epoch >= System.os_time(:second) - 90 * 86_400 and epoch <= System.os_time(:second) + 300
+
+  defp external_duration(seconds) when is_number(seconds) and seconds >= 0 and seconds <= 86_400, do: seconds
+  defp external_duration(_seconds), do: nil
+  defp external_price(nil, _rates), do: nil
+
+  defp external_price(usage, rates),
+    do: price_numerator(rates, "gpt-6.1-sol", usage.input_tokens, usage.cached_input_tokens, usage.output_tokens)
+
+  defp external_terminal_usage(%{"accounting_status" => "terminal_observed", "terminal_event" => terminal, "thread_id" => thread, "usage" => usage})
+       when terminal in ["turn.completed", "turn.failed"] and is_binary(thread) and byte_size(thread) in 1..256 and is_map(usage) do
+    if Enum.all?(~w(input_tokens cached_input_tokens output_tokens), &(is_integer(usage[&1]) and usage[&1] in 0..1_000_000_000)) and
+         usage["cached_input_tokens"] <= usage["input_tokens"],
+       do: Usage.normalize(usage)
+  end
+
+  defp external_terminal_usage(_report), do: nil
+
+  defp external_summary(table) do
+    observations = for {_, value} <- :dets.match_object(table, {{:external_usage, :_}, :_}), do: value
+    complete = Enum.filter(observations, &is_map(&1.usage))
+
+    %{
+      attribution: "unverified_cli_report",
+      account_credits: nil,
+      reports: length(observations),
+      terminal_reported: length(complete),
+      incomplete: length(observations) - length(complete),
+      reported_usage: Enum.reduce(complete, Usage.normalize(%{}), fn observation, sum -> add_usage(sum, observation.usage) end),
+      reported_usd_micro: Enum.reduce(complete, 0, &((&1.usd_micro || 0) + &2)),
+      observations: observations |> Enum.sort_by(& &1.observed_at, :desc) |> Enum.take(100)
+    }
   end
 
   defp record_usage(table, run_id, model, delta, item, rates) do
@@ -1120,6 +1236,9 @@ defmodule SymphonyElixir.Operations do
         :model,
         :title,
         :category,
+        :parent_run_id,
+        :source_sha,
+        :effort,
         :seconds,
         :usd_micro,
         :run_id,
@@ -1149,6 +1268,18 @@ defmodule SymphonyElixir.Operations do
       cost_basis: "api_equivalent_estimate",
       account_usage: empty_account(),
       accounting: %{terminal_observed: 0, incomplete: 0, helper_usage_coverage: "unknown"},
+      helpers: %{recorded: 0, terminal_observed: 0, incomplete: 0, external_coverage: "unknown"},
+      external: %{
+        attribution: "unverified_cli_report",
+        account_credits: nil,
+        reports: 0,
+        terminal_reported: 0,
+        incomplete: 0,
+        reported_usage: Usage.normalize(%{}),
+        reported_usd_micro: 0,
+        observations: []
+      },
+      planning: %{unchanged_skips: 0, ready_promotions: 0, startup_failures: 0, scope: "retained_events"},
       delivery_metrics: empty_delivery_metrics(),
       today: empty_usage(),
       recorded: empty_usage(),
@@ -1231,6 +1362,14 @@ defmodule SymphonyElixir.Operations do
       cost_basis: "api_equivalent_estimate",
       account_usage: account_snapshot(table),
       accounting: accounting_summary(table),
+      helpers: helper_summary(table),
+      external: external_summary(table),
+      planning: %{
+        unchanged_skips: Enum.count(ordered_events, &(&1.kind == "task_preflight_skipped")),
+        ready_promotions: Enum.count(ordered_events, &(&1.kind == "ready_promoted")),
+        startup_failures: Enum.count(ordered_events, &(&1.kind == "startup_failed")),
+        scope: "retained_events"
+      },
       delivery_metrics: delivery_snapshot(table),
       today: daily,
       recorded: recorded,
@@ -1270,6 +1409,12 @@ defmodule SymphonyElixir.Operations do
       field = if run[:accounting_status] == "terminal_observed", do: :terminal_observed, else: :incomplete
       Map.update!(acc, field, &(&1 + 1))
     end)
+  end
+
+  defp helper_summary(table) do
+    runs = for {_, %{kind: :helper} = run} <- :dets.match_object(table, {{:lineage_run, :_}, :_}), do: run
+    covered = Enum.count(runs, &(&1[:accounting_status] == "terminal_observed"))
+    %{recorded: length(runs), terminal_observed: covered, incomplete: length(runs) - covered, external_coverage: "unknown"}
   end
 
   defp current_run_costs(table) do
@@ -1444,6 +1589,7 @@ defmodule SymphonyElixir.Operations do
 
   defp item_kind("PR-" <> _), do: "pull_request"
   defp item_kind("research" <> _), do: "research"
+  defp item_kind("helper-" <> _), do: "helper"
   defp item_kind(_identifier), do: "issue"
 
   defp median(values) do
@@ -1506,6 +1652,7 @@ defmodule SymphonyElixir.Operations do
     end)
   end
 
+  defp series_kind(%{category: category}) when category in ["helper", "reviewer", "planner"], do: nil
   defp series_kind(%{kind: "item_disposition", disposition: disposition}), do: @dispositions[disposition]
   defp series_kind(event), do: @outcome_kinds[event[:kind]]
 

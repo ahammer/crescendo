@@ -233,6 +233,8 @@ defmodule SymphonyElixir.Autopilot do
     task = state |> tasks() |> Map.get(channel, %{attempts: 0})
     attempts = Map.get(task, :attempts, 0) + if(outcome in [:short, :failed], do: 1, else: 0)
 
+    preserved = Map.take(task, [:preflight_key, :preflight_at, :preflight_run_at])
+
     task =
       cond do
         outcome in [:delivered, :unverified] -> %{done(now) | last: outcome}
@@ -240,7 +242,24 @@ defmodule SymphonyElixir.Autopilot do
         true -> retry(task, attempts, outcome, now)
       end
 
+    Map.put(state, :tasks, Map.put(tasks(state), channel, Map.merge(preserved, task)))
+  end
+
+  @doc "Records a cheap input check without claiming a completed model run or coverage."
+  @spec record_preflight(state(), String.t(), String.t(), DateTime.t(), boolean()) :: state()
+  def record_preflight(state, channel, key, now, ran?) do
+    task = Map.get(tasks(state), channel, %{}) |> Map.merge(%{preflight_key: key, preflight_at: now})
+    task = if ran?, do: Map.put(task, :preflight_run_at, now), else: task
     Map.put(state, :tasks, Map.put(tasks(state), channel, task))
+  end
+
+  @doc "Unchanged successful inputs can skip model work; revisit at least daily."
+  @spec unchanged?(state(), String.t(), String.t(), DateTime.t()) :: boolean()
+  def unchanged?(state, channel, key, now) do
+    case Map.get(tasks(state), channel) do
+      %{preflight_key: ^key, preflight_run_at: %DateTime{} = at} -> DateTime.diff(now, at, :second) < 86_400
+      _ -> false
+    end
   end
 
   defp done(now), do: %{finished_at: now, attempts: 0, retry_at: nil, last: nil}
@@ -265,7 +284,9 @@ defmodule SymphonyElixir.Autopilot do
         due_at: due_at(state, research, now),
         attempts: Map.get(task, :attempts, 0),
         last: Map.get(task, :last),
-        finished_at: Map.get(task, :finished_at)
+        finished_at: Map.get(task, :finished_at),
+        exclusive: research[:exclusive],
+        preflight_checked_at: task[:preflight_at]
       }
     end
   end
@@ -282,6 +303,16 @@ defmodule SymphonyElixir.Autopilot do
   # occurrence, then that anchor at completion plus the interval rounded up
   # to calendar days. No missed occurrences are replayed.
   defp due_at(state, research, now) do
+    task = Map.get(tasks(state), research.channel, %{})
+    scheduled = scheduled_at(state, research, now)
+
+    case task[:preflight_at] do
+      %DateTime{} = checked -> Enum.max([scheduled, DateTime.add(checked, research.every_ms, :millisecond)], DateTime)
+      _ -> scheduled
+    end
+  end
+
+  defp scheduled_at(state, research, now) do
     case {Map.get(tasks(state), research.channel, %{}), time_of_day(research[:at])} do
       {%{retry_at: %DateTime{} = retry_at}, _at} ->
         retry_at
@@ -351,7 +382,9 @@ defmodule SymphonyElixir.Autopilot do
         every_ms: duration_ms(spec["every"]) || autopilot_settings.research_cooldown_ms,
         at: spec["at"],
         when: Map.get(spec, "when") || "idle",
-        source: Map.get(spec, "source") || "local"
+        source: Map.get(spec, "source") || "local",
+        exclusive: spec["exclusive"],
+        skip_unchanged: spec["skip_unchanged"] == true
       }
     }
   end

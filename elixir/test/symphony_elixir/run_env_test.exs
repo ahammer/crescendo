@@ -16,6 +16,7 @@ defmodule SymphonyElixir.RunEnvTest do
 
     # The label prefix comes from the workflow, when one can be read.
     assert {"CRESCENDO_LABEL_PREFIX", "symphony"} in RunEnv.vars("GH-1")
+    assert {"CRESCENDO_RUN_ID", "unique-run"} in RunEnv.vars("GH-1", nil, "unique-run")
     refute Enum.any?(vars, &match?({"CRESCENDO_LABEL_PREFIX", _}, &1))
   end
 

@@ -65,10 +65,15 @@ defmodule SymphonyElixir.Application do
         :ok = SymphonyElixir.Service.put_current(service)
         port = Application.get_env(:symphony_elixir, :server_port_override) || service.port
 
+        children = [{SymphonyElixir.Governor, service}, {SymphonyElixir.Projects, service}]
+
         {:ok,
          [
-           {SymphonyElixir.Governor, service},
-           {SymphonyElixir.Projects, service},
+           %{
+             id: :service_runtime,
+             type: :supervisor,
+             start: {Supervisor, :start_link, [children, [strategy: :rest_for_one]]}
+           },
            {SymphonyElixir.HttpServer, host: service.host, port: port}
          ]}
 

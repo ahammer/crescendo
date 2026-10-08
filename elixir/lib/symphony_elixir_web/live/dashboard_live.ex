@@ -168,6 +168,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <header class="dock-head">
             <h2 id="dock-title">Agents</h2>
             <span class="count"><%= @payload.counts.running || "—" %>/<%= @payload.header.max_agents || "—" %> running</span>
+            <span :if={get_in(@payload, [:throttle, :helpers])} class="count"><%= get_in(@payload, [:throttle, :helpers, :busy]) %>/<%= get_in(@payload, [:throttle, :helpers, :slots]) %> read-only helpers</span>
             <.attention blocked={@payload.blocked} retrying={@payload.retrying} now={@now} />
           </header>
           <div class="dock-slots">
@@ -324,6 +325,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <li :for={check <- @problems}><span class={"dot dot-#{status_tone(check.status)}"} aria-hidden="true"></span><strong><%= check.name %></strong> <%= check.detail %></li>
       </ul>
       <Charts.meter :for={meter <- quota_meters(@quota, @now)} label={meter.label} percent={meter.percent} detail={meter.detail} />
+      <p :if={@payload[:pacing]} class="panel-copy">Usage pace: <strong><%= String.replace(@payload.pacing.signal, "_", " ") %></strong> ·
+        <%= @payload.pacing.target_percent %>% account target, <%= @payload.pacing.interactive_allowance_percent %>% interactive allowance.</p>
       <p :for={item <- (@throttle && @throttle.avoid) || []} class="panel-copy">
         <strong><%= item.model %></strong> backed off: <%= item.reason %>
       </p>
@@ -420,7 +423,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
       </dl>
       <p class="muted">Terminal usage observed: <%= get_in(@usage, [:accounting, :terminal_observed]) || 0 %> runs ·
         incomplete: <%= get_in(@usage, [:accounting, :incomplete]) || 0 %> runs (90-day history).
-        Separately launched helper/reviewer usage is unknown.</p>
+        Managed helpers: <%= get_in(@usage, [:helpers, :terminal_observed]) || 0 %> with terminal usage ·
+        <%= get_in(@usage, [:helpers, :incomplete]) || 0 %> incomplete. External helper/reviewer coverage is unknown.</p>
+      <p :if={@usage[:external]} class="muted">CLI reviewer/planner reports: <%= @usage.external[:terminal_reported] || 0 %> terminal tails ·
+        <%= @usage.external[:incomplete] || 0 %> incomplete · unverified, outside budget · account debits unknown.</p>
+      <p :if={@usage[:planning]} class="muted">Planning skipped before startup: <%= @usage.planning[:unchanged_skips] || 0 %> ·
+        observed ready promotions: <%= @usage.planning[:ready_promotions] || 0 %> · startup failures: <%= @usage.planning[:startup_failures] || 0 %>.</p>
       <p :if={@usage.status != "ok"} class="error-copy">History unavailable<%= if @usage_error do %>: <%= @usage_error %><% end %>.</p>
       <Charts.columns id="spend-chart" title="Estimated worker spend per day by model, last 14 days" series={spend_series(@usage)} columns={spend_columns(@usage)} format={&format_usd_axis/1} />
     </section>

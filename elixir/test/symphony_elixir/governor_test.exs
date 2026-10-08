@@ -3,6 +3,242 @@ defmodule SymphonyElixir.GovernorTest do
 
   alias SymphonyElixir.{Governor, Project, Quota, Service}
 
+  test "the cached local schedule refreshes on the next day and remains unknown until observed", %{service: service} do
+    service = %{service | quiet_window: %Service.QuietWindow{}}
+    Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2026-10-08 10:00:00Z] end)
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :governor_now) end)
+    start_supervised!({Governor, service})
+    Governor.checkin("a", 0, 0, 1)
+    Governor.checkin("b", 0, 0)
+    assert Governor.snapshot().quiet_window.phase == "active"
+    Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2026-10-09 10:00:00Z] end)
+    assert Governor.snapshot().quiet_window.phase == "unknown"
+    assert {:wait, _} = Governor.acquire("a", "acceptance", :issue, quiet: true)
+    send(Process.whereis(Governor), :helper_heartbeat)
+    assert Governor.snapshot().quiet_window.phase == "active"
+  end
+
+  test "pending quiet work drains at turn boundaries, waits for all capacity, and releases after its window", %{service: service} do
+    service = %{service | quiet_window: %Service.QuietWindow{}}
+    Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2026-10-08 08:00:00Z] end)
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :governor_now) end)
+    start_supervised!({Governor, service})
+    Governor.checkin("a", 0, 0, 1)
+    Governor.checkin("b", 0, 0)
+    assert {:wait, "waiting for the owner-confirmed quiet acceptance window"} = Governor.acquire("a", "acceptance", :issue, quiet: true)
+    assert :ok = Governor.acquire("b", "ordinary", :issue)
+    Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2026-10-08 09:30:00Z] end)
+    assert Governor.draining?()
+    assert Governor.checkin("a", 0, 0, 1).slots == 0
+    assert {:wait, "draining for a deploy"} = Governor.acquire("b", "new", :issue)
+    Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2026-10-08 10:00:00Z] end)
+    refute Governor.draining?()
+    assert {:wait, "holding the service for quiet acceptance"} = Governor.acquire("b", "new", :issue)
+    assert {:wait, _} = Governor.acquire("a", "acceptance", :issue, quiet: true)
+    Governor.release("b", "ordinary")
+    assert :ok = Governor.acquire("a", "acceptance", :issue, quiet: true)
+    assert Governor.snapshot().busy == 1
+    assert Governor.snapshot().quiet_window.phase == "active"
+    Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2026-10-08 11:00:00Z] end)
+    assert Governor.draining?()
+    Governor.release("a", "acceptance")
+    refute Governor.draining?()
+    assert :ok = Governor.acquire("b", "new", :issue)
+    Governor.checkin("a", 0, 0, 0)
+    assert Governor.snapshot().quiet_window == %{phase: "idle"}
+  end
+
+  test "helper history is bounded, raw exits fail visibly, and start errors do not consume capacity", %{service: service, state_root: root} do
+    {service, context} = helper_fixture(service, root, 2)
+    start_supervised!({Governor, service})
+    Governor.checkin("a", 0, 0)
+    Governor.checkin("b", 0, 0)
+    Governor.acquire("a", "parent", :issue)
+    Application.put_env(:symphony_elixir, :helper_runner, fn _, _, _ -> receive do: (:stop -> {:ok, %{}}) end)
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :helper_runner) end)
+    assert {:ok, first} = Governor.helper_start(context, %{"question" => "Inspect"})
+    child = :sys.get_state(Governor).helpers[first.helper_id].pid
+    Process.exit(child, :kill)
+    assert_eventually(fn -> Governor.snapshot().helpers.busy == 0 end)
+    assert {:ok, %{status: "failed"}} = Governor.helper_status(first.helper_id)
+
+    :sys.replace_state(Governor, fn state ->
+      sample = state.helpers[first.helper_id]
+      %{state | helpers: Map.new(1..130, fn n -> {"old-#{n}", %{sample | id: "old-#{n}"}} end)}
+    end)
+
+    assert {:ok, _} = Governor.helper_start(context, %{"question" => "Inspect"})
+    assert map_size(:sys.get_state(Governor).helpers) == 128
+    start_supervised!({Task.Supervisor, name: Project.via("b", :task_supervisor), max_children: 0}, id: :rejected_helpers)
+    Governor.acquire("b", "other-parent", :issue)
+    other_context = %{context | project: "b", issue_id: "other-parent"}
+    assert {:error, {:helper_start_failed, :max_children}} = Governor.helper_start(other_context, %{"question" => "Inspect"})
+    assert SymphonyElixir.Helpers.execute("helper_status", %{"helper_id" => "missing"}, context)["success"] == false
+    assert SymphonyElixir.Helpers.execute("helper_start", %{"question" => "Inspect"}, context)["success"] == true
+    state = :sys.get_state(Governor)
+    id = Enum.find_value(state.helpers, fn {id, helper} -> if is_pid(helper.pid), do: id end)
+    assert SymphonyElixir.Helpers.execute("helper_cancel", %{"helper_id" => id}, context)["success"] == true
+    stop_supervised!(Governor)
+    File.mkdir_p!(root)
+    File.write!(Path.join(root, "quota-epoch.term"), "corrupt")
+    start_supervised!({Governor, service})
+    assert Governor.snapshot().pacing.signal == "unknown"
+  end
+
+  test "five helpers share one global cap without taking primary slots; completion events stay ordered", %{service: service, state_root: root} do
+    {service, context} = helper_fixture(service, root, 5)
+    start_supervised!({Governor, service})
+    Governor.checkin("a", 0, 0)
+    Governor.checkin("b", 0, 0)
+    assert :ok = Governor.acquire("a", "parent", :issue)
+    assert :ok = Governor.acquire("b", "other-parent", :issue)
+    parent = self()
+
+    Application.put_env(:symphony_elixir, :helper_runner, fn prepared, details, _ ->
+      send(parent, {:helper_running, self(), details.run_id})
+      receive do: (:complete -> :ok)
+      usage = %{event: :observed_usage, timestamp: DateTime.utc_now(), total_tokens: 123}
+      send(prepared.context.recipient, {:helper_update, details, usage})
+      {:ok, %{summary: "done", source_sha: prepared.source_sha}}
+    end)
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :helper_runner) end)
+
+    helpers =
+      for n <- 1..5 do
+        ctx = if rem(n, 2) == 0, do: %{context | project: "b", issue_id: "other-parent"}, else: context
+        assert {:ok, helper} = Governor.helper_start(ctx, %{"question" => "Inspect #{n}"})
+        assert_receive {:helper_running, pid, id}
+        assert id == helper.helper_id
+        {pid, helper}
+      end
+
+    assert %{busy: 2, helpers: %{busy: 5, slots: 5}} = Governor.snapshot()
+    assert {:error, :helper_capacity} = Governor.helper_start(context, %{"question" => "Sixth"})
+    assert {:error, :helper_not_found} = Task.async(fn -> Governor.helper_status(elem(hd(helpers), 1).helper_id) end) |> Task.await()
+    assert Governor.observe().helpers.busy == 5
+
+    {pid, first} = hd(helpers)
+    assert {:ok, %{status: "running"}} = Governor.helper_status(first.helper_id)
+    send(pid, :complete)
+    assert_receive {:helper_update, %{run_id: id}, %{event: :helper_started}}
+    assert id == first.helper_id
+    assert_receive {:helper_update, %{run_id: ^id}, %{event: :observed_usage}}
+    assert_receive {:helper_update, %{run_id: ^id}, %{event: :helper_finished, status: "completed"}}
+    assert %{helpers: %{busy: 4}, busy: 2} = Governor.snapshot()
+    assert {:ok, %{status: "completed", result: %{summary: "done"}}} = Governor.helper_status(id)
+
+    send(Process.whereis(Governor), :helper_heartbeat)
+    assert_receive {:helper_update, _, %{event: :helper_heartbeat}}
+    Governor.cancel_helpers(self())
+
+    for {pid, _helper} <- tl(helpers) do
+      ref = Process.monitor(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}
+    end
+
+    assert_eventually(fn -> Governor.snapshot().helpers.busy == 0 end)
+    assert :ok = SymphonyElixir.Helpers.cancel_owned()
+    assert Governor.snapshot().busy == 2
+  end
+
+  test "helpers refuse drain, quiet reservations and throttle; cancel retains the PID until DOWN", %{service: service, state_root: root} do
+    {service, context} = helper_fixture(service, root, 2)
+    start_supervised!({Governor, service})
+    Governor.checkin("a", 0, 0)
+    Governor.checkin("b", 0, 0)
+    assert :ok = Governor.acquire("a", "parent", :issue)
+    assert {:error, :parent_not_running} = Governor.helper_start(%{context | issue_id: "missing"}, %{"question" => "Inspect"})
+    File.mkdir_p!(root)
+    File.write!(Path.join(root, "drain"), "")
+    assert {:error, :service_draining_or_starting} = Governor.helper_start(context, %{"question" => "Inspect"})
+    File.rm!(Path.join(root, "drain"))
+    assert {:wait, _} = Governor.acquire("b", "quiet", :research, exclusive: "global")
+    assert {:error, :quiet_research_reserved} = Governor.helper_start(context, %{"question" => "Inspect"})
+    :sys.replace_state(Governor, fn state -> put_in(state.schedule.reservation, nil) end)
+    Governor.checkin("a", 11_000_000, 0)
+    assert {:error, :helper_throttled} = Governor.helper_start(context, %{"question" => "Inspect"})
+    Governor.checkin("a", 0, 0)
+
+    Application.put_env(:symphony_elixir, :helper_runner, fn _, _, _ -> receive do: (:stop -> {:ok, %{}}) end)
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :helper_runner) end)
+    assert {:ok, helper} = Governor.helper_start(context, %{"question" => "Inspect"})
+    state = :sys.get_state(Governor)
+    assert {:ok, %{status: "cancelling"}} = Governor.helper_cancel(helper.helper_id)
+    request = {:helper_cancel, helper.helper_id}
+    assert {:reply, {:ok, %{status: "cancelling"}}, cancelled} = Governor.handle_call(request, {self(), make_ref()}, state)
+    assert is_pid(cancelled.helpers[helper.helper_id].pid)
+    assert_eventually(fn -> Governor.snapshot().helpers.busy == 0 end)
+    assert {:ok, %{status: "stopped"}} = Governor.helper_status(helper.helper_id)
+    assert {:ok, %{status: "stopped"}} = Governor.helper_cancel(helper.helper_id)
+    send(Process.whereis(Governor), {:helper_result, helper.helper_id, {:ok, %{summary: "stale"}}})
+    send(Process.whereis(Governor), {:helper_timeout, helper.helper_id})
+    send(Process.whereis(Governor), {:helper_update, helper, %{event: :stale}})
+    assert {:ok, %{status: "stopped"}} = Governor.helper_status(helper.helper_id)
+  end
+
+  test "parent exit, absolute timeout, runner failure and absent supervision free helper capacity", %{service: service, state_root: root} do
+    {service, context} = helper_fixture(service, root, 2)
+    start_supervised!({Governor, service})
+    Governor.checkin("a", 0, 0)
+    Governor.checkin("b", 0, 0)
+    Governor.acquire("a", "parent", :issue)
+    Application.put_env(:symphony_elixir, :helper_runner, fn _, _, _ -> receive do: (:stop -> {:ok, %{}}) end)
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :helper_runner) end)
+    recipient = self()
+
+    owner =
+      spawn(fn ->
+        send(recipient, {:started, Governor.helper_start(context, %{"question" => "Inspect"})})
+        receive do: (:stop -> :ok)
+      end)
+
+    assert_receive {:started, {:ok, helper}}
+    send(owner, :stop)
+    assert_eventually(fn -> Governor.snapshot().helpers.busy == 0 end)
+    refute Process.alive?(owner)
+    assert {:error, :helper_not_found} = Governor.helper_status(helper.helper_id)
+
+    assert {:ok, helper} = Governor.helper_start(context, %{"question" => "Inspect"})
+    send(Process.whereis(Governor), {:helper_timeout, helper.helper_id})
+    assert_eventually(fn -> Governor.snapshot().helpers.busy == 0 end)
+    assert {:ok, %{status: "failed", result: %{error: error}}} = Governor.helper_status(helper.helper_id)
+    assert error =~ "helper_timeout"
+    Application.put_env(:symphony_elixir, :helper_runner, fn _, _, _ -> raise "failure" end)
+    assert {:ok, helper} = Governor.helper_start(context, %{"question" => "Inspect"})
+    assert_eventually(fn -> Governor.snapshot().helpers.busy == 0 end)
+    assert {:ok, %{status: "failed"}} = Governor.helper_status(helper.helper_id)
+    Application.put_env(:symphony_elixir, :helper_runner, fn _, _, _ -> throw(:failure) end)
+    assert {:ok, _} = Governor.helper_start(context, %{"question" => "Inspect"})
+    assert_eventually(fn -> Governor.snapshot().helpers.busy == 0 end)
+    Governor.acquire("b", "other-parent", :issue)
+    other_context = %{context | project: "b", issue_id: "other-parent"}
+    assert {:error, :helper_supervisor_unavailable} = Governor.helper_start(other_context, %{"question" => "Inspect"})
+    :sys.replace_state(Governor, fn state -> put_in(state.service.helpers.slots, 0) end)
+    assert {:error, :helpers_disabled} = Governor.helper_start(context, %{"question" => "Inspect"})
+  end
+
+  defp helper_fixture(service, root, slots) do
+    workspace = Path.join(root, "source")
+    File.mkdir_p!(workspace)
+    System.cmd("git", ["init", "-q"], cd: workspace)
+    System.cmd("git", ["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "-qm", "source"], cd: workspace)
+    start_supervised!({Task.Supervisor, name: Project.via("a", :task_supervisor)})
+    service = %{service | helpers: %Service.Helpers{slots: slots}}
+    # The second supervisor is needed only by the cross-project capacity test.
+    if slots == 5, do: start_supervised!({Task.Supervisor, name: Project.via("b", :task_supervisor)}, id: :other_helpers)
+    context = %{workspace: workspace, run_id: "parent-run", project: "a", issue_id: "parent", recipient: self()}
+    {service, context}
+  end
+
+  defp assert_eventually(fun, attempts \\ 100) do
+    cond do
+      fun.() -> :ok
+      attempts == 0 -> flunk("helper lifecycle did not settle")
+      true -> Process.sleep(10) && assert_eventually(fun, attempts - 1)
+    end
+  end
+
   setup do
     root = Path.join(System.tmp_dir!(), "symphony-governor-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)

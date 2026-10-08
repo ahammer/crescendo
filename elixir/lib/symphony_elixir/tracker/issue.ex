@@ -60,11 +60,12 @@ defmodule SymphonyElixir.Tracker.Issue do
           updated_at: DateTime.t() | nil
         }
 
-  @type kind :: :issue | :pull_request | :research
+  @type kind :: :issue | :pull_request | :research | :helper
 
   @doc "Whether the item can be refreshed through the tracker adapter."
   @spec tracker_backed?(t()) :: boolean()
   def tracker_backed?(%__MODULE__{kind: :research}), do: false
+  def tracker_backed?(%__MODULE__{kind: :helper}), do: false
   def tracker_backed?(%__MODULE__{}), do: true
 
   @spec label_names(t()) :: [String.t()]

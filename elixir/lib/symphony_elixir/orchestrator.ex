@@ -18,6 +18,7 @@ defmodule SymphonyElixir.Orchestrator do
     Operations,
     Project,
     Quota,
+    RepoAutopilot,
     Startup,
     StatusDashboard,
     Throttle,
@@ -64,6 +65,7 @@ defmodule SymphonyElixir.Orchestrator do
       :operations_last_sync_ms,
       task_supervisor: SymphonyElixir.TaskSupervisor,
       running: %{},
+      helpers: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
       blocked: %{},
@@ -239,6 +241,47 @@ defmodule SymphonyElixir.Orchestrator do
       %{run_id: _} -> {:noreply, state}
       _ -> apply_worker_update(type, issue_id, payload, state)
     end
+  end
+
+  def handle_info({:helper_update, details, update}, state) do
+    id = details.run_id
+    issue = %Issue{id: id, identifier: details.issue_identifier, kind: :helper}
+    entry = Map.get(state.helpers, id)
+
+    entry =
+      if entry do
+        entry
+      else
+        Operations.start_run(
+          state.operations,
+          id,
+          Map.merge(details, %{kind: :helper, item_attempt: 1, requested_route: %{model: details.model, effort: details.effort}, summary: "Read-only helper for #{details.parent_run_id}"})
+        )
+
+        Map.merge(details, %{issue: issue, identifier: issue.identifier, status: "running", started_at: update.timestamp, pricing_rates: Operations.rates(Config.settings!().pricing)})
+      end
+
+    {entry, update} = account_thread_update(state.operations, entry, update)
+    delta = update[:accounted_delta] || Usage.normalize(%{})
+    state = state |> apply_codex_token_delta(delta) |> apply_codex_rate_limits(update)
+
+    if update.event == :helper_finished do
+      Operations.finish_run(state.operations, id, update.status, %{issue_identifier: issue.identifier, parent_run_id: details.parent_run_id, reason: update.reason, model: entry.model})
+    end
+
+    # Helper progress does not change its parent's turn or terminal state.
+    running =
+      case state.running[details.parent_issue_id] do
+        %{run_id: parent} = parent_entry when parent == details.parent_run_id -> Map.put(state.running, details.parent_issue_id, Map.put(parent_entry, :last_codex_timestamp, update.timestamp))
+        _ -> state.running
+      end
+
+    entry = if update.event == :helper_finished, do: Map.merge(entry, %{finished: true, status: update.status}), else: entry
+    helpers = Map.put(state.helpers, id, entry)
+    completed = for {key, %{finished: true}} <- helpers, do: key
+    helpers = Map.drop(helpers, Enum.take(completed, max(map_size(helpers) - 128, 0)))
+    notify_dashboard()
+    {:noreply, %{state | helpers: helpers, running: running}}
   end
 
   def handle_info({:pull_requests_fetched, result}, state) do
@@ -626,6 +669,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_dispatch(%State{} = state) do
+    delta = Operations.import_auxiliary(state.operations, System.get_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT"))
+    state = apply_codex_token_delta(state, delta)
+
     state =
       state
       |> refresh_startup_retries()
@@ -635,6 +681,8 @@ defmodule SymphonyElixir.Orchestrator do
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_issues_by_states(Config.settings!().tracker.active_states) do
+      record_ready_changes(state.operations, state.polled_issues, issues, state.issues_observed_at)
+
       state =
         %{
           state
@@ -688,6 +736,18 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.error("Failed to fetch from issue tracker: #{inspect(reason)}")
         %{state | issues_error: "tracker fetch failed"}
     end
+  end
+
+  defp record_ready_changes(_table, _previous, _issues, nil), do: :ok
+
+  defp record_ready_changes(table, previous, issues, _observed_at) do
+    before = Map.new(previous, &{&1.id, &1})
+
+    for issue <- issues, issue.dispatchable, match?(%Issue{dispatchable: false}, before[issue.id]) do
+      Operations.event(table, "ready_promoted", %{issue_identifier: issue.identifier, issue_url: issue.url, summary: "Observed work becoming executable"})
+    end
+
+    :ok
   end
 
   defp reconcile_running_issues(%State{} = state) do
@@ -2253,8 +2313,15 @@ defmodule SymphonyElixir.Orchestrator do
 
     Operations.event(state.operations, event, details)
 
+    task_state = Autopilot.record_research_finished(state.autopilot, research.channel, outcome, now(), autopilot)
+
+    task_state =
+      if is_binary(research[:input_key]) and outcome in [:delivered, :unverified],
+        do: Autopilot.record_preflight(task_state, research.channel, research.input_key, now(), true),
+        else: task_state
+
     state
-    |> put_autopilot(Autopilot.record_research_finished(state.autopilot, research.channel, outcome, now(), autopilot))
+    |> put_autopilot(task_state)
     |> release_issue_claim(issue_id)
   end
 
@@ -2312,14 +2379,125 @@ defmodule SymphonyElixir.Orchestrator do
           put_autopilot(state, autopilot)
 
         {autopilot, item} ->
-          state |> put_autopilot(autopilot) |> dispatch_issue(item)
+          state |> put_autopilot(autopilot) |> preflight_research(item)
       end
     else
       state
     end
   end
 
+  defp preflight_research(state, %Issue{research: %{skip_unchanged: true}} = item) do
+    case planning_input_key(state) do
+      {:ok, key} ->
+        if Autopilot.unchanged?(state.autopilot, item.research.channel, key, now()) do
+          Operations.event(state.operations, "task_preflight_skipped", %{
+            issue_identifier: item.identifier,
+            category: Operations.task_category(item.identifier),
+            summary: "Complete planning inputs unchanged; no worker started"
+          })
+
+          put_autopilot(state, Autopilot.record_preflight(state.autopilot, item.research.channel, key, now(), false))
+        else
+          dispatch_issue(state, put_in(item.research[:input_key], key))
+        end
+
+      {:error, _reason} ->
+        state
+    end
+  end
+
+  defp preflight_research(state, item), do: dispatch_issue(state, item)
+
+  defp planning_input_key(state) do
+    project = Project.current()
+    repo = RepoAutopilot.status(project)
+    config = Config.settings!()
+
+    with nil <- state.issues_error,
+         nil <- state.pulls_error,
+         true <- fresh_planning_input?(state.issues_observed_at),
+         true <- fresh_planning_input?(state.pulls_observed_at),
+         true <- repo.state in [:synced, :absent] and fresh_planning_input?(repo.checked_at),
+         {:ok, sha} <- RepoAutopilot.revision(project),
+         {:ok, findings} <- planning_findings() do
+      issues =
+        Enum.map(state.polled_issues, &Map.take(&1, [:id, :title, :description, :state, :state_reason, :labels, :blocked_by, :updated_at, :delivery_key, :dispatchable, :pull_request]))
+        |> Enum.sort_by(& &1.id)
+
+      protection = {Map.keys(state.running), state.retry_attempts, state.claimed, state.blocked, state.startup_failures, state.autopilot[:handoff_owners]}
+      key = :crypto.hash(:sha256, :erlang.term_to_binary({sha, issues, state.pull_requests, findings, protection, config})) |> Base.encode16(case: :lower)
+      {:ok, key}
+    else
+      _ -> {:error, :planning_inputs_unknown}
+    end
+  end
+
+  defp fresh_planning_input?(%DateTime{} = at), do: DateTime.diff(now(), at, :second) in 0..600
+  defp fresh_planning_input?(_at), do: false
+
+  defp planning_findings do
+    case System.get_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT") do
+      nil ->
+        {:ok, nil}
+
+      root ->
+        planning_findings(root)
+    end
+  end
+
+  defp planning_findings(root) do
+    with {:ok, latest} <- planning_json(Path.join(root, "autopilot/maintenance/latest.json")),
+         {:ok, costs} <- planning_json(Path.join(root, "autopilot/maintenance/cost-state.json")),
+         {:ok, references} <- planning_reports(root, latest, costs) do
+      {:ok, {latest, costs, references}}
+    end
+  end
+
+  defp planning_reports(root, latest, costs) do
+    keys = [
+      latest && latest["report_key"],
+      latest && latest["grooming_disposition_key"],
+      get_in(costs, ["last_completed", "report_key"]),
+      costs && costs["completed_report_key"],
+      costs && costs["grooming_disposition_key"],
+      costs && costs["last_resume_grooming_disposition_key"]
+    ]
+
+    keys = keys |> Enum.filter(&is_binary/1) |> Enum.uniq()
+
+    paths =
+      Enum.flat_map(keys, fn key ->
+        relative = if String.starts_with?(key, "autopilot/"), do: key, else: "autopilot/maintenance/" <> key
+        path = Path.expand(relative, root)
+        if Path.basename(path) == "findings.json", do: [path, Path.join(Path.dirname(path), "ci-cost.json")], else: [path]
+      end)
+      |> Enum.uniq()
+
+    Enum.reduce_while(paths, {:ok, %{}}, fn path, {:ok, reports} ->
+      with true <- String.starts_with?(path, Path.expand(root) <> "/"),
+           {:ok, value} when not is_nil(value) <- planning_json(path) do
+        {:cont, {:ok, Map.put(reports, path, value)}}
+      else
+        _ -> {:halt, {:error, :planning_report_unknown}}
+      end
+    end)
+  end
+
+  defp planning_json(path) do
+    case File.open(path, [:read, :binary], &IO.binread(&1, 4_194_305)) do
+      {:ok, bytes} when is_binary(bytes) and byte_size(bytes) <= 4_194_304 -> Jason.decode(bytes)
+      {:error, :enoent} -> {:ok, nil}
+      _ -> {:error, :planning_evidence_unknown}
+    end
+  end
+
   defp work_ready?(%Issue{} = issue, %State{} = state) do
+    work_eligible?(issue, state) and quiet_admission(state, issue) == :ok
+  end
+
+  defp quiet_item?(issue), do: Issue.has_required_labels?(issue, [Config.settings!().labels.prefix <> ":quiet"])
+
+  defp work_eligible?(%Issue{} = issue, %State{} = state) do
     candidate_issue?(issue, active_state_set(), terminal_state_set()) and
       not MapSet.member?(state.claimed, issue.id) and
       not Map.has_key?(state.blocked, issue.id) and
@@ -2339,10 +2517,8 @@ defmodule SymphonyElixir.Orchestrator do
   # `none`): nothing else dispatches, including retries, until it finishes.
   # Under a service the Governor's share of the slots applies on top.
   defp available_slots(%State{} = state) do
-    local =
-      if research_running?(state) and state.throttle[:research_exclusive] != "none",
-        do: 0,
-        else: free_slots(state)
+    exclusive = Enum.any?(state.running, fn {_id, entry} -> research_entry?(entry) and research_exclusive(entry.issue, state) != "none" end)
+    local = if exclusive, do: 0, else: free_slots(state)
 
     case state.throttle do
       %{slots: slots} when is_integer(slots) -> min(local, slots)
@@ -2510,6 +2686,12 @@ defmodule SymphonyElixir.Orchestrator do
     {:reply,
      %{
        running: running,
+       helpers:
+         for(
+           {_id, entry} <- state.helpers,
+           entry[:finished] != true,
+           do: Map.take(entry, [:run_id, :parent_run_id, :parent_issue_id, :source_sha, :model, :effort, :status]) |> Map.put(:usage, Operations.run_usage(state.operations, entry.run_id))
+         ),
        retrying: retrying,
        blocked: blocked ++ startup_blocked,
        codex_totals: state.codex_totals,
@@ -2874,8 +3056,17 @@ defmodule SymphonyElixir.Orchestrator do
     spent = Operations.spend_today(state.operations)
 
     if governed?(),
-      do: Governor.checkin(Project.current(), spent, demand(state)),
+      do: Governor.checkin(Project.current(), spent, demand(state), quiet_demand(state)),
       else: Throttle.evaluate(Config.settings!().throttle, state.codex_quota, spent, DateTime.utc_now())
+  end
+
+  defp quiet_demand(state) do
+    # Ignore only the clock gate; quota, route, dependencies and retry admission still apply.
+    candidate = put_in(state.throttle, Map.put(state.throttle || %{}, :quiet_window, %{phase: "active"}))
+
+    Enum.count(state.polled_issues, fn issue ->
+      quiet_item?(issue) and ready_for_dispatch?(issue, candidate, active_state_set(), terminal_state_set())
+    end)
   end
 
   defp governed?, do: Project.current() != nil and Governor.running?()
@@ -2952,11 +3143,18 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp acquire_slot(%State{} = state, %Issue{} = issue, class) do
     if governed?() do
-      with :ok <- Governor.acquire(Project.current(), issue.id, class), do: {:ok, consume_slot(state)}
+      opts = if class == :research, do: [exclusive: research_exclusive(issue, state)], else: []
+      opts = Keyword.put(opts, :quiet, quiet_item?(issue))
+      with :ok <- Governor.acquire(Project.current(), issue.id, class, opts), do: {:ok, consume_slot(state)}
     else
       {:ok, state}
     end
   end
+
+  defp research_exclusive(%Issue{research: research}, state) when is_map(research),
+    do: research[:exclusive] || state.throttle[:research_exclusive] || "project"
+
+  defp research_exclusive(_issue, state), do: state.throttle[:research_exclusive] || "project"
 
   defp consume_slot(%State{throttle: %{slots: slots} = throttle} = state) when is_integer(slots),
     do: %{state | throttle: %{throttle | slots: max(slots - 1, 0)}}
@@ -2974,12 +3172,19 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_admission(state, issue, class) do
-    with :ok <- Throttle.admit(state.throttle, class) do
+    with :ok <- quiet_admission(state, issue),
+         :ok <- Throttle.admit(state.throttle, class) do
       case select_route(state, issue) do
         {:wait, _reason} = wait -> wait
         _route -> :ok
       end
     end
+  end
+
+  defp quiet_admission(state, issue) do
+    if quiet_item?(issue) and get_in(state.throttle || %{}, [:quiet_window, :phase]) != "active",
+      do: {:wait, "waiting for the owner-confirmed quiet acceptance window"},
+      else: :ok
   end
 
   defp dispatch_class(_state, %Issue{kind: :research}), do: :research

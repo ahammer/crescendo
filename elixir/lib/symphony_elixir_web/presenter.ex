@@ -137,12 +137,14 @@ defmodule SymphonyElixirWeb.Presenter do
       service: SourceRevision.metadata(),
       counts: counts,
       running: Enum.map(snapshot.running, &running_entry_payload(&1, transcripts)),
+      helpers: Map.get(snapshot, :helpers, []),
       retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
       blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
       codex_totals: snapshot.codex_totals,
       rate_limits: snapshot.rate_limits,
       quota: quota_payload(Map.get(snapshot, :quota), now),
       throttle: throttle_payload(Map.get(snapshot, :throttle)),
+      pacing: Map.get(snapshot, :pacing),
       usage: usage,
       usage_error: Map.get(snapshot, :operations_error),
       upcoming: upcoming_payload(Map.get(snapshot, :upcoming), usage, settings),
@@ -536,6 +538,8 @@ defmodule SymphonyElixirWeb.Presenter do
       service_slots: throttle[:service_slots],
       busy: throttle[:busy],
       research_hold: throttle[:research_hold],
+      helpers: throttle[:helpers],
+      quiet_window: throttle[:quiet_window],
       draining: throttle[:draining]
     }
   end

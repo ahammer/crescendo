@@ -21,6 +21,8 @@ defmodule SymphonyElixir.SSHTest do
     trace = File.read!(trace_file)
     assert trace =~ "-T -p 2200 root@[::1] bash -lc"
     assert trace =~ "printf ok"
+    assert trace =~ "BatchMode=yes"
+    assert trace =~ "ConnectTimeout=15"
   end
 
   test "run/3 leaves unbracketed IPv6-style targets unchanged" do

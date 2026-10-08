@@ -123,11 +123,22 @@ defmodule SymphonyElixir.AgentRunner do
     session_opts = [
       worker_host: worker_host,
       work_item: issue.identifier,
+      run_id: Keyword.get(opts, :run_id),
       kind: issue.kind,
       codex_settings: codex,
       checkpoint: Keyword.get(opts, :checkpoint),
       contract_hash: contract_hash(issue, opts),
-      on_message: on_message
+      on_message: on_message,
+      helper_context: %{
+        run_id: Keyword.get(opts, :run_id),
+        project: SymphonyElixir.Project.current(),
+        issue_id: issue.id,
+        identifier: issue.identifier,
+        workspace: workspace,
+        recipient: codex_update_recipient,
+        codex_settings: codex,
+        worker_host: worker_host
+      }
     ]
 
     with {:ok, route} <- model_route(issue, opts),
@@ -135,7 +146,7 @@ defmodule SymphonyElixir.AgentRunner do
          :ok <- send_worker_message(codex_update_recipient, issue, :worker_model_route, route, opts),
          {:ok, session} <-
            startup_step(:session_start, fn ->
-             AppServer.start_session(workspace, [model_route: route] ++ session_opts)
+             start_session(workspace, route, session_opts)
            end) do
       send_worker_message(codex_update_recipient, issue, :worker_admitted, %{}, opts)
 
@@ -155,6 +166,7 @@ defmodule SymphonyElixir.AgentRunner do
           AppServer.read_account_usage(session, on_message: on_message)
         after
           AppServer.stop_session(session)
+          SymphonyElixir.Helpers.cancel_owned()
         end
       end
     end
@@ -201,6 +213,23 @@ defmodule SymphonyElixir.AgentRunner do
         else: ""
 
     Logger.info("Selected model route for #{issue_context(issue)} label=#{route["label"]} model=#{route["model"]} effort=#{route["effort"]} tier=#{route["tier"] || "none"}#{backoff}")
+  end
+
+  defp start_session(workspace, route, opts) do
+    codex = opts[:codex_settings]
+
+    model = (route || %{})["model"]
+
+    session =
+      case SymphonyElixir.Helpers.enabled?() do
+        true -> SymphonyElixir.Helpers.lead_session(codex, model)
+        false -> {:ok, codex, nil}
+      end
+
+    with {:ok, codex, config} <- session do
+      options = [model_route: route, thread_config: config, codex_settings: codex]
+      AppServer.start_session(workspace, options ++ opts)
+    end
   end
 
   defp do_run_codex_turns(

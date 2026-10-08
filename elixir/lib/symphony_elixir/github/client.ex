@@ -34,13 +34,13 @@ defmodule SymphonyElixir.GitHub.Client do
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(state_names) when is_list(state_names) do
     config = Config.settings!()
-    fetch_issues_by_states(state_names, config.tracker, &perform_request/5, pull_policy(config))
+    fetch_issues_by_states(state_names, planning_tracker(config), &perform_request/5, pull_policy(config))
   end
 
   @spec fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_ids(issue_ids) when is_list(issue_ids) do
     config = Config.settings!()
-    fetch_issues_by_ids(issue_ids, config.tracker, &perform_request/5, pull_policy(config))
+    fetch_issues_by_ids(issue_ids, planning_tracker(config), &perform_request/5, pull_policy(config))
   end
 
   @spec clear_label(Issue.t(), String.t()) :: :ok | {:error, term()}
@@ -151,6 +151,23 @@ defmodule SymphonyElixir.GitHub.Client do
 
     with {:ok, settings} <- settings(tracker_settings) do
       request_with_settings("GET", "/repos/#{encoded_repo(settings.repo)}/contents/#{encoded}", %{}, nil, settings, request_fun, true)
+    end
+  end
+
+  @doc "Reads the current default-branch commit for native planning preflight."
+  @spec source_revision(keyword()) :: {:ok, String.t()} | {:error, term()}
+  def source_revision(opts \\ []) do
+    tracker_settings = Keyword.get_lazy(opts, :tracker_settings, fn -> Config.settings!().tracker end)
+    request_fun = Keyword.get(opts, :request_fun, &perform_request/5)
+
+    with {:ok, settings} <- settings(tracker_settings),
+         path = "/repos/#{encoded_repo(settings.repo)}/commits",
+         {:ok, [%{"sha" => sha} | _]} when is_binary(sha) <-
+           request_with_settings("GET", path, %{"per_page" => 1}, nil, settings, request_fun, true) do
+      {:ok, sha}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :source_revision_unavailable}
     end
   end
 
@@ -339,6 +356,12 @@ defmodule SymphonyElixir.GitHub.Client do
   def fetch_issues_by_ids_for_test(issue_ids, tracker_settings, request_fun, pull_policy \\ nil)
       when is_list(issue_ids) and is_map(tracker_settings) and is_function(request_fun, 5) do
     fetch_issues_by_ids(issue_ids, tracker_settings, request_fun, pull_policy)
+  end
+
+  # Unchanged-input planning requires dependencies for unready issues too.
+  defp planning_tracker(config) do
+    complete = config.autopilot.enabled and Enum.any?(config.autopilot.channels, fn {_name, task} -> task["skip_unchanged"] == true end)
+    Map.put(config.tracker, :planning_dependencies, complete)
   end
 
   # Pull requests are work items only when autopilot is enabled. The policy
@@ -655,7 +678,7 @@ defmodule SymphonyElixir.GitHub.Client do
 
   defp fetch_dependencies(issues, tracker_settings, settings, request_fun) do
     required_labels = Map.get(tracker_settings, :required_labels, [])
-    settings = Map.put(settings, :excluded_labels, Map.get(tracker_settings, :excluded_labels, []))
+    settings = settings |> Map.put(:excluded_labels, Map.get(tracker_settings, :excluded_labels, [])) |> Map.put(:planning_dependencies, tracker_settings[:planning_dependencies] == true)
 
     Enum.reduce_while(issues, {:ok, []}, fn issue, {:ok, acc} ->
       case fetch_dependencies_for_issue(issue, required_labels, settings, request_fun) do
@@ -670,7 +693,7 @@ defmodule SymphonyElixir.GitHub.Client do
   end
 
   defp fetch_dependencies_for_issue(issue, required_labels, settings, request_fun) do
-    if issue.kind == :issue and Issue.routable?(issue, required_labels) and issue.state == "open" do
+    if issue.kind == :issue and (settings.planning_dependencies or Issue.routable?(issue, required_labels)) and issue.state == "open" do
       with {:ok, blockers} <- fetch_blockers(settings, issue.id, request_fun, 1, []) do
         dispatchable = Enum.all?(blockers, &satisfied_blocker?/1)
         admit_handoff(%{issue | blocked_by: blockers, dispatchable: dispatchable}, settings, request_fun)
@@ -756,7 +779,7 @@ defmodule SymphonyElixir.GitHub.Client do
 
     with {:ok, payload} <- request_with_settings("GET", path, params, nil, settings, request_fun, false),
          true <- is_list(payload) or {:error, :github_unknown_payload},
-         {:ok, blockers} <- normalize_blockers(payload) do
+         {:ok, blockers} <- normalize_blockers(payload, settings[:planning_dependencies] == true) do
       acc = [blockers | acc]
 
       if length(payload) < @page_size do
@@ -767,12 +790,13 @@ defmodule SymphonyElixir.GitHub.Client do
     end
   end
 
-  defp normalize_blockers(payload) do
+  defp normalize_blockers(payload, planning?) do
     blockers =
       Enum.map(payload, fn
         %{"id" => id, "number" => number, "state" => state} = blocker
         when is_integer(id) and is_integer(number) and number > 0 and state in ["open", "closed"] ->
-          %{id: Integer.to_string(id), identifier: "GH-#{number}", state: state, state_reason: blocker["state_reason"]}
+          value = %{id: Integer.to_string(id), identifier: "GH-#{number}", state: state, state_reason: blocker["state_reason"]}
+          if planning?, do: Map.put(value, :planning, Map.take(blocker, ~w(title body labels updated_at))), else: value
 
         _ ->
           nil

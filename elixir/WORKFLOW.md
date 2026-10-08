@@ -30,6 +30,9 @@ hooks:
 # Pre-model startup failures retry after 10/20s, then block with 30-minute recovery probes.
 # Hook/workspace/worker/Codex changes allow immediate retry; model attempt caps are independent.
 # Remote mandatory hooks require GNU timeout. See ../docs/crescendo.md for recovery.
+# Service-level helpers/quiet_window live in crescendo.yml (not this front matter).
+# Planning channels may set exclusive: none, every: 30m, skip_unchanged: true.
+# Quiet acceptance issues carry <labels.prefix>:quiet and retain their normal ready label.
 agent:
   max_concurrent_agents: 10
   max_turns: 20

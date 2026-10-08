@@ -3,6 +3,19 @@ defmodule SymphonyElixir.SchedulingTest do
 
   alias SymphonyElixir.Scheduling
 
+  test "task overrides allow light grooming beside work and make heavy research wait for helpers" do
+    s = Scheduling.new(3, [{"a", 1, nil, "global"}, {"b", 1, nil, "none"}])
+    assert {:ok, s} = Scheduling.acquire(s, "a", "grooming", :research, 0, exclusive: "none")
+    assert Scheduling.research_hold(s, 0) == nil
+    assert {:ok, s} = Scheduling.acquire(s, "b", "work", :issue, 0)
+    {s, _} = Scheduling.release(s, "a", "grooming")
+    {s, _} = Scheduling.release(s, "b", "work")
+    assert {:wait, _, s, []} = Scheduling.acquire(s, "a", "maintenance", :research, 1, exclusive: "global", auxiliary_busy: 2)
+    assert Scheduling.research_hold(s, 1) == %{project: "a", phase: "reserved"}
+    assert {:ok, s} = Scheduling.acquire(s, "a", "maintenance", :research, 2, exclusive: "global", auxiliary_busy: 0)
+    assert Scheduling.research_hold(s, 2) == %{project: "a", phase: "running"}
+  end
+
   defp schedule(slots, projects), do: Scheduling.new(slots, Enum.map(projects, fn {id, weight} -> {id, weight, nil, "project"} end))
 
   # Every project always has work; whoever may take the free slot runs one item.

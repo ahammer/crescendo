@@ -3,6 +3,40 @@ defmodule SymphonyElixir.ServiceTest do
 
   alias SymphonyElixir.{Project, Projects, Service}
 
+  test "the owner window follows Vancouver daylight time and fails closed on malformed configuration" do
+    base = %{"projects" => %{"a" => %{}}, "quiet_window" => %{}}
+    assert {:ok, %{quiet_window: window}} = Service.parse(base, "/tmp/service.yml")
+    assert Service.QuietWindow.observe(window, ~U[2026-10-08 09:30:00Z]).phase == "preparing"
+    assert Service.QuietWindow.observe(window, ~U[2026-10-08 10:00:00Z]).phase == "active"
+    assert Service.QuietWindow.observe(window, ~U[2026-10-08 11:00:00Z]).phase == "idle"
+    assert Service.QuietWindow.observe(window, ~U[2025-12-08 11:00:00Z]).phase == "active"
+    assert Service.QuietWindow.observe(nil, DateTime.utc_now()) == %{phase: "idle"}
+
+    for invalid <- [%{"start" => "25:00"}, %{"end" => "02:00"}, %{"start" => "05:00"}, %{"time_zone" => "UTC"}, %{"drain_minutes" => 121}] do
+      assert {:error, _} = Service.parse(%{base | "quiet_window" => invalid}, "/tmp/service.yml")
+    end
+
+    assert Service.QuietWindow.observe(%{window | time_zone: "not/a/zone"}, DateTime.utc_now()).phase == "unknown"
+    prior = System.get_env("PATH")
+    System.put_env("PATH", "/missing-python")
+
+    try do
+      assert Service.QuietWindow.observe(window, DateTime.utc_now()).phase == "unknown"
+    after
+      System.put_env("PATH", prior)
+    end
+  end
+
+  test "leaf helpers are disabled by default and limited to five Luna max runs" do
+    base = %{"projects" => %{"a" => %{}}}
+    assert {:ok, %{helpers: %{slots: 0}}} = Service.parse(base, "/tmp/service.yml")
+    assert {:ok, %{helpers: %{slots: 5, model: "gpt-6-luna", effort: "max", timeout_ms: 900_000}}} = Service.parse(Map.put(base, "helpers", %{"slots" => 5}), "/tmp/service.yml")
+
+    for invalid <- [%{"slots" => 6}, %{"slots" => -1}, %{"model" => "gpt-6.1-sol"}, %{"effort" => "ultra"}, %{"timeout_ms" => 900_001}, %{"timeout_ms" => 0}] do
+      assert {:error, _} = Service.parse(Map.put(base, "helpers", invalid), "/tmp/service.yml")
+    end
+  end
+
   setup do
     root = Path.join(System.tmp_dir!(), "symphony-service-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
