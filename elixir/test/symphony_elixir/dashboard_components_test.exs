@@ -7,6 +7,12 @@ defmodule SymphonyElixir.DashboardComponentsTest do
 
   @now ~U[2026-09-27 12:00:00Z]
 
+  test "work icons render startup, helper and future task categories" do
+    for name <- ["startup", "helper", "future-task"] do
+      assert render_component(&SymphonyElixirWeb.Timeline.icon/1, name: name) =~ "<svg"
+    end
+  end
+
   test "work items are named by kind, with pull request and research context" do
     assert C.kind_name(%{kind: :pull_request}) == "pr"
     assert C.kind_name(%{kind: "research"}) == "research"

@@ -328,6 +328,7 @@ defmodule SymphonyElixirWeb.Timeline do
   defp icon_paths("retired"), do: ["M3 4h18v4H3z", "M5 8v12h14V8", "M10 12h4"]
   defp icon_paths("blocked"), do: ["M5 11h14v10H5z", "M8 11V7a4 4 0 0 1 8 0v4"]
   defp icon_paths("retry"), do: ["M3 12a9 9 0 1 0 3-6.7", "M3 4v5h5"]
+  defp icon_paths(_kind), do: [circle(12, 12, 9), "M12 8v4", "M12 16v.01"]
 
   defp circle(cx, cy, r), do: "M#{cx - r} #{cy}a#{r} #{r} 0 1 0 #{2 * r} 0a#{r} #{r} 0 1 0 #{-2 * r} 0"
 end
