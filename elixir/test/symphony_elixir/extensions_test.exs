@@ -1124,7 +1124,8 @@ defmodule SymphonyElixir.ExtensionsTest do
       %{model: "gpt-6.1-sol", category: "delivery", runs: 4, usd_micro: 2_000_000, timed: 4, seconds: 2_400},
       %{model: "gpt-6.1-sol", category: "review", runs: 2, usd_micro: 500_000, timed: 0, seconds: 0},
       %{model: "gpt-6.1-sol", category: "research", runs: 1, usd_micro: 700_000, timed: 1, seconds: 60},
-      %{model: "gpt-6.1-sol", category: "marketing", runs: 1, usd_micro: 100_000, timed: 1, seconds: 60}
+      %{model: "gpt-6.1-sol", category: "marketing", runs: 1, usd_micro: 100_000, timed: 1, seconds: 60},
+      %{model: "gpt-6.1-sol", category: "startup", runs: 1, usd_micro: 0, timed: 0, seconds: 0}
     ]
 
     img = fn n, id, title -> %{src: "/artifacts/0123456789abcdef01234567/#{n}.png", issue_identifier: id, title: title, at: at.(n * 10)} end
