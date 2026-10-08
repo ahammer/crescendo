@@ -776,3 +776,39 @@ the operator's responsibility; the dashboard stays read-only. No arbitrary prose
 historical migration is inferred.
 Legacy replacement headings prevent an issue from declaring itself a canonical root, including
 when its record would otherwise authorize another successor.
+
+
+### Shared helper and quiet acceptance policy
+
+A service can keep three primary slots while adding up to five global read-only helpers.
+Set `helpers: {slots: 5, model: gpt-6-luna, effort: max, timeout_ms: 900000}` in `crescendo.yml`;
+helpers default to disabled. Leads receive `helper_start`, `helper_status` and `helper_cancel`.
+A request names a bounded question and optional text evidence keys relative to the external
+Metalrain evidence root. Read tools use the captured Git commit, reject replacement refs,
+links and pathspecs, and bound source/evidence files to 128 KiB and returned text to 16 KiB.
+The helper has no shell, edits, browser, apps, MCP, nested delegation or machine lease.
+Its native JavaScript dispatcher calls only curated reads; native approval requests fail closed.
+Private, bounded catalogs in sealed anonymous memory remove model metadata that otherwise
+forces patch/delegation capabilities; the user's catalog stays intact. The pinned CLI needs a populated model cache.
+Helpers are supervised with a 15-minute absolute deadline, unique usage lineage and cleanup
+when their parent ends. Cancellation retains capacity until the process stops.
+
+Optional `quiet_window: {start: "03:00", end: "04:00", time_zone: America/Vancouver,
+drain_minutes: 60}` reserves the recurring local window only while otherwise eligible
+`<labels.prefix>:quiet` work is pending. The timezone follows installed IANA rules. Other
+work yields at turn boundaries before the window, quiet tasks wait for the shared pool and
+helpers to empty, and unfinished quiet work yields after the cutoff. Metalrain's measurement
+command also requires `machine-lease run --quiet-window -- <foreground command>`.
+Ordinary work remains available around the clock outside reserved windows.
+
+An autopilot task may use `exclusive: none` for planning alongside delivery, or `exclusive: global`
+for checks that need an idle machine. `skip_unchanged: true` compares fresh source, complete
+open dependency/PR inventories, findings, configuration and protected execution state before
+creating a workspace. Unknown inputs defer; unchanged inputs update only a check cursor,
+never audit coverage, with a full recheck at least daily. Existing maintenance due rules apply.
+
+The state API separates managed helper usage from `usage.external` CLI observations. External
+review/planner reports have claimed identities and unknown account debits; they never affect
+native run usage or budget enforcement. `pacing` projects consumption toward a soft 90% reset
+window target with 10% interactive allowance. It reports uncertainty for stale/missing epochs
+and preserves the daily budget and weekly quota pause.

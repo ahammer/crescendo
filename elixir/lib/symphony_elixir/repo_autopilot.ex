@@ -42,6 +42,10 @@ defmodule SymphonyElixir.RepoAutopilot do
   @spec status(Project.id() | nil) :: status()
   def status(project), do: :persistent_term.get({__MODULE__, project}, %{state: :pending, error: nil, checked_at: nil})
 
+  @doc "Last successfully observed repository commit; errors remain unknown."
+  @spec revision(Project.id() | nil) :: {:ok, String.t()} | {:error, term()}
+  def revision(project), do: :persistent_term.get({__MODULE__, :revision, project}, {:error, :source_revision_unknown})
+
   @impl true
   def init(opts) do
     project = Keyword.get(opts, :project)
@@ -62,6 +66,7 @@ defmodule SymphonyElixir.RepoAutopilot do
       end
 
     :persistent_term.put({__MODULE__, state.project}, status_for(outcome))
+    if is_nil(state.fetch) and github?(), do: :persistent_term.put({__MODULE__, :revision, state.project}, Client.source_revision())
     {:noreply, state}
   end
 

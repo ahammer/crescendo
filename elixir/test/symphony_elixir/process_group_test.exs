@@ -3,6 +3,13 @@ defmodule SymphonyElixir.ProcessGroupTest do
 
   alias SymphonyElixir.ProcessGroup
 
+  test "bounded source reads retain a prefix and stop an infinite producer" do
+    assert {:ok, {"abc", 0}} = ProcessGroup.run(port("printf abc"), 1_000, output_limit: 100)
+    assert {:error, {:output_limit, output}} = ProcessGroup.run(port("exec yes prefix"), 1_000, output_limit: 1_000)
+    assert byte_size(output) == 1_000
+    assert String.starts_with?(output, "prefix")
+  end
+
   test "continuous subprocess output cannot extend the absolute deadline" do
     worker = Task.async(fn -> ProcessGroup.run(port("exec yes"), 50) end)
     result = Task.yield(worker, 1_000) || Task.shutdown(worker, :brutal_kill)

@@ -17,6 +17,26 @@ defmodule SymphonyElixir.AutopilotTest do
 
   @empty %{pr_handled: %{}, tasks: %{}, item_attempts: %{}, handoff_owners: %{}, retired_items: %{}}
 
+  test "unchanged preflight advances only its cheap check cursor, survives persistence, and reopens after a day" do
+    settings = %{@settings | channels: %{"grooming" => %{"focus" => "Groom", "every" => "30m", "when" => "anytime", "exclusive" => "none", "skip_unchanged" => true}}}
+    time = ~U[2026-10-07 00:00:00Z]
+    state = Autopilot.record_preflight(@empty, "grooming", "key", time, true)
+    assert Autopilot.unchanged?(state, "grooming", "key", DateTime.add(time, 23, :hour))
+    refute Autopilot.unchanged?(state, "grooming", "changed", time)
+    refute Autopilot.unchanged?(state, "grooming", "key", DateTime.add(time, 24, :hour))
+    checked = DateTime.add(time, 31, :minute)
+    state = Autopilot.record_preflight(state, "grooming", "key", checked, false)
+    refute Map.has_key?(state.tasks["grooming"], :finished_at)
+    assert {_state, nil} = Autopilot.next_research(state, settings, 0, checked)
+    assert {_state, %Issue{research: %{exclusive: "none", skip_unchanged: true}}} = Autopilot.next_research(state, settings, 0, DateTime.add(checked, 30, :minute))
+    state = Autopilot.record_research_finished(state, "grooming", :delivered, checked, settings)
+    assert state.tasks["grooming"].preflight_run_at == time
+    refute Autopilot.unchanged?(@empty, "grooming", "key", time)
+    statuses = Autopilot.task_statuses(state, settings, checked)
+    assert hd(statuses).exclusive == "none"
+    assert hd(statuses).preflight_checked_at == checked
+  end
+
   defmodule CiClient do
     def fetch_commit_ci_state(sha) do
       send(Application.get_env(:symphony_elixir, :autopilot_test_pid), {:ci_lookup, sha})
@@ -554,6 +574,71 @@ defmodule SymphonyElixir.AutopilotTest do
   end
 
   describe "orchestrator" do
+    test "native grooming defers unknown inputs and skips unchanged work before creating a workspace" do
+      alias SymphonyElixir.RepoAutopilot
+      root = Path.join(System.tmp_dir!(), "grooming-preflight-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(root)
+      prior_root = System.get_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT")
+      prior_repo = :persistent_term.get({RepoAutopilot, nil}, %{state: :pending})
+      prior_revision = :persistent_term.get({RepoAutopilot, :revision, nil}, {:error, :unknown})
+      System.put_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT", root)
+
+      on_exit(fn ->
+        restore_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT", prior_root)
+        :persistent_term.put({RepoAutopilot, nil}, prior_repo)
+        :persistent_term.put({RepoAutopilot, :revision, nil}, prior_revision)
+        File.rm_rf(root)
+      end)
+
+      marker = Path.join(root, "workspace-created")
+
+      write_autopilot_workflow!(
+        after_create_hook: "touch '#{marker}'",
+        autopilot: %{
+          channels: %{"grooming" => %{"focus" => "Groom", "min_issues" => 0, "every" => "30m", "skip_unchanged" => true, "exclusive" => "none"}}
+        }
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+      {pid, _name} = start_orchestrator!()
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).running == %{}
+      refute File.exists?(marker)
+      at = DateTime.utc_now()
+      :persistent_term.put({RepoAutopilot, nil}, %{state: :absent, checked_at: at})
+      :persistent_term.put({RepoAutopilot, :revision, nil}, {:ok, "source"})
+      due = System.monotonic_time(:millisecond) + 600_000
+      update = fn state -> %{state | pulls_error: nil, pulls_observed_at: at, next_pulls_due_at_ms: due} end
+      :sys.replace_state(pid, update)
+      send(pid, :run_poll_cycle)
+      state = :sys.get_state(pid)
+      assert %{issue: %{research: %{input_key: key}}} = state.running["research:grooming"]
+      assert is_binary(key)
+      entry = state.running["research:grooming"]
+      Process.exit(entry.pid, :kill)
+      # Preserve the successful input baseline without claiming any audit coverage.
+      :sys.replace_state(pid, fn state ->
+        autopilot = Autopilot.record_preflight(state.autopilot, "grooming", key, DateTime.add(at, -31, :minute), true)
+        %{state | running: %{}, claimed: MapSet.new(), autopilot: autopilot}
+      end)
+
+      File.rm(marker)
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).running == %{}
+      refute File.exists?(marker)
+      assert DateTime.compare(:sys.get_state(pid).autopilot.tasks["grooming"].preflight_at, at) != :lt
+      # New source immediately invalidates the baseline.
+      :persistent_term.put({RepoAutopilot, :revision, nil}, {:ok, "new-source"})
+
+      :sys.replace_state(pid, fn state ->
+        task = state.autopilot.tasks["grooming"] |> Map.delete(:preflight_at)
+        put_in(state.autopilot.tasks["grooming"], task)
+      end)
+
+      send(pid, :run_poll_cycle)
+      assert Map.has_key?(:sys.get_state(pid).running, "research:grooming")
+    end
+
     test "a ready pull request takes the only slot ahead of an issue" do
       write_autopilot_workflow!(max_concurrent_agents: 1)
       issue = %Issue{id: "1", identifier: "GH-1", title: "Issue", state: "open", dispatchable: true, labels: [], priority: 1}

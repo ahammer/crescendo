@@ -13,22 +13,29 @@ defmodule SymphonyElixir.RunEnv do
 
   alias SymphonyElixir.{Config, HttpServer, Project}
 
-  @spec vars(String.t() | nil, String.t() | nil) :: [{String.t(), String.t()}]
-  def vars(work_item, route_label \\ nil) do
+  @spec vars(String.t() | nil, String.t() | nil, String.t() | nil) :: [{String.t(), String.t()}]
+  def vars(work_item, route_label \\ nil, run_id \\ nil) do
     project = Project.current()
     state_url = state_url(HttpServer.bound_port())
 
     [
-      route_label && {"SYMPHONY_SELECTED_MODEL_LABEL", route_label},
-      work_item && {"SYMPHONY_WORK_ITEM", work_item},
-      work_item && {"CRESCENDO_WORK_ITEM", if(project, do: "#{project}/#{work_item}", else: work_item)},
-      project && {"CRESCENDO_PROJECT", project},
-      label_prefix() && {"CRESCENDO_LABEL_PREFIX", label_prefix()},
-      state_url && {"CRESCENDO_STATE_URL", state_url},
-      state_url && {"SYMPHONY_STATE_URL", state_url}
+      pair("SYMPHONY_SELECTED_MODEL_LABEL", route_label),
+      pair("SYMPHONY_WORK_ITEM", work_item),
+      pair("CRESCENDO_RUN_ID", run_id),
+      pair("CRESCENDO_WORK_ITEM", qualified(project, work_item)),
+      pair("CRESCENDO_PROJECT", project),
+      pair("CRESCENDO_LABEL_PREFIX", label_prefix()),
+      pair("CRESCENDO_STATE_URL", state_url),
+      pair("SYMPHONY_STATE_URL", state_url)
     ]
     |> Enum.filter(& &1)
   end
+
+  defp pair(_key, nil), do: nil
+  defp pair(key, value), do: {key, value}
+  defp qualified(_project, nil), do: nil
+  defp qualified(nil, item), do: item
+  defp qualified(project, item), do: "#{project}/#{item}"
 
   defp label_prefix do
     case Config.settings() do

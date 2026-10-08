@@ -8,6 +8,52 @@ multi-project control plane as out of scope; this document describes Crescendo's
 Everything is configured in local files on the machine that runs the service. The dashboard and
 the JSON API are read-only: nothing reachable over HTTP changes state.
 
+## Additional read-only capacity and quiet windows
+
+Primary capacity remains `pool.slots`. Optional `helpers` adds a separate global pool (0–5,
+default 0) of `gpt-6-luna` / `max` read-only leaf agents, with `timeout_ms` at most 900000.
+Use `helper_start` for a bounded question, poll `helper_status` while doing independent work,
+and cancel unused work with `helper_cancel`. Helpers consume account usage but no primary
+slot or machine lease. Parent exit cancels them; capacity releases only after process exit.
+Source reads are pinned to a Git commit and ignore replacement refs. Evidence is captured as
+bounded text through no-follow traversal. Shell, editing, browser, apps, MCP and nested
+agents are disabled, including capabilities forced by native model catalog metadata.
+Catalogs are passed in sealed anonymous memory files; no mutable catalog path or per-run file accumulates.
+Native approval and user-input requests are answered without contacting a human.
+
+Optional `quiet_window` supports an owner-confirmed, same-day America/Vancouver window:
+
+```yaml
+pool: {slots: 3}
+helpers: {slots: 5, model: gpt-6-luna, effort: max, timeout_ms: 900000}
+quiet_window: {start: "03:00", end: "04:00", time_zone: America/Vancouver, drain_minutes: 60}
+```
+
+Only otherwise admitted `<prefix>:quiet` work reserves that window. Primary work and helpers
+yield before it; a quiet run holds global exclusivity, and unfinished work yields at its end.
+The native scheduling clock is cached per local day and follows installed timezone rules.
+A missing/failed clock does not admit quiet work. Metalrain's lease independently verifies
+the clock, complete service snapshot and sole owning run, and enforces the cutoff.
+
+Autopilot task fields `exclusive: none|global` override project research exclusivity.
+`skip_unchanged: true` performs a native preflight before workspace/model startup. It requires
+fresh complete source/dependency/PR inputs, findings, policy and protected execution state.
+Unknown inputs defer. Unchanged inputs advance a separate cursor, preserve completion/audit
+coverage and force a recheck within 24 hours.
+
+The state API exposes `helpers`, `throttle.helpers`, `throttle.quiet_window`, `pacing`, and
+`usage.planning` (retained skip, promotion and startup events). Managed helper tokens have
+independent native run/thread attribution. `usage.external` keeps unverified reviewer/planner
+CLI observations separate from native allocations and budget admission; actual account debits
+remain unknown without native evidence. The soft pacing target is 90% of the observed reset
+epoch, with a 10% allowance; it does not replace daily budget or low-quota guards.
+
+For rollout, begin with two helpers for one day. Advance to five after normal traffic confirms
+bounded output, source identity, cancellation, accounting and drain recovery. Compare 12–20
+ordinary accepted deliveries by elapsed time, lease wait/held time, retries, valid acceptance,
+managed helper cost and separately reported review/planning cost. Leave conclusions pending
+until that cohort exists; do not run duplicate benchmarks to consume spare quota.
+
 ## Layout
 
 ```

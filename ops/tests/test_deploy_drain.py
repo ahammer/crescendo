@@ -20,6 +20,14 @@ def state(running=1, ready=4, paused=None, budget=None):
 
 
 class DrainTest(unittest.TestCase):
+    def test_helpers_participate_in_drain_without_counting_as_primary_workers(self):
+        snapshot = state(0)
+        snapshot["throttle"]["helpers"] = dict(busy=2, slots=5)
+        self.assertEqual(policy.validate(snapshot, "running"), 2)
+        snapshot["throttle"]["helpers"]["busy"] = None
+        with self.assertRaisesRegex(ValueError, "unknown helper"):
+            policy.validate(snapshot, "running")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

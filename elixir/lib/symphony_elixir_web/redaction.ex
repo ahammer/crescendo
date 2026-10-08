@@ -33,15 +33,25 @@ defmodule SymphonyElixirWeb.Redaction do
 
       payload
       |> Map.update(:running, [], &scrub.(&1, fn entry -> running(entry) end))
+      |> Map.update(:helpers, [], &scrub.(&1, fn entry -> Map.take(entry, [:project, :status, :model, :effort, :usage]) end))
       |> Map.update(:retrying, [], &scrub.(&1, fn entry -> entry |> Map.merge(%{error: nil, workspace_path: nil}) |> Map.drop([:startup]) end))
       |> Map.update(:blocked, [], &scrub.(&1, fn entry -> blocked(entry) end))
       |> update_in([:upcoming, :ready], &scrub.(&1, fn item -> %{item | title: @hidden} end))
       |> update_in([:upcoming, :waiting], &scrub.(&1, fn item -> %{item | title: @hidden} end))
       |> update_in([:pull_requests, :items], &scrub.(&1, fn pull -> pull(pull) end))
-      |> update_in([:usage, :activity], &scrub.(&1, fn event -> Map.drop(event, [:summary, :title, :startup, :run_id, :worker_pid]) end))
+      |> update_in([:usage, :activity], &scrub.(&1, fn event -> Map.drop(event, [:summary, :title, :startup, :run_id, :parent_run_id, :source_sha, :worker_pid]) end))
+      |> update_in([:usage], &redact_external(&1, redacted))
       |> update_in([:usage, :images], &drop_projects(&1, redacted))
       |> update_in([:usage], &redact_deliveries(&1, redacted))
     end
+  end
+
+  defp redact_external(usage, redacted) do
+    Map.update(usage, :external, %{}, fn external ->
+      Map.update(external, :observations, [], fn observations ->
+        scrub(observations, redacted, &Map.drop(&1, [:run_id, :parent_run_id, :parent_issue_id, :source_sha]))
+      end)
+    end)
   end
 
   defp redact_deliveries(usage, redacted) do

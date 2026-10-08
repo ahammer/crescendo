@@ -61,6 +61,55 @@ defmodule SymphonyElixir.Quota do
 
   def remaining(_snapshot, _name, _now, _stale_after_ms), do: {:unknown, nil}
 
+  @doc "Tracks observed weekly epochs, including an early usage drop or changed reset deadline."
+  @spec epoch(map() | nil, t() | nil, t()) :: map() | nil
+  def epoch(epoch, previous, %{windows: %{"weekly" => window}, observed_at: at}) do
+    old = previous && previous.windows["weekly"]
+    reset? = old && (window.used_percent + 0.1 < old.used_percent or changed_deadline?(old.resets_at, window.resets_at))
+
+    if is_nil(epoch) or reset?,
+      do: %{started_at: at, initial_used_percent: window.used_percent, origin: if(reset?, do: "observed_reset", else: "first_observation")},
+      else: epoch
+  end
+
+  def epoch(_epoch, _previous, _quota), do: nil
+
+  @doc "A soft 90% account-usage pacing target; admission remains owned by Throttle."
+  @spec pacing(t() | nil, map() | nil, DateTime.t()) :: map()
+  def pacing(%{windows: %{"weekly" => %{resets_at: deadline, used_percent: used}}} = quota, %{started_at: %DateTime{} = start, initial_used_percent: initial} = epoch, now) when is_integer(deadline) do
+    {freshness, _remaining} = remaining(quota, "weekly", now, 7_200_000)
+    horizon = max(deadline - DateTime.to_unix(start), 1)
+    elapsed = min(max(DateTime.diff(now, start, :second), 0), horizon)
+    target = initial + max(90.0 - initial, 0.0) * elapsed / horizon
+
+    signal =
+      cond do
+        freshness != :fresh -> "unknown"
+        used < target - 5 -> "behind"
+        used > target + 5 -> "ahead"
+        true -> "on_pace"
+      end
+
+    %{
+      signal: signal,
+      freshness: freshness,
+      target_percent: 90,
+      target_now_percent: Float.round(target, 1),
+      used_percent: used,
+      epoch_started_at: DateTime.to_iso8601(start),
+      epoch_origin: epoch.origin,
+      resets_at: deadline,
+      interactive_allowance_percent: 10,
+      scope: "account",
+      projected_percent: if(elapsed >= 1_800, do: Float.round(initial + (used - initial) * horizon / elapsed, 1))
+    }
+  end
+
+  def pacing(_quota, _epoch, _now), do: %{signal: "unknown", scope: "account", target_percent: 90, interactive_allowance_percent: 10}
+
+  defp changed_deadline?(old, new) when is_integer(old) and is_integer(new), do: abs(old - new) > 60
+  defp changed_deadline?(_old, _new), do: false
+
   defp window_state(snapshot, window, now, stale_after_ms) do
     remaining = max(100.0 - window.used_percent, 0.0)
 

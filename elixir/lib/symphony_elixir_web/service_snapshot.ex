@@ -15,6 +15,7 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
       snapshot_status: if(failed == [], do: "complete", else: "partial"),
       snapshot_errors: Enum.map(failed, fn {id, status} -> %{project: id, status: to_string(status)} end),
       running: tagged(snapshots, :running),
+      helpers: tagged(snapshots, :helpers),
       retrying: tagged(snapshots, :retrying),
       blocked: tagged(snapshots, :blocked),
       codex_totals: snapshots |> Enum.map(fn {_id, snapshot} -> snapshot[:codex_totals] || %{} end) |> sum(),
@@ -26,6 +27,7 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
       rate_limits: nil,
       quota: (governor && governor.quota) || newest_quota(snapshots),
       throttle: throttle(governor),
+      pacing: governor && governor[:pacing],
       polling: polling(snapshots)
     }
   end
@@ -116,7 +118,7 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
 
   # The Governor's policy plus the service's slot use.
   defp throttle(%{throttle: throttle, slots: slots, busy: busy} = governor),
-    do: throttle |> Map.merge(%{service_slots: slots, busy: busy}) |> Map.merge(Map.take(governor, [:research_hold, :draining]))
+    do: throttle |> Map.merge(%{service_slots: slots, busy: busy}) |> Map.merge(Map.take(governor, [:research_hold, :draining, :helpers, :quiet_window]))
 
   defp throttle(_governor), do: nil
 
@@ -137,6 +139,9 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
       cost_basis: "api_equivalent_estimate",
       account_usage: account_usage(all),
       accounting: accounting(all),
+      external: external(ops),
+      helpers: Map.put(section_counts(all, :helpers, [:recorded, :terminal_observed, :incomplete]), :external_coverage, "unknown"),
+      planning: Map.put(section_counts(all, :planning, [:unchanged_skips, :ready_promotions, :startup_failures]), :scope, "retained_events"),
       delivery_metrics:
         Map.put(
           delivery_metrics(all),
@@ -154,6 +159,20 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
       images: images(ops),
       by_project: Enum.map(ops, fn {id, operations} -> project_spend(id, operations) end)
     }
+  end
+
+  defp section_counts(all, key, fields), do: all |> Enum.map(&Map.take(&1[key] || %{}, fields)) |> sum()
+
+  defp external(ops) do
+    records = for {_id, operations} <- ops, value = operations[:external], do: value
+    counts = records |> Enum.map(&Map.take(&1, [:reports, :terminal_reported, :incomplete, :reported_usd_micro])) |> sum()
+
+    Map.merge(counts, %{
+      attribution: "unverified_cli_report",
+      account_credits: nil,
+      reported_usage: records |> Enum.map(& &1.reported_usage) |> sum(),
+      observations: for({project, operations} <- ops, observation <- get_in(operations, [:external, :observations]) || [], do: Map.put(observation, :project, project))
+    })
   end
 
   defp accounting(all) do

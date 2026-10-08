@@ -43,7 +43,13 @@ def validate(state, mode):
     busy = throttle.get("busy") if isinstance(throttle, dict) else None
     if not count(busy):
         raise ValueError("unknown held slots")
-    return max(len(running), busy)
+    helpers = throttle.get("helpers")
+    helper_busy = 0
+    if helpers is not None:
+        if not isinstance(helpers, dict) or not count(helpers.get("busy")):
+            raise ValueError("unknown helper slots")
+        helper_busy = helpers["busy"]
+    return max(len(running), busy) + helper_busy
 
 
 def events(root):

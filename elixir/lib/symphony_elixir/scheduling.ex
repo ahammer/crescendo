@@ -61,16 +61,18 @@ defmodule SymphonyElixir.Scheduling do
   wait together with the projects that should be told to dispatch now (the
   one the slot is kept for).
   """
-  @spec acquire(t(), String.t(), String.t(), atom(), integer()) :: decision()
-  def acquire(schedule, id, item, class, now_ms) do
+  @spec acquire(t(), String.t(), String.t(), atom(), integer(), keyword()) :: decision()
+  def acquire(schedule, id, item, class, now_ms, opts \\ []) do
     schedule = schedule |> expire_reservation(now_ms) |> activate(id)
     project = Map.fetch!(schedule.projects, id)
+    exclusive = Keyword.get(opts, :exclusive) || project.exclusive
+    held_class = research_class(class, exclusive)
 
     cond do
       Map.has_key?(project.held, item) -> {:ok, schedule}
       reason = exclusive_block(schedule, id) -> {:wait, reason, schedule, []}
-      class == :research and project.exclusive == "global" -> acquire_global_research(schedule, id, item, now_ms)
-      true -> acquire_slot(schedule, id, project, item, class)
+      class == :research and exclusive == "global" -> acquire_global_research(schedule, id, item, now_ms, Keyword.get(opts, :auxiliary_busy, 0))
+      true -> acquire_slot(schedule, id, project, item, held_class)
     end
   end
 
@@ -161,18 +163,23 @@ defmodule SymphonyElixir.Scheduling do
 
   defp global_research(schedule, id) do
     Enum.find_value(schedule.projects, fn {other, project} ->
-      other != id and project.exclusive == "global" and :research in Map.values(project.held) and other
+      held = Map.values(project.held)
+      other != id and (:global_research in held or (project.exclusive == "global" and :research in held)) and other
     end)
   end
 
-  defp acquire_global_research(schedule, id, item, now_ms) do
-    if used(schedule) == 0 do
-      {:ok, schedule |> Map.put(:reservation, nil) |> grant(id, item, :research)}
+  defp acquire_global_research(schedule, id, item, now_ms, auxiliary_busy) do
+    if used(schedule) + auxiliary_busy == 0 do
+      {:ok, schedule |> Map.put(:reservation, nil) |> grant(id, item, :global_research)}
     else
       reserved = %{schedule | reservation: %{project: id, until_ms: now_ms + @reservation_ms}}
       {:wait, "waiting for the service to go idle for research", reserved, []}
     end
   end
+
+  defp research_class(:research, "global"), do: :global_research
+  defp research_class(:research, "none"), do: :background_research
+  defp research_class(class, _exclusive), do: class
 
   defp expire_reservation(%{reservation: %{until_ms: until_ms}} = schedule, now_ms) when now_ms >= until_ms, do: %{schedule | reservation: nil}
   defp expire_reservation(schedule, _now_ms), do: schedule

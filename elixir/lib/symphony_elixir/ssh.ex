@@ -43,7 +43,7 @@ defmodule SymphonyElixir.SSH do
 
     []
     |> maybe_put_config()
-    |> Kernel.++(["-T"])
+    |> Kernel.++(["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "ConnectionAttempts=1", "-T"])
     |> maybe_put_port(port)
     |> Kernel.++([destination, remote_shell_command(command)])
   end

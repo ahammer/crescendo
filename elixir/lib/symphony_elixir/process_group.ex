@@ -1,14 +1,15 @@
 defmodule SymphonyElixir.ProcessGroup do
   @moduledoc "Bounds subprocess output and kills a spawn port's OS group on completion or owner death."
 
-  @spec run(port(), pos_integer()) :: {:ok, {String.t(), non_neg_integer()}} | {:error, :timeout}
-  def run(port, timeout_ms) do
+  @spec run(port(), pos_integer(), keyword()) ::
+          {:ok, {String.t(), non_neg_integer()}} | {:error, :timeout | {:output_limit, binary()}}
+  def run(port, timeout_ms, opts \\ []) do
     os_pid = os_pid(port)
     owner = self()
     watcher = spawn(fn -> watch(owner, os_pid) end)
 
     try do
-      collect(port, "", System.monotonic_time(:millisecond) + timeout_ms)
+      collect(port, "", System.monotonic_time(:millisecond) + timeout_ms, Keyword.get(opts, :output_limit))
     after
       send(watcher, :finish)
       receive do: ({:group_cleaned, ^watcher} -> :ok)
@@ -83,13 +84,27 @@ defmodule SymphonyElixir.ProcessGroup do
     :ok
   end
 
-  defp collect(port, output, deadline) do
+  defp collect(port, output, deadline, limit) do
     remaining_ms = deadline - System.monotonic_time(:millisecond)
 
     if remaining_ms > 0 do
       receive do
-        {^port, {:data, data}} -> collect(port, String.slice(output <> data, -2_048, 2_048), deadline)
-        {^port, {:exit_status, status}} -> {:ok, {output, status}}
+        {^port, {:data, data}} ->
+          combined = output <> data
+
+          cond do
+            is_integer(limit) and byte_size(combined) > limit ->
+              {:error, {:output_limit, binary_part(combined, 0, limit)}}
+
+            is_integer(limit) ->
+              collect(port, combined, deadline, limit)
+
+            true ->
+              collect(port, String.slice(combined, -2_048, 2_048), deadline, limit)
+          end
+
+        {^port, {:exit_status, status}} ->
+          {:ok, {output, status}}
       after
         remaining_ms -> {:error, :timeout}
       end

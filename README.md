@@ -9,6 +9,7 @@ implements its [specification](SPEC.md). On top of the Symphony reference implem
 
 - **One service for many projects.** A local `crescendo.yml` names the projects; slots are shared by
   weight (weights 3,1,1 give the first project about three times the work), with optional caps.
+- **Read-only helpers.** Up to five global Luna max helpers work alongside primary agents, using pinned source and bounded text evidence without machine leases.
 - **Throttling.** An enforced daily budget that keeps closing open work (pull request reviews,
   final attempts and continuations still run), and model back-off when the Codex quota runs low.
 - **Model routing.** A ladder that climbs on failed attempts, size labels that start small work on a
@@ -18,7 +19,7 @@ implements its [specification](SPEC.md). On top of the Symphony reference implem
   configurable channel. Startup failures preserve the item and dependencies for controlled recovery.
 - **A read-only dashboard** across projects, with a filter per project and a
   [bounded history API](docs/crescendo.md#dashboard-and-api) for retrospectives.
-  Dispatch details show global research reservations, running holds and deployment drains.
+  Dispatch details show global research reservations, helper capacity, quota pacing, quiet acceptance windows and deployment drains.
 - **Thread usage accounting** that reconciles late terminal events and survives worker restarts,
   with native billing coverage and conservative, opt-in issue-thread resumption.
   Retained issue delivery evidence links explicit worker sources and tracker dispositions.

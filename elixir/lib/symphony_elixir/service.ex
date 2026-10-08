@@ -29,6 +29,92 @@ defmodule SymphonyElixir.Service do
   @id_format ~r/^[a-z0-9][a-z0-9-]*$/
   @exclusive ["none", "project", "global"]
 
+  defmodule Helpers do
+    @moduledoc "Service-wide limits for lease-free, read-only helper runs."
+    use Ecto.Schema
+    import Ecto.Changeset
+    @primary_key false
+
+    embedded_schema do
+      field(:slots, :integer, default: 0)
+      field(:model, :string, default: "gpt-6-luna")
+      field(:effort, :string, default: "max")
+      field(:timeout_ms, :integer, default: 900_000)
+    end
+
+    @type t :: %__MODULE__{}
+
+    @spec changeset(struct(), map()) :: Ecto.Changeset.t()
+    def changeset(settings, attrs) do
+      settings
+      |> cast(attrs, [:slots, :model, :effort, :timeout_ms])
+      |> validate_required([:slots, :model, :effort, :timeout_ms])
+      |> validate_number(:slots, greater_than_or_equal_to: 0, less_than_or_equal_to: 5)
+      |> validate_number(:timeout_ms, greater_than: 0, less_than_or_equal_to: 900_000)
+      |> validate_inclusion(:model, ["gpt-6-luna"])
+      |> validate_inclusion(:effort, ["max"])
+    end
+  end
+
+  defmodule QuietWindow do
+    @moduledoc "Owner-confirmed recurring local acceptance window."
+    use Ecto.Schema
+    import Ecto.Changeset
+    @primary_key false
+    embedded_schema do
+      field(:start, :string, default: "03:00")
+      field(:end, :string, default: "04:00")
+      field(:time_zone, :string, default: "America/Vancouver")
+      field(:drain_minutes, :integer, default: 60)
+    end
+
+    @type t :: %__MODULE__{}
+
+    @spec changeset(struct(), map()) :: Ecto.Changeset.t()
+    def changeset(window, attrs) do
+      window
+      |> cast(attrs, [:start, :end, :time_zone, :drain_minutes])
+      |> validate_required([:start, :end, :time_zone, :drain_minutes])
+      |> validate_format(:start, ~r/\A(?:[01][0-9]|2[0-3]):[0-5][0-9]\z/)
+      |> validate_format(:end, ~r/\A(?:[01][0-9]|2[0-3]):[0-5][0-9]\z/)
+      |> validate_inclusion(:time_zone, ["America/Vancouver"])
+      |> validate_number(:drain_minutes, greater_than_or_equal_to: 0, less_than_or_equal_to: 120)
+      |> validate_order()
+    end
+
+    defp validate_order(changeset) do
+      if get_field(changeset, :start) >= get_field(changeset, :end),
+        do: add_error(changeset, :end, "must follow start on the same day"),
+        else: changeset
+    end
+
+    @spec observe(t() | nil, DateTime.t()) :: map()
+    def observe(nil, _now), do: %{phase: "idle"}
+
+    def observe(window, now) do
+      script = """
+      import datetime, json, sys
+      from zoneinfo import ZoneInfo
+      epoch, start, end, zone, drain = sys.argv[1:]
+      now = datetime.datetime.fromtimestamp(int(epoch), ZoneInfo(zone))
+      begin = datetime.datetime.combine(now.date(), datetime.time.fromisoformat(start), now.tzinfo)
+      finish = datetime.datetime.combine(now.date(), datetime.time.fromisoformat(end), now.tzinfo)
+      phase = 'active' if begin <= now < finish else 'preparing' if begin - datetime.timedelta(minutes=int(drain)) <= now < begin else 'idle'
+      midnight = datetime.datetime.combine(now.date() + datetime.timedelta(days=1), datetime.time(), now.tzinfo)
+      print(json.dumps(dict(phase=phase, starts_at=int(begin.timestamp()), ends_at=int(finish.timestamp()), refresh_at=int(midnight.timestamp()), time_zone=zone)))
+      """
+
+      with {json, 0} <- System.cmd("python3", ["-c", script, to_string(DateTime.to_unix(now)), window.start, window.end, window.time_zone, to_string(window.drain_minutes)], stderr_to_stdout: true),
+           {:ok, %{"phase" => phase, "starts_at" => begins, "ends_at" => ends, "refresh_at" => refresh, "time_zone" => zone}} <- Jason.decode(json) do
+        %{phase: phase, starts_at: begins, ends_at: ends, refresh_at: refresh, time_zone: zone}
+      else
+        _ -> %{phase: "unknown"}
+      end
+    rescue
+      _ -> %{phase: "unknown"}
+    end
+  end
+
   defmodule Project do
     @moduledoc "One project of the service."
     @enforce_keys [:id, :workflow]
@@ -55,6 +141,8 @@ defmodule SymphonyElixir.Service do
     field(:projects, :map, default: %{})
     embeds_one(:throttle, Throttle, on_replace: :update, defaults_to_struct: true)
     embeds_one(:pricing, Pricing, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:helpers, Helpers, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:quiet_window, QuietWindow, on_replace: :update)
     field(:path, :string, virtual: true)
     field(:project_list, :any, virtual: true, default: [])
   end
@@ -81,6 +169,8 @@ defmodule SymphonyElixir.Service do
     |> cast(attrs, [:host, :port, :state_root, :slots, :defaults, :projects], empty_values: [])
     |> cast_embed(:throttle, with: &Throttle.changeset/2)
     |> cast_embed(:pricing, with: &Pricing.changeset/2)
+    |> cast_embed(:helpers, with: &Helpers.changeset/2)
+    |> cast_embed(:quiet_window, with: &QuietWindow.changeset/2)
     |> validate_number(:port, greater_than_or_equal_to: 0)
     |> validate_number(:slots, greater_than: 0)
     |> validate_projects()
@@ -133,7 +223,9 @@ defmodule SymphonyElixir.Service do
       "defaults" => raw["defaults"],
       "projects" => raw["projects"],
       "throttle" => raw["throttle"],
-      "pricing" => raw["pricing"]
+      "pricing" => raw["pricing"],
+      "helpers" => raw["helpers"],
+      "quiet_window" => raw["quiet_window"]
     }
     |> Map.reject(fn {_key, value} -> is_nil(value) end)
   end

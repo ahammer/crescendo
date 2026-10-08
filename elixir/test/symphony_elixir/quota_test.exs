@@ -3,6 +3,29 @@ defmodule SymphonyElixir.QuotaTest do
 
   alias SymphonyElixir.Quota
 
+  test "pacing uses observed epochs and resets on early drops rather than inventing natural weeks" do
+    start = ~U[2026-10-07 00:00:00Z]
+    deadline = DateTime.to_unix(DateTime.add(start, 4, :hour))
+    first = Quota.normalize(%{"primary" => %{"usedPercent" => 10, "windowDurationMins" => 10_080, "resetsAt" => deadline}}, start)
+    epoch = Quota.epoch(nil, nil, first)
+    assert epoch.origin == "first_observation"
+    assert Quota.pacing(first, epoch, start).signal == "on_pace"
+    middle = DateTime.add(start, 2, :hour)
+    assert Quota.pacing(%{first | observed_at: middle}, epoch, middle).signal == "behind"
+    assert Quota.pacing(%{first | observed_at: middle}, epoch, middle).target_now_percent == 50.0
+    high = put_in(first.windows["weekly"].used_percent, 75.0)
+    assert Quota.pacing(%{high | observed_at: middle}, epoch, middle).signal == "ahead"
+    assert Quota.pacing(first, epoch, DateTime.add(start, 3, :hour)).signal == "unknown"
+    assert Quota.pacing(first, epoch, DateTime.from_unix!(deadline)).freshness == :reset
+    assert Quota.pacing(nil, nil, start).signal == "unknown"
+    assert Quota.epoch(epoch, first, put_in(first.windows["weekly"].resets_at, deadline + 5)) == epoch
+    assert Quota.epoch(epoch, first, put_in(first.windows["weekly"].resets_at, deadline + 3600)).origin == "observed_reset"
+    reset = put_in(first.windows["weekly"].used_percent, 0.0)
+    assert Quota.epoch(epoch, first, reset).origin == "observed_reset"
+    assert Quota.epoch(epoch, first, %{first | windows: %{}}) == nil
+    assert Quota.epoch(epoch, first, put_in(first.windows["weekly"].resets_at, nil)) == epoch
+  end
+
   @now ~U[2026-09-27 20:00:00Z]
 
   # The shape the v2 app server sends in `account/rateLimits/updated` for a Pro account.

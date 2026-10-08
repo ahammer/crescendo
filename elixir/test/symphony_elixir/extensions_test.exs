@@ -276,6 +276,8 @@ defmodule SymphonyElixir.ExtensionsTest do
              "generated_at" => state_payload["generated_at"],
              "service" => Jason.decode!(Jason.encode!(SymphonyElixir.SourceRevision.metadata())),
              "counts" => %{"running" => 1, "retrying" => 1, "blocked" => 1, "ready" => 0, "waiting" => 0, "open_prs" => 0},
+             "helpers" => [],
+             "pacing" => nil,
              "running" => [
                %{
                  "project" => nil,
@@ -363,6 +365,18 @@ defmodule SymphonyElixir.ExtensionsTest do
                "status" => "unavailable",
                "pricing_as_of" => "2026-09-24",
                "cost_basis" => "api_equivalent_estimate",
+               "external" => %{
+                 "attribution" => "unverified_cli_report",
+                 "account_credits" => nil,
+                 "reports" => 0,
+                 "terminal_reported" => 0,
+                 "incomplete" => 0,
+                 "reported_usage" => %{"input_tokens" => 0, "cached_input_tokens" => 0, "cache_write_input_tokens" => 0, "reasoning_output_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0},
+                 "reported_usd_micro" => 0,
+                 "observations" => []
+               },
+               "helpers" => %{"recorded" => 0, "terminal_observed" => 0, "incomplete" => 0, "external_coverage" => "unknown"},
+               "planning" => %{"unchanged_skips" => 0, "ready_promotions" => 0, "startup_failures" => 0, "scope" => "retained_events"},
                "accounting" => %{"terminal_observed" => 0, "incomplete" => 0, "helper_usage_coverage" => "unknown"},
                "account_usage" => %{
                  "coverage" => "incomplete",

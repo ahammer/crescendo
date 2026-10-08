@@ -14,6 +14,9 @@ defmodule SymphonyElixir.Codex.AppServer do
   @pending_limit 4_194_304
   @frame_limit 16_777_216
   @output_limit 16_384
+  @presentation_limit 262_144
+  @preview_fields ~w(content diff text stdout stderr output aggregatedOutput command)
+  @control_fields ~w(id itemId callId threadId thread_id turnId turn_id status arguments usage tokenUsage)
   @output_methods [
     "item/agentMessage/delta",
     "item/commandExecution/outputDelta",
@@ -58,8 +61,10 @@ defmodule SymphonyElixir.Codex.AppServer do
     worker_host = Keyword.get(opts, :worker_host)
     model_route = Keyword.get(opts, :model_route)
     codex = Keyword.get(opts, :codex_settings, Config.settings!().codex)
-    session_env = %{route: model_route, work_item: Keyword.get(opts, :work_item), command: codex.command}
-    dynamic_tool_binding = DynamicTool.bind()
+    session_env = %{route: model_route, work_item: Keyword.get(opts, :work_item), run_id: Keyword.get(opts, :run_id), command: codex.command}
+    dynamic_tool_binding = Keyword.get_lazy(opts, :dynamic_tool_binding, fn -> DynamicTool.bind(opts) end)
+
+    policies = Keyword.get(opts, :session_policies)
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, port} <- start_port(expanded_workspace, worker_host, dynamic_tool_binding, session_env) do
@@ -68,7 +73,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       Process.put({port, :work_item}, Keyword.get(opts, :work_item))
       Process.put({port, :on_message}, Keyword.get(opts, :on_message, &default_on_message/1))
 
-      with {:ok, policies} <- session_policies(expanded_workspace, worker_host),
+      with {:ok, policies} <- policies || session_policies(expanded_workspace, worker_host),
            {:ok, native} <-
              do_start_session(
                port,
@@ -83,7 +88,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           port: port,
           metadata: Map.merge(metadata, native.metadata),
           approval_policy: policies.approval_policy,
-          auto_approve_requests: policies.approval_policy == "never",
+          auto_approve_requests: Keyword.get(opts, :auto_approve_requests, policies.approval_policy == "never"),
           thread_sandbox: policies.thread_sandbox,
           turn_sandbox_policy: policies.turn_sandbox_policy,
           thread_id: native.thread_id,
@@ -375,8 +380,8 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   # Every command in the run inherits these: the delivery helper checks the
   # route label, and machine-wide tooling attributes work to the work item.
-  defp session_vars(%{route: route, work_item: work_item}),
-    do: SymphonyElixir.RunEnv.vars(if(is_binary(work_item), do: work_item), route && route["label"])
+  defp session_vars(%{route: route, work_item: work_item, run_id: run_id}),
+    do: SymphonyElixir.RunEnv.vars(if(is_binary(work_item), do: work_item), route && route["label"], run_id)
 
   defp tracker_secret_port_env(dynamic_tool_binding) do
     dynamic_tool_binding.secret_environment_names
@@ -446,12 +451,15 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp do_start_session(port, workspace, policies, binding, route, codex, opts) do
+    Process.put({port, :thread_config}, Keyword.get(opts, :thread_config))
+
     with {:ok, initialized} <- send_initialize(port),
          {:ok, additions} <- developer_instructions(port, workspace, codex.developer_instructions) do
       settings = %{
         reuse_contract: 1,
         workspace: workspace,
         policies: policies,
+        thread_config: Process.get({port, :thread_config}),
         tools_hash: fingerprint(binding.tool_specs),
         route: route,
         codex_hash: fingerprint(Map.from_struct(codex)),
@@ -732,6 +740,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         }
         |> maybe_put("model", model_route && model_route["model"])
         |> maybe_put("developerInstructions", developer_instructions)
+        |> maybe_put("config", Process.get({port, :thread_config}))
     })
 
     case await_response(port, @thread_start_id) do
@@ -1209,13 +1218,14 @@ defmodule SymphonyElixir.Codex.AppServer do
     result
     |> Map.put("output", output)
     |> Map.put("contentItems", content_items)
+    |> presentation()
   end
 
   defp normalize_dynamic_tool_result(result) do
     %{
       "success" => false,
-      "output" => inspect(result),
-      "contentItems" => dynamic_tool_content_items(inspect(result))
+      "output" => bound_text(inspect(result)),
+      "contentItems" => dynamic_tool_content_items(bound_text(inspect(result)))
     }
   end
 
@@ -1479,31 +1489,60 @@ defmodule SymphonyElixir.Codex.AppServer do
     do: update_in(payload, ["params", "diff"], &bound_text/1)
 
   defp bound_output(payload, method) when method in ["item/started", "item/completed"] do
-    update_in(payload, ["params", "item"], &bound_item/1)
+    update_in(payload, ["params", "item"], &presentation/1)
   end
 
   defp bound_output(%{"params" => %{"turn" => %{"items" => items}}} = payload, "turn/completed")
        when is_list(items),
-       do: put_in(payload, ["params", "turn", "items"], Enum.map(items, &bound_item/1))
+       do: put_in(payload, ["params", "turn", "items"], presentation(items))
 
   defp bound_output(payload, _method), do: payload
 
-  defp bound_item(%{"type" => "commandExecution"} = item) do
-    item
-    |> Map.update("aggregatedOutput", nil, &bound_text/1)
-    |> Map.update("command", nil, &bound_text/1)
-    |> Map.update("commandActions", [], &bound_copies(&1, "command"))
+  # These are completed/started item previews, never action requests. Both the
+  # native content-map and legacy diff-list shapes carry large retained files.
+  defp presentation(value) do
+    {bounded, _remaining, truncated} = preview(value, @presentation_limit, false)
+    if truncated and is_map(bounded), do: Map.put(bounded, "outputTruncated", true), else: bounded
   end
 
-  defp bound_item(%{"type" => "fileChange"} = item),
-    do: Map.update(item, "changes", [], &bound_copies(&1, "diff"))
+  defp preview(value, remaining, text?) when is_binary(value) do
+    limit = min(@output_limit, max(remaining, 0))
 
-  defp bound_item(%{"type" => "agentMessage"} = item),
-    do: Map.update(item, "text", nil, &bound_text/1)
+    if text? and byte_size(value) > limit do
+      prefix = value |> binary_part(0, max(limit - 96, 0)) |> String.replace_invalid() |> :binary.copy()
+      marker = " [output truncated; preview omitted; #{byte_size(value)} bytes]"
+      text = if byte_size(marker) <= limit, do: prefix <> marker, else: ""
+      {text, max(remaining - byte_size(text), 0), true}
+    else
+      {value, if(text?, do: max(remaining - byte_size(value), 0), else: remaining), false}
+    end
+  end
 
-  defp bound_item(item), do: item
+  defp preview(value, remaining, text?) when is_map(value) do
+    Enum.reduce(value, {%{}, remaining, false}, fn {key, entry}, {result, budget, cut} ->
+      text = text? or key in @preview_fields
 
-  defp bound_copies(entries, field), do: Enum.map(entries, &Map.update(&1, field, nil, fn text -> bound_text(text) end))
+      {entry, budget, truncated} =
+        case key in @control_fields do
+          true -> {entry, budget, false}
+          false -> preview(entry, budget, text)
+        end
+
+      {Map.put(result, key, entry), budget, cut or truncated}
+    end)
+  end
+
+  defp preview(value, remaining, text?) when is_list(value) do
+    {entries, budget, truncated} =
+      Enum.reduce(value, {[], remaining, false}, fn entry, {result, budget, cut} ->
+        {entry, budget, truncated} = preview(entry, budget, text?)
+        {[entry | result], budget, cut or truncated}
+      end)
+
+    {Enum.reverse(entries), budget, truncated}
+  end
+
+  defp preview(value, remaining, _text?), do: {value, remaining, false}
 
   defp bound_text(text) when is_binary(text) and byte_size(text) > @output_limit do
     prefix = text |> binary_part(0, @output_limit - 128) |> String.replace_invalid() |> :binary.copy()
@@ -1677,6 +1716,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           :request_id,
           :request_method,
           :thread_id,
+          :thread_config,
           :work_item,
           :awaiting_response,
           :frame_deadline,
