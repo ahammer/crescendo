@@ -360,7 +360,7 @@ defmodule SymphonyElixir.GitHub.Client do
 
   # Unchanged-input planning requires dependencies for unready issues too.
   defp planning_tracker(config) do
-    complete = config.autopilot.enabled and Enum.any?(config.autopilot.channels, fn {_name, task} -> task["skip_unchanged"] == true end)
+    complete = config.autopilot.enabled and Enum.any?(config.autopilot.channels, fn {_name, task} -> is_map(task) and task["skip_unchanged"] == true end)
     Map.put(config.tracker, :planning_dependencies, complete)
   end
 
@@ -678,7 +678,7 @@ defmodule SymphonyElixir.GitHub.Client do
 
   defp fetch_dependencies(issues, tracker_settings, settings, request_fun) do
     required_labels = Map.get(tracker_settings, :required_labels, [])
-    settings = settings |> Map.put(:excluded_labels, Map.get(tracker_settings, :excluded_labels, [])) |> Map.put(:planning_dependencies, tracker_settings[:planning_dependencies] == true)
+    settings = settings |> Map.put(:excluded_labels, Map.get(tracker_settings, :excluded_labels, [])) |> Map.put(:planning_dependencies, Map.get(tracker_settings, :planning_dependencies) == true)
 
     Enum.reduce_while(issues, {:ok, []}, fn issue, {:ok, acc} ->
       case fetch_dependencies_for_issue(issue, required_labels, settings, request_fun) do
