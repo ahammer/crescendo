@@ -7,7 +7,9 @@ defmodule SymphonyElixir.DeployStateTest do
     state = %{
       snapshot_status: "complete",
       project: nil,
-      projects: [%{id: "alpha", started: true, failure: nil, snapshot_status: "ok", running: 0, ready: 0}],
+      projects: [
+        %{id: "alpha", started: true, failure: nil, snapshot_status: "ok", tracker_ready: true, running: 0, ready: 0}
+      ],
       counts: %{running: 0},
       running: [],
       throttle: %{busy: 0}
