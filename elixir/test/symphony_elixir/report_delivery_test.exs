@@ -60,6 +60,22 @@ defmodule SymphonyElixir.ReportDeliveryTest do
 
         {issue, timeline, _attempt} = receipt(root, number, run_id)
         Operations.finish_run(table, run_id, "completed", %{})
+        {:ok, updated, _} = DateTime.from_iso8601(issue["updated_at"])
+
+        unknown = %Issue{
+          id: id,
+          identifier: "GH-#{id}",
+          title: issue["title"],
+          description: issue["body"],
+          url: issue["html_url"],
+          state: "closed",
+          state_reason: "completed",
+          updated_at: updated
+        }
+
+        # Existing unknown observations gain their scope fingerprint even when GitHub's timestamp is unchanged.
+        legacy = %{issue: unknown, closed_at: issue["closed_at"], sources: [], evidence_source: "github"}
+        Operations.observe_delivery(table, legacy, "crescendo")
         Map.merge(acc, %{"/repos/ahammer/metalrain/issues/#{id}" => issue, "/repos/ahammer/metalrain/issues/#{id}/timeline" => timeline})
       end)
 
@@ -152,6 +168,8 @@ defmodule SymphonyElixir.ReportDeliveryTest do
           {"input", %{"issue" => %{issue | "number" => 43}}},
           {"delivery-source", %{"clean_after" => false}},
           {"adjudicated-failures", %{"head" => String.duplicate("d", 40)}},
+          {"adjudicated-failures", %{"failures" => [nil]}},
+          {"review", %{"preexisting" => [nil]}},
           {"review-input-digest", %{"after" => "changed"}},
           {"review-input-digest", %{"new_own_issue_paths" => ["modified"]}},
           {"hosted-checks", %{"statuses" => %{"total_count" => 1, "state" => "failure"}}},
@@ -170,6 +188,23 @@ defmodule SymphonyElixir.ReportDeliveryTest do
       assert {:ok, %{report_verifications: []}} = observation(root, issue, timeline), inspect({name, changes})
       File.write!(file, original)
     end
+
+    entry = %{"check" => "workspace-tests", "failure" => "tracked_failure", "issue" => 99, "base_evidence" => "issue-42/#{String.duplicate("a", 40)}/baseline.log"}
+    adjudicated = entry |> Map.delete("issue") |> Map.merge(%{"tracking_issue" => 99, "classification" => "equivalent-main-failure"})
+    change_json(attempt, "review", %{"preexisting" => [entry]})
+    change_json(attempt, "adjudicated-failures", %{"failures" => [adjudicated]})
+    assert {:ok, %{report_verifications: [_]}} = observation(root, issue, timeline)
+
+    for invalid <- [%{adjudicated | "tracking_issue" => 98}, %{adjudicated | "classification" => "unverified"}, nil] do
+      change_json(attempt, "adjudicated-failures", %{"failures" => [invalid]})
+      assert {:ok, %{report_verifications: []}} = observation(root, issue, timeline)
+    end
+
+    change_json(attempt, "review", %{"preexisting" => [entry, entry]})
+    change_json(attempt, "adjudicated-failures", %{"failures" => [adjudicated, adjudicated]})
+    assert {:ok, %{report_verifications: []}} = observation(root, issue, timeline)
+    change_json(attempt, "review", %{"preexisting" => []})
+    change_json(attempt, "adjudicated-failures", %{"failures" => []})
 
     file = Path.join(attempt, "acceptance.md")
     original = File.read!(file)
@@ -275,7 +310,9 @@ defmodule SymphonyElixir.ReportDeliveryTest do
     Operations.start_run(table, "parent", %{details | issue_id: "40", issue_identifier: "GH-40", issue_url: "https://github.com/ahammer/metalrain/issues/40", handoff: nil})
     {issue, timeline, attempt} = receipt(root, 42, "worker")
     # Real reviewer timestamps have subsecond precision, while native run windows have seconds.
-    change_json(attempt, "review-usage", %{"observed_at_epoch" => System.os_time(:second) + 0.5})
+    {:ok, closed_at, _} = DateTime.from_iso8601(issue["closed_at"])
+    reviewed_s = DateTime.to_unix(closed_at) + elem(closed_at.microsecond, 0) / 2_000_000
+    change_json(attempt, "review-usage", %{"observed_at_epoch" => reviewed_s})
     Operations.usage(table, "worker", "gpt-6-sol", %{input_tokens: 100, output_tokens: 10, total_tokens: 110})
     Operations.finish_run(table, "worker", "completed", %{})
     usage = Jason.decode!(File.read!(Path.join(attempt, "review-usage.json")))
@@ -306,11 +343,20 @@ defmodule SymphonyElixir.ReportDeliveryTest do
     refute association.canonical_outcome_complete
     assert Enum.find(snapshot.delivery_metrics.issue_associations, &(&1.issue_id == "40")).disposition == "unknown_acceptance"
 
+    # A younger worker cannot extend native proof, including interrupted prune writes.
+    Operations.start_run(table, "later", %{details | item_attempt: 3})
+    [native] = :dets.lookup(table, {:lineage_run, "worker"})
+    :dets.delete(table, {:lineage_run, "worker"})
+    assert Enum.find(Operations.snapshot(table).delivery_metrics.issue_associations, &(&1.issue_id == "42")).disposition == "unknown_acceptance"
+    :dets.insert(table, native)
+
     # Removing the mutable heading or receipt after retention cannot rewrite lineage.
     File.rm!(Path.join(attempt, "review.json"))
     edited = %{observed | report_verifications: []}
     Operations.observe_delivery(table, edited, "crescendo")
-    assert Enum.find(Operations.snapshot(table).delivery_metrics.issue_associations, &(&1.issue_id == "42")) == association
+    retained = Enum.find(Operations.snapshot(table).delivery_metrics.issue_associations, &(&1.issue_id == "42"))
+    assert retained.report_verifications == association.report_verifications
+    assert retained.disposition == association.disposition
     reopened = %{edited | issue: %{edited.issue | state: "open", updated_at: DateTime.add(edited.issue.updated_at, 10)}, closed_at: nil}
     Operations.observe_delivery(table, reopened, "crescendo")
     assert Enum.find(Operations.snapshot(table).delivery_metrics.issue_associations, &(&1.issue_id == "42")).disposition == "open"
@@ -343,6 +389,40 @@ defmodule SymphonyElixir.ReportDeliveryTest do
     assert original == observed.closed_at
   end
 
+  test "edited issue criteria do not gain old report acceptance", %{root: root, table: table} do
+    Operations.start_run(table, "worker", %{issue_id: "42", issue_identifier: "GH-42", issue_url: "https://github.com/ahammer/metalrain/issues/42", kind: :issue, item_attempt: 1})
+    {issue, timeline, _} = receipt(root, 42, "worker")
+    {:ok, original} = observation(root, issue, timeline)
+    Operations.observe_delivery(table, original, "crescendo")
+    edited = %{issue | "body" => issue["body"] <> "; new unmet criterion", "updated_at" => DateTime.utc_now() |> DateTime.add(10) |> DateTime.to_iso8601()}
+    assert {:ok, %{report_verifications: []} = changed} = observation(root, edited, timeline)
+    Operations.observe_delivery(table, changed, "crescendo")
+    [association] = Operations.snapshot(table).delivery_metrics.issue_associations
+    assert association.disposition == "unknown_acceptance"
+    assert length(association.report_verifications) == 1
+    refute association.canonical_outcome_complete
+    assert {:ok, %{report_verifications: []}} = observation(root, %{issue | "title" => "Broader outcome"}, timeline)
+  end
+
+  test "precise GitHub boundaries reject pre-reopen and post-closure reports", %{root: root, table: table} do
+    Operations.start_run(table, "worker", %{issue_id: "42", issue_identifier: "GH-42", issue_url: "https://github.com/ahammer/metalrain/issues/42", kind: :issue, item_attempt: 1})
+    {issue, [closed, comment], attempt} = receipt(root, 42, "worker")
+    second = System.os_time(:second)
+    at = DateTime.from_unix!(second * 1_000_000 + 900_000, :microsecond) |> DateTime.to_iso8601()
+    issue = %{issue | "closed_at" => at, "updated_at" => at}
+    closed = %{closed | "created_at" => at}
+    change_json(attempt, "review-usage", %{"observed_at_epoch" => second + 0.1})
+    reopened_at = DateTime.from_unix!(second * 1_000_000 + 200_000, :microsecond) |> DateTime.to_iso8601()
+    reopened = %{"event" => "reopened", "created_at" => reopened_at}
+    assert {:ok, %{report_verifications: []}} = observation(root, issue, [reopened, closed, comment])
+    change_json(attempt, "review-usage", %{"observed_at_epoch" => second + 0.95})
+    {:ok, observed} = observation(root, issue, [closed, comment])
+    Operations.observe_delivery(table, observed, "crescendo")
+    [association] = Operations.snapshot(table).delivery_metrics.issue_associations
+    assert association.disposition == "unknown_acceptance"
+    assert association.report_verifications == []
+  end
+
   defp observation(root, issue, timeline, id \\ nil) do
     request = fn "GET", path, _params, nil, _settings ->
       body = if String.ends_with?(path, "timeline"), do: timeline, else: issue
@@ -364,8 +444,9 @@ defmodule SymphonyElixir.ReportDeliveryTest do
   defp await_reports(orchestrator) do
     assert Enum.any?(1..80, fn _ ->
              associations = Orchestrator.snapshot(orchestrator, 5_000).operations.delivery_metrics.issue_associations
-             if length(associations) != 3, do: Process.sleep(25)
-             length(associations) == 3
+             ready = length(associations) == 3 and :sys.get_state(orchestrator).pulls_observed_at != nil
+             if not ready, do: Process.sleep(25)
+             ready
            end)
 
     Orchestrator.snapshot(orchestrator, 5_000).operations.delivery_metrics.issue_associations

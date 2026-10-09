@@ -262,7 +262,16 @@ defmodule SymphonyElixir.GitHub.Client do
       issue = normalize_issue(raw, settings.repo)
       root = Keyword.get(opts, :evidence_root, System.get_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT"))
       reports = report_verifications(raw, timeline, settings, root)
-      {:ok, %{issue: issue, closed_at: raw["closed_at"], sources: sources, report_verifications: reports, evidence_source: "github_issue_and_cross_reference"}}
+
+      {:ok,
+       %{
+         issue: issue,
+         closed_at: raw["closed_at"],
+         sources: sources,
+         report_verifications: reports,
+         scope_digest: report_scope_digest([raw["title"], raw["body"]]),
+         evidence_source: "github_issue_and_cross_reference"
+       }}
     else
       {:ok, _} -> {:error, :github_unknown_payload}
       error -> error
@@ -290,7 +299,7 @@ defmodule SymphonyElixir.GitHub.Client do
          true <- is_binary(at) and at == raw["closed_at"],
          [[sha, number, sha, receipt]] <- Enum.uniq(references),
          true <- number == to_string(raw["number"]),
-         {:ok, report} <- read_report(root, number, sha, receipt, url),
+         {:ok, report} <- read_report(root, number, sha, receipt, url, [raw["title"], raw["body"]]),
          true <- report_after_reopen?(report, timeline) do
       [Map.put(report, :closed_at, at)]
     else
@@ -305,7 +314,7 @@ defmodule SymphonyElixir.GitHub.Client do
 
       %{"created_at" => at} ->
         case DateTime.from_iso8601(to_string(at)) do
-          {:ok, reopened, _} -> report.reviewed_s >= DateTime.to_unix(reopened)
+          {:ok, reopened, _} -> report.reviewed_s >= DateTime.to_unix(reopened, :microsecond) / 1_000_000
           _ -> false
         end
 
@@ -314,12 +323,12 @@ defmodule SymphonyElixir.GitHub.Client do
     end
   end
 
-  defp read_report(root, number, sha, receipt, url) do
+  defp read_report(root, number, sha, receipt, url, scope) do
     parts = ["issue-#{number}", sha, receipt]
 
     with {:ok, intent} <- report_json(root, parts, "closure-intent.json"),
          {:ok, input} <- report_json(root, parts, "input.json"),
-         true <- report_scope?(intent, input, number, sha, url),
+         true <- report_scope?(intent, input, number, sha, url, scope),
          {:ok, acceptance} <- report_bytes(root, parts, "acceptance.md"),
          true <- String.valid?(acceptance) and String.contains?(acceptance, sha),
          {:ok, review} <- report_json(root, parts, "review.json"),
@@ -327,7 +336,7 @@ defmodule SymphonyElixir.GitHub.Client do
          {:ok, source} <- report_json(root, parts, "delivery-source.json"),
          true <- exact_report_source?(source, sha) and source["clean_after"] == true,
          {:ok, adjudicated} <- report_json(root, parts, "adjudicated-failures.json"),
-         true <- exact_report_source?(adjudicated, sha) and is_list(adjudicated["failures"]),
+         true <- report_adjudication?(adjudicated, review, number, sha),
          {:ok, digest} <- report_json(root, parts, "review-input-digest.json"),
          true <- unchanged_report_inputs?(digest),
          {:ok, hosted} <- report_json(root, parts, "hosted-checks.json"),
@@ -337,6 +346,7 @@ defmodule SymphonyElixir.GitHub.Client do
       {:ok,
        %{
          verification_id: receipt,
+         scope_digest: report_scope_digest(scope),
          source_sha: sha,
          issue_url: url,
          run_id: usage["parent_run_id"],
@@ -348,17 +358,19 @@ defmodule SymphonyElixir.GitHub.Client do
     end
   end
 
-  defp report_scope?(intent, input, number, sha, url) do
+  defp report_scope?(intent, input, number, sha, url, scope) do
     case input["issue"] do
       %{"number" => issue_number, "html_url" => ^url, "title" => title, "body" => body} ->
         issue_number == String.to_integer(number) and intent["issue"] == issue_number and
           intent["head"] == sha and input["head"] == sha and intent["retirement"] == false and
-          intent["scope"] == [title, body]
+          intent["scope"] == [title, body] and intent["scope"] == scope
 
       _ ->
         false
     end
   end
+
+  defp report_scope_digest(scope), do: :crypto.hash(:sha256, Jason.encode!(scope)) |> Base.encode16(case: :lower)
 
   defp unchanged_report_inputs?(digest) do
     is_binary(digest["before"]) and digest["before"] == digest["after"] and digest["new_own_issue_paths"] == []
@@ -374,6 +386,27 @@ defmodule SymphonyElixir.GitHub.Client do
       is_binary(review["summary"]) and String.trim(review["summary"]) != "" and
       review["findings"] == [] and review["missing_evidence"] == [] and is_list(review["preexisting"])
   end
+
+  defp report_adjudication?(%{"failures" => failures} = adjudicated, review, number, sha) when is_list(failures) do
+    entries = review["preexisting"]
+
+    exact_report_source?(adjudicated, sha) and length(failures) == length(entries) and
+      Enum.all?(Enum.zip(failures, entries), fn {failure, entry} -> reviewed_report_failure?(failure, entry, number) end) and
+      length(Enum.uniq_by(failures, &{&1["check"], &1["failure"]})) == length(failures)
+  end
+
+  defp report_adjudication?(_, _, _, _), do: false
+
+  defp reviewed_report_failure?(
+         %{"check" => check, "failure" => failure, "tracking_issue" => issue, "base_evidence" => path, "classification" => "equivalent-main-failure"},
+         %{"check" => check, "failure" => failure, "issue" => issue, "base_evidence" => path},
+         number
+       ) do
+    is_integer(issue) and issue > 0 and issue != String.to_integer(number) and
+      is_binary(check) and check != "" and is_binary(failure) and failure != "" and is_binary(path) and path != ""
+  end
+
+  defp reviewed_report_failure?(_, _, _), do: false
 
   defp exact_report_source?(record, sha), do: record["base"] == sha and record["head"] == sha
 

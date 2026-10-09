@@ -167,6 +167,12 @@ defmodule SymphonyElixir.Operations do
     for {key, value} <- evidence, elem(key, 1) in ["issue", "issue_source", "issue_report"], value.issue_id not in ids do
       :dets.delete(table, key)
     end
+
+    for {key, report} <- evidence,
+        elem(key, 1) == "issue_report",
+        not :dets.member(table, {:lineage_run, report.run_id}) do
+      :dets.delete(table, key)
+    end
   end
 
   defp completed_boundary?("completed", _details), do: true
@@ -564,7 +570,7 @@ defmodule SymphonyElixir.Operations do
       previous = lookup(table, key, %{})
       updated_at = if issue.updated_at, do: DateTime.to_iso8601(issue.updated_at)
 
-      if previous == %{} or newer_evidence?(updated_at, previous[:updated_at]) do
+      if refresh_delivery_issue?(previous, updated_at, observation[:scope_digest]) do
         scope = retained_delivery_scope(delivery_runs(table, issue.id), previous, issue)
 
         value = %{
@@ -579,6 +585,7 @@ defmodule SymphonyElixir.Operations do
           handoff: scope.handoff,
           prefix: prefix,
           evidence_source: observation.evidence_source,
+          scope_digest: observation[:scope_digest],
           observed_at: DateTime.to_iso8601(DateTime.utc_now())
         }
 
@@ -594,8 +601,14 @@ defmodule SymphonyElixir.Operations do
     end)
   end
 
+  defp refresh_delivery_issue?(previous, updated_at, scope_digest) do
+    previous == %{} or newer_evidence?(updated_at, previous[:updated_at]) or
+      (updated_at == previous[:updated_at] and is_nil(previous[:scope_digest]) and is_binary(scope_digest))
+  end
+
   defp delivery_runs(table, issue_id) do
     for {_, run} = entry <- :dets.match_object(table, {{:lineage_run, :_}, :_}),
+        # Native worker times identify one-second buckets, including the complete finish second.
         run[:issue_id] == issue_id and run[:kind] == :issue,
         do: entry
   end
@@ -649,15 +662,20 @@ defmodule SymphonyElixir.Operations do
          true <- is_number(reviewed) and url == issue.url,
          [{{:lineage_run, ^id}, run}] <-
            Enum.filter(delivery_runs(table, issue.id), fn {_, run} ->
-             source_created_during_run?(run, issue.id, trunc(reviewed))
+             source_created_during_run?(run, issue.id, reviewed)
            end),
          true <- run[:issue_url] == url and is_integer(run[:item_attempt]),
          {:ok, closed, _} <- DateTime.from_iso8601(to_string(closed_at)),
-         true <- reviewed <= DateTime.to_unix(closed) + 1 do
+         true <- report_before_closure?(reviewed, closed) do
       key = {:lineage_evidence, "issue_report", {issue.id, report.verification_id}}
-      value = Map.take(report, [:verification_id, :source_sha, :run_id, :reviewed_s, :evidence_source])
+      value = Map.take(report, [:verification_id, :source_sha, :scope_digest, :run_id, :reviewed_s, :evidence_source])
       :dets.insert_new(table, {key, Map.merge(value, %{issue_id: issue.id, item_attempt: run.item_attempt, closed_at: closed_at})})
     end
+  end
+
+  defp report_before_closure?(reviewed, closed) do
+    at = DateTime.to_unix(closed, :microsecond) / 1_000_000
+    if closed.microsecond == {0, 0}, do: reviewed < at + 1, else: reviewed <= at
   end
 
   defp delivery_source_run(table, issue_id, created_at) do
@@ -677,7 +695,7 @@ defmodule SymphonyElixir.Operations do
 
   defp source_created_during_run?(run, issue_id, created_s) do
     run[:issue_id] == issue_id and run[:kind] == :issue and run[:delivery_tracking] == true and
-      run.started_s <= created_s and created_s <= (run[:finished_s] || System.os_time(:second))
+      run.started_s <= created_s and created_s < (run[:finished_s] || System.os_time(:second)) + 1
   end
 
   defp delivery_associations(table) do
@@ -706,7 +724,7 @@ defmodule SymphonyElixir.Operations do
       for {_, report} <- :dets.match_object(table, {{:lineage_evidence, "issue_report", {issue.issue_id, :_}}, :_}),
           do: report
 
-    proof = delivery_proof(issue, sources, reports)
+    proof = delivery_proof(table, issue, sources, reports)
     disposition = delivery_disposition(issue, proof)
     canonical_owner = if is_map(issue.handoff), do: to_string(issue.handoff["owner"]), else: issue.issue_id
 
@@ -737,13 +755,18 @@ defmodule SymphonyElixir.Operations do
       (is_map(issue.handoff) and issue.handoff["change"] == "partial_delivery")
   end
 
-  defp delivery_proof(issue, sources, reports) do
+  defp delivery_proof(table, issue, sources, reports) do
     cond do
       not is_binary(issue.closed_at) -> "unknown"
       Enum.any?(sources, &merged_worker_source?/1) -> "merged_source"
-      Enum.any?(reports, &(&1.closed_at == issue.closed_at)) -> "report_only"
+      Enum.any?(reports, &current_report_proof?(table, issue, &1)) -> "report_only"
       true -> "unknown"
     end
+  end
+
+  defp current_report_proof?(table, issue, report) do
+    report.closed_at == issue.closed_at and is_binary(report[:scope_digest]) and
+      report.scope_digest == issue[:scope_digest] and :dets.member(table, {:lineage_run, report.run_id})
   end
 
   defp delivery_disposition(issue, proof) do
