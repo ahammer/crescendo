@@ -1507,6 +1507,16 @@ A successful subsequent read clears the warning. Deployment drain and health val
 reject partial, filtered, or unknown project state and unknown Governor-held slot counts before
 treating an observation as safe.
 
+Deployment health MUST additionally require `projects[].tracker_ready: true` for every enabled
+project. The Orchestrator owns this signal: it is true only after a successful active-issue poll
+in the current process generation, with no subsequent poll/configuration error. Restart resets
+readiness even when persisted PR inventory is restored; a failed poll clears readiness until
+the next successful poll. Unavailable or unselected project snapshots expose `null` readiness.
+Responsive snapshots, empty queues, PR inventory timestamps and Governor-held capacity MUST NOT
+substitute for tracker readiness. Idle and intentionally held projects are healthy after a
+successful poll. Drain slot/helper accounting does not depend on tracker readiness. Startup
+polling uses the existing bounded health wait and unsuccessful readiness follows the existing rollback.
+
 Service snapshots MUST also expose the Governor's current admission holds in `throttle`:
 `draining` is the deployment drain flag; `research_hold` is `null` or a map with the public
 project ID and `phase` (`reserved` while global research waits for idle, `running` while it holds

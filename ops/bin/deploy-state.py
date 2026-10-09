@@ -33,6 +33,8 @@ def validate(state, mode):
         )
     ):
         raise ValueError("incomplete project snapshots")
+    if mode == "healthy" and not all(project.get("tracker_ready") is True for project in projects):
+        raise ValueError("project tracker not ready")
     running = state.get("running")
     counts = state.get("counts")
     if not isinstance(running, list) or not isinstance(counts, dict) or counts.get("running") != len(running):

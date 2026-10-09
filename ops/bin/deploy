@@ -91,7 +91,7 @@ outcome=swap_failed
 cp "$env_file" "$env_file.before-$target"
 sed -i "s|^CRESCENDO_RELEASE=.*|CRESCENDO_RELEASE=\"$release\"|" "$env_file"
 
-# 5. Healthy means the state API answers with every project's orchestrator running; otherwise roll back.
+# 5. Every project must answer and have successfully polled its tracker since restart; otherwise roll back.
 healthy() {
   curl -fsS --max-time 10 "$state_url" | python3 "$(dirname "$0")/deploy-state.py" healthy
 }

@@ -2697,6 +2697,7 @@ defmodule SymphonyElixir.Orchestrator do
        codex_totals: state.codex_totals,
        operations: Operations.snapshot(state.operations, opts),
        operations_error: state.operations_error,
+       tracker_ready: not is_nil(state.issues_observed_at) and is_nil(state.issues_error),
        upcoming: upcoming_issues(state),
        autopilot: autopilot_snapshot(state),
        pull_requests: %{
