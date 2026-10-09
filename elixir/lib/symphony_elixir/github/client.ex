@@ -373,7 +373,7 @@ defmodule SymphonyElixir.GitHub.Client do
          {:ok, digest} <- report_json(root, parts, "review-input-digest.json"),
          true <- unchanged_report_inputs?(digest),
          {:ok, hosted} <- report_json(root, parts, "hosted-checks.json"),
-         true <- completed_report_checks?(hosted),
+         true <- completed_report_checks?(hosted, sha),
          {:ok, usage} <- report_json(root, parts, "review-usage.json"),
          true <- report_worker?(usage, number, sha) do
       {:ok,
@@ -443,16 +443,16 @@ defmodule SymphonyElixir.GitHub.Client do
 
   defp exact_report_source?(record, sha), do: record["base"] == sha and record["head"] == sha
 
-  defp completed_report_checks?(%{"statuses" => %{"total_count" => count} = statuses, "checks" => checks})
+  defp completed_report_checks?(%{"statuses" => %{"total_count" => count} = statuses, "checks" => checks}, sha)
        when is_integer(count) and count >= 0 and is_list(checks) do
-    (count == 0 or statuses["state"] == "success") and
+    statuses["sha"] == sha and (count == 0 or statuses["state"] == "success") and
       Enum.all?(checks, fn
-        %{"status" => "completed", "conclusion" => conclusion} -> conclusion in ["success", "neutral", "skipped"]
+        %{"head_sha" => ^sha, "status" => "completed", "conclusion" => conclusion} -> conclusion in ["success", "neutral", "skipped"]
         _ -> false
       end)
   end
 
-  defp completed_report_checks?(_), do: false
+  defp completed_report_checks?(_, _), do: false
 
   defp report_json(root, parts, name) do
     with {:ok, bytes} <- report_bytes(root, parts, name),

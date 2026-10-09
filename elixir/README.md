@@ -146,8 +146,9 @@ Canonical report-only `--verify-existing` closures use `repository_reported_veri
 A matching GitHub closure event and one exact-source canonical reference must agree with bounded
 private closure/input/acceptance/review/validation receipts under the existing
 `METALRAIN_SYMPHONY_EVIDENCE_ROOT`. An approved review and reviewer run/time must join one unique
-retained issue worker; headings and successful turns alone cannot establish acceptance. Captured
-scope must match the observed issue; a fingerprint prevents later criteria edits inheriting old proof.
+retained issue worker. Hosted commit status and check-run SHAs must match the reviewed source.
+Headings and successful turns alone cannot establish acceptance. Captured scope must match the observed
+issue; a fingerprint prevents later criteria edits inheriting old proof.
 Conflicting scopes at one GitHub timestamp stay unknown across replay/restart until a newer observation,
 even when lifecycle ordering rejects the conflicting observation; the latest retained lifecycle stays intact.
 Wrong-source, wrong-issue, foreign, ambiguous or incomplete evidence remains unknown. The immutable association

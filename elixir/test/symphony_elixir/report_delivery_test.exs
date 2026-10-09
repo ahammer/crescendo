@@ -221,6 +221,26 @@ defmodule SymphonyElixir.ReportDeliveryTest do
     File.write!(file, original)
   end
 
+  test "hosted check receipts must identify the exact reviewed source", %{root: root} do
+    {issue, timeline, attempt} = receipt(root, 42, "worker")
+    sha = String.duplicate("a", 40)
+    statuses = %{"total_count" => 1, "state" => "success", "sha" => sha}
+    check = %{"head_sha" => sha, "status" => "completed", "conclusion" => "success"}
+    hosted = %{"statuses" => statuses, "checks" => [check]}
+    change_json(attempt, "hosted-checks", hosted)
+    assert {:ok, %{report_verifications: [_]}} = observation(root, issue, timeline)
+
+    for invalid <- [
+          %{hosted | "statuses" => %{statuses | "sha" => String.duplicate("d", 40)}},
+          %{hosted | "checks" => [%{check | "head_sha" => String.duplicate("d", 40)}]},
+          %{hosted | "statuses" => Map.delete(statuses, "sha")},
+          %{hosted | "checks" => [Map.delete(check, "head_sha")]}
+        ] do
+      change_json(attempt, "hosted-checks", invalid)
+      assert {:ok, %{report_verifications: []}} = observation(root, issue, timeline)
+    end
+  end
+
   test "mutable annotations cannot replace unique canonical receipts and observed closure", %{root: root} do
     {issue, [closed, comment] = timeline, attempt} = receipt(root, 42, "worker")
     second = %{comment | "body" => String.replace(comment["body"], String.duplicate("b", 32), String.duplicate("d", 32))}
@@ -778,7 +798,7 @@ defmodule SymphonyElixir.ReportDeliveryTest do
           {"review-usage", usage},
           {"delivery-source", %{"base" => sha, "head" => sha, "clean_after" => true}},
           {"adjudicated-failures", %{"base" => sha, "head" => sha, "failures" => []}},
-          {"hosted-checks", %{"statuses" => %{"total_count" => 0}, "checks" => []}},
+          {"hosted-checks", %{"statuses" => %{"total_count" => 0, "sha" => sha}, "checks" => []}},
           {"review-input-digest", %{"before" => "digest", "after" => "digest", "new_own_issue_paths" => []}}
         ] do
       File.write!(Path.join(attempt, name <> ".json"), Jason.encode!(value))

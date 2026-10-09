@@ -681,7 +681,9 @@ existing private `METALRAIN_SYMPHONY_EVIDENCE_ROOT`: closure intent, input, acce
 review, clean source, adjudicated failures, unchanged review-input digest, hosted checks and
 reviewer usage. Issue/repository identity, captured scope, source SHAs and reviewer work item must
 agree with the observed issue scope. A retained scope fingerprint prevents later criteria edits from
-inheriting earlier report acceptance. Conflicting scopes at the same GitHub timestamp remain unknown
+inheriting earlier report acceptance. Hosted commit status and check-run SHAs must match the
+reviewed source; successful unrelated checks supply no proof. Conflicting scopes at the same GitHub
+timestamp remain unknown
 across replay/restart until a newer observation resolves the scope, even when lifecycle ordering
 rejects the conflicting observation. The latest retained lifecycle stays intact. A heading, successful turn,
 missing receipt, rejected review or ambiguous reference supplies no proof.
