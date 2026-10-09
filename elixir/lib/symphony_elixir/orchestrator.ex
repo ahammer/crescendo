@@ -3060,12 +3060,19 @@ defmodule SymphonyElixir.Orchestrator do
       else: Throttle.evaluate(Config.settings!().throttle, state.codex_quota, spent, DateTime.utc_now())
   end
 
+  defp quiet_demand(%State{throttle: nil}), do: 0
+
   defp quiet_demand(state) do
     # Ignore only the clock gate; quota, route, dependencies and retry admission still apply.
-    candidate = put_in(state.throttle, Map.put(state.throttle || %{}, :quiet_window, %{phase: "active"}))
+    candidate = put_in(state.throttle, Map.put(state.throttle, :quiet_window, %{phase: "active"}))
+    now_ms = System.monotonic_time(:millisecond)
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
 
     Enum.count(state.polled_issues, fn issue ->
-      quiet_item?(issue) and ready_for_dispatch?(issue, candidate, active_state_set(), terminal_state_set())
+      quiet_item?(issue) and
+        (ready_for_dispatch?(issue, candidate, active_states, terminal_states) or
+           (candidate_issue?(issue, active_states, terminal_states) and retry_waiting?(candidate, issue, now_ms)))
     end)
   end
 

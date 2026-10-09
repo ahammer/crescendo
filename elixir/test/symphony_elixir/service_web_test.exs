@@ -8,21 +8,32 @@ defmodule SymphonyElixir.ServiceWebTest do
 
   @endpoint SymphonyElixirWeb.Endpoint
 
-  setup do
+  setup context do
     root = Path.join(System.tmp_dir!(), "symphony-service-web-#{System.unique_integer([:positive])}")
+
+    route = %{model: "gpt-6.1-sol", effort: "high"}
+    routing = if context[:quiet_startup], do: %{label_prefix: "symphony:model:", default: route, labels: %{"symphony:model:sol" => route}}
+    interval = if context[:quiet_startup], do: 3_600_000, else: 30_000
 
     for id <- ["alpha", "beta"] do
       dir = Path.join([root, "projects", id])
       File.mkdir_p!(dir)
-      write_workflow_file!(Path.join(dir, "WORKFLOW.md"), tracker_kind: "memory", tracker_excluded_labels: ["hold"])
+      write_workflow_file!(Path.join(dir, "WORKFLOW.md"), tracker_kind: "memory", tracker_excluded_labels: ["hold"], codex_routing: routing, poll_interval_ms: interval)
     end
 
-    File.write!(Path.join(root, "crescendo.yml"), "paths: {state: state}\npool: {slots: 2}\nprojects: {alpha: {weight: 2}, beta: {redact: true, research_exclusive: global}}")
+    quiet = if context[:quiet_startup], do: "\nquiet_window: {start: '03:00', end: '04:00', time_zone: America/Vancouver, drain_minutes: 60}", else: ""
+    File.write!(Path.join(root, "crescendo.yml"), "paths: {state: state}\npool: {slots: 2}\nprojects: {alpha: {weight: 2}, beta: {redact: true, research_exclusive: global}}" <> quiet)
     {:ok, service} = Service.load(Path.join(root, "crescendo.yml"))
 
     # A held issue shows in the queue without starting an agent.
-    issue = %Issue{id: "issue-held", identifier: "MT-7", title: "Held work", state: "In Progress", labels: ["hold"], dispatchable: true}
+    labels = if context[:quiet_startup], do: ["symphony:quiet"], else: ["hold"]
+    issue = %Issue{id: "issue-held", identifier: "MT-7", title: "Held work", state: "In Progress", labels: labels, dispatchable: true}
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    if context[:quiet_startup] do
+      Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2025-10-08 09:30:00Z] end)
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :governor_now) end)
+    end
 
     previous = Service.current()
     :ok = Service.put_current(service)
@@ -34,7 +45,11 @@ defmodule SymphonyElixir.ServiceWebTest do
 
     start_supervised!({Governor, service})
     start_supervised!({Projects, service})
-    wait_for(fn -> Enum.all?(["alpha", "beta"], &GenServer.whereis(SymphonyElixir.Project.via(&1, :orchestrator))) end)
+
+    wait_for(fn ->
+      assert Projects.failures() == %{}
+      Enum.all?(["alpha", "beta"], &GenServer.whereis(SymphonyElixir.Project.via(&1, :orchestrator)))
+    end)
 
     endpoint_config =
       :symphony_elixir
@@ -44,7 +59,58 @@ defmodule SymphonyElixir.ServiceWebTest do
     Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, endpoint_config)
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
     wait_for(fn -> length(json_response(get(build_conn(), "/api/v1/state"), 200)["upcoming"]["waiting"]) == 2 end)
-    :ok
+    {:ok, service: service, quiet_issue: issue}
+  end
+
+  @tag quiet_startup: true
+  test "quiet work survives a cold service start and project restart", %{service: service} do
+    assert Governor.snapshot().quiet_window.phase == "idle"
+
+    for id <- ["alpha", "beta"] do
+      pid = GenServer.whereis(SymphonyElixir.Project.via(id, :orchestrator))
+      state = :sys.get_state(pid)
+      assert state.issues_observed_at
+      assert state.throttle.avoid == %{}
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).issues_observed_at
+      assert GenServer.whereis(SymphonyElixir.Project.via(id, :orchestrator)) == pid
+    end
+
+    assert Governor.snapshot().quiet_window.phase == "preparing"
+    stop_supervised!(Projects)
+    start_supervised!({Projects, service})
+    wait_for(fn -> length(json_response(get(build_conn(), "/api/v1/state"), 200)["upcoming"]["waiting"]) == 2 end)
+    assert Governor.snapshot().quiet_window.phase == "idle"
+    assert json_response(get(build_conn(), "/api/v1/state"), 200)["snapshot_status"] == "complete"
+  end
+
+  @tag quiet_startup: true
+  test "quiet demand retains policy gates and counts eligible held or due retries", %{quiet_issue: issue} do
+    pid = GenServer.whereis(SymphonyElixir.Project.via("alpha", :orchestrator))
+    initial = :sys.get_state(pid)
+    now = System.monotonic_time(:millisecond)
+    held = %{due_at_ms: now + 60_000, delay_type: :held, attempt: 1, timer_ref: nil}
+    policy = initial.throttle
+
+    for {throttle, retries, expected} <- [
+          {%{policy | paused: "quota low"}, %{}, "idle"},
+          {%{policy | over_budget: "daily budget", allow: []}, %{}, "idle"},
+          {%{policy | avoid: %{"gpt-6.1-sol" => "backed off"}}, %{}, "idle"},
+          {policy, %{issue.id => held}, "preparing"},
+          {policy, %{issue.id => %{held | delay_type: :backoff, due_at_ms: now - 1}}, "preparing"},
+          {policy, %{issue.id => %{held | delay_type: :backoff}}, "idle"},
+          {%{policy | paused: "quota low"}, %{issue.id => held}, "idle"},
+          {%{policy | over_budget: "daily budget", allow: []}, %{issue.id => held}, "idle"},
+          {%{policy | avoid: %{"gpt-6.1-sol" => "backed off"}}, %{issue.id => held}, "idle"}
+        ] do
+      Governor.checkin("alpha", 0, 0, 0)
+      Governor.checkin("beta", 0, 0, 0)
+      :sys.replace_state(pid, fn state -> %{state | throttle: throttle, retry_attempts: retries} end)
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).retry_attempts == retries
+      assert GenServer.whereis(SymphonyElixir.Project.via("alpha", :orchestrator)) == pid
+      assert Governor.snapshot().quiet_window.phase == expected
+    end
   end
 
   test "the state API merges every project and filters to one" do
