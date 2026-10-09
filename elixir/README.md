@@ -148,7 +148,8 @@ private closure/input/acceptance/review/validation receipts under the existing
 `METALRAIN_SYMPHONY_EVIDENCE_ROOT`. An approved review and reviewer run/time must join one unique
 retained issue worker; headings and successful turns alone cannot establish acceptance. Captured
 scope must match the observed issue; a fingerprint prevents later criteria edits inheriting old proof.
-Conflicting scopes at one GitHub timestamp stay unknown across replay/restart until a newer observation.
+Conflicting scopes at one GitHub timestamp stay unknown across replay/restart until a newer observation,
+even when lifecycle ordering rejects the conflicting observation; the latest retained lifecycle stays intact.
 Wrong-source, wrong-issue, foreign, ambiguous or incomplete evidence remains unknown. The immutable association
 survives closure/restart, preserves original attempt budgets and unmet parent scope, and expires
 with the original worker. GitHub time precision is preserved; native times use one-second buckets.

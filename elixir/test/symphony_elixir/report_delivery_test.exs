@@ -454,6 +454,22 @@ defmodule SymphonyElixir.ReportDeliveryTest do
     Operations.observe_delivery(table, restored, "crescendo")
     [unambiguous] = Operations.snapshot(table).delivery_metrics.issue_associations
     assert unambiguous.disposition == "repository_reported_verification"
+
+    # A mixed issue/timeline read has no lifecycle ID, but its conflicting scope is still observed.
+    [closed, comment] = timeline
+    reopened = %{"id" => closed["id"] + 1, "event" => "reopened", "created_at" => updated}
+    {:ok, mixed} = observation(root, %{edited | "updated_at" => updated}, [closed, reopened, comment])
+    assert mixed.lifecycle_id == nil
+    Operations.observe_delivery(table, mixed, "crescendo")
+    [conflicted] = Operations.snapshot(table).delivery_metrics.issue_associations
+    assert conflicted.disposition == "unknown_acceptance"
+    assert conflicted.lifecycle_id == unambiguous.lifecycle_id
+    Operations.close(table)
+    {:ok, ^table} = Operations.open(path, table)
+    Operations.observe_delivery(table, restored, "crescendo")
+    [conflicted] = Operations.snapshot(table).delivery_metrics.issue_associations
+    assert conflicted.disposition == "unknown_acceptance"
+    assert conflicted.lifecycle_id == unambiguous.lifecycle_id
   end
 
   test "a reopened issue can retain an old annotation and accept one new canonical report", %{root: root, table: table} do

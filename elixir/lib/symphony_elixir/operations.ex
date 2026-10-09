@@ -569,8 +569,9 @@ defmodule SymphonyElixir.Operations do
       key = {:lineage_evidence, "issue", issue.id}
       previous = lookup(table, key, %{})
       updated_at = if issue.updated_at, do: DateTime.to_iso8601(issue.updated_at)
+      refresh = refresh_delivery_issue?(previous, updated_at, observation[:lifecycle_id], observation[:scope_digest])
 
-      if refresh_delivery_issue?(previous, updated_at, observation[:lifecycle_id], observation[:scope_digest]) do
+      if refresh do
         scope = retained_delivery_scope(delivery_runs(table, issue.id), previous, issue)
 
         value = %{
@@ -594,6 +595,11 @@ defmodule SymphonyElixir.Operations do
         history = Map.take(value, [:state, :state_reason, :updated_at, :closed_at, :lifecycle_id, :handoff, :reduced_scope, :evidence_source, :observed_at])
         value = Map.put(value, :tracker_observations, (previous[:tracker_observations] || []) ++ [history])
         :ok = :dets.insert(table, {key, value})
+      end
+
+      if not refresh and is_binary(observation[:scope_digest]) and
+           observed_scope_digest(previous, updated_at, observation[:scope_digest]) == :ambiguous do
+        :ok = :dets.insert(table, {key, Map.put(previous, :scope_digest, :ambiguous)})
       end
 
       Enum.each(observation.sources, &retain_delivery_source(table, issue.id, &1))
