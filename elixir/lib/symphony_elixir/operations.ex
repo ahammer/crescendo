@@ -570,7 +570,7 @@ defmodule SymphonyElixir.Operations do
       previous = lookup(table, key, %{})
       updated_at = if issue.updated_at, do: DateTime.to_iso8601(issue.updated_at)
 
-      if refresh_delivery_issue?(previous, updated_at, observation[:scope_digest]) do
+      if refresh_delivery_issue?(previous, updated_at, observation[:lifecycle_id], observation[:scope_digest]) do
         scope = retained_delivery_scope(delivery_runs(table, issue.id), previous, issue)
 
         value = %{
@@ -581,6 +581,7 @@ defmodule SymphonyElixir.Operations do
           state_reason: issue.state_reason,
           updated_at: updated_at,
           closed_at: observation.closed_at,
+          lifecycle_id: observation[:lifecycle_id],
           labels: issue.labels,
           handoff: scope.handoff,
           prefix: prefix,
@@ -590,7 +591,7 @@ defmodule SymphonyElixir.Operations do
         }
 
         value = Map.put(value, :reduced_scope, previous[:reduced_scope] == true or scope.reduced_scope or reduced_delivery?(value))
-        history = Map.take(value, [:state, :state_reason, :updated_at, :closed_at, :handoff, :reduced_scope, :evidence_source, :observed_at])
+        history = Map.take(value, [:state, :state_reason, :updated_at, :closed_at, :lifecycle_id, :handoff, :reduced_scope, :evidence_source, :observed_at])
         value = Map.put(value, :tracker_observations, (previous[:tracker_observations] || []) ++ [history])
         :ok = :dets.insert(table, {key, value})
       end
@@ -601,17 +602,21 @@ defmodule SymphonyElixir.Operations do
     end)
   end
 
-  defp refresh_delivery_issue?(previous, updated_at, scope_digest) do
+  defp refresh_delivery_issue?(previous, updated_at, lifecycle_id, scope_digest) do
     previous == %{} or newer_evidence?(updated_at, previous[:updated_at]) or
-      (updated_at == previous[:updated_at] and is_binary(scope_digest) and
-         previous[:scope_digest] not in [scope_digest, :ambiguous])
+      (updated_at == previous[:updated_at] and
+         (newer_evidence?(lifecycle_id, previous[:lifecycle_id]) or
+            (lifecycle_id == previous[:lifecycle_id] and is_binary(scope_digest) and
+               previous[:scope_digest] not in [scope_digest, :ambiguous])))
   end
 
   defp observed_scope_digest(previous, updated_at, scope_digest) do
     # GitHub's timestamp cannot order conflicting scopes within the same second.
-    if updated_at == previous[:updated_at] and is_binary(previous[:scope_digest]),
-      do: :ambiguous,
-      else: scope_digest
+    if updated_at == previous[:updated_at] and
+         (previous[:scope_digest] == :ambiguous or
+            (is_binary(previous[:scope_digest]) and previous[:scope_digest] != scope_digest)),
+       do: :ambiguous,
+       else: scope_digest
   end
 
   defp delivery_runs(table, issue_id) do
@@ -676,7 +681,7 @@ defmodule SymphonyElixir.Operations do
          {:ok, closed, _} <- DateTime.from_iso8601(to_string(closed_at)),
          true <- report_before_closure?(reviewed, closed) do
       key = {:lineage_evidence, "issue_report", {issue.id, report.verification_id}}
-      value = Map.take(report, [:verification_id, :source_sha, :scope_digest, :run_id, :reviewed_s, :evidence_source])
+      value = Map.take(report, [:verification_id, :source_sha, :scope_digest, :run_id, :reviewed_s, :lifecycle_id, :evidence_source])
       :dets.insert_new(table, {key, Map.merge(value, %{issue_id: issue.id, item_attempt: run.item_attempt, closed_at: closed_at})})
     end
   end
@@ -774,7 +779,8 @@ defmodule SymphonyElixir.Operations do
 
   defp current_report_proof?(table, issue, report) do
     report.closed_at == issue.closed_at and is_binary(report[:scope_digest]) and
-      report.scope_digest == issue[:scope_digest] and :dets.member(table, {:lineage_run, report.run_id})
+      report.scope_digest == issue[:scope_digest] and is_integer(report[:lifecycle_id]) and
+      report.lifecycle_id == issue[:lifecycle_id] and :dets.member(table, {:lineage_run, report.run_id})
   end
 
   defp delivery_disposition(issue, proof) do

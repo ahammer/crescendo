@@ -261,12 +261,15 @@ defmodule SymphonyElixir.GitHub.Client do
          {:ok, sources} <- delivery_sources(timeline, settings, request_fun, id) do
       issue = normalize_issue(raw, settings.repo)
       root = Keyword.get(opts, :evidence_root, System.get_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT"))
-      reports = report_verifications(raw, timeline, settings, root)
+      lifecycle = timeline |> Enum.filter(&(&1["event"] in ["closed", "reopened"])) |> List.last() || %{}
+      lifecycle_id = if is_integer(lifecycle["id"]) and lifecycle["id"] > 0, do: lifecycle["id"]
+      reports = report_verifications(raw, timeline, settings, root, lifecycle)
 
       {:ok,
        %{
          issue: issue,
          closed_at: raw["closed_at"],
+         lifecycle_id: lifecycle_id,
          sources: sources,
          report_verifications: reports,
          scope_digest: report_scope_digest([raw["title"], raw["body"]]),
@@ -279,10 +282,9 @@ defmodule SymphonyElixir.GitHub.Client do
   end
 
   # Canonical receipts are repository reports, never independent acceptance or billing proof.
-  defp report_verifications(raw, timeline, settings, root) do
+  defp report_verifications(raw, timeline, settings, root, lifecycle) do
     number = to_string(raw["number"])
     url = "https://github.com/#{settings.repo}/issues/#{number}"
-    closed = Enum.filter(timeline, &(&1["event"] == "closed"))
 
     references =
       for %{"event" => "commented", "body" => body} <- timeline,
@@ -296,13 +298,13 @@ defmodule SymphonyElixir.GitHub.Client do
 
     with true <- is_binary(root) and raw["html_url"] == url,
          true <- raw["state"] == "closed" and raw["state_reason"] == "completed",
-         %{"created_at" => at} <- List.last(closed),
+         %{"event" => "closed", "id" => id, "created_at" => at} when is_integer(id) and id > 0 <- lifecycle,
          true <- is_binary(at) and at == raw["closed_at"],
          references <- Enum.reject(Enum.uniq(references), &prior_report_reference?(&1, root, number, timeline)),
          [[sha, ^number, sha, receipt]] <- references,
          {:ok, report} <- read_report(root, number, sha, receipt, url, [raw["title"], raw["body"]]),
-         true <- report_after_reopen?(report, timeline) do
-      [Map.put(report, :closed_at, at)]
+         :after <- report_reopen_order(report, timeline) do
+      [Map.merge(report, %{closed_at: at, lifecycle_id: id})]
     else
       _ -> []
     end
@@ -311,7 +313,7 @@ defmodule SymphonyElixir.GitHub.Client do
   defp prior_report_reference?([sha, number, sha, receipt], root, number, timeline) do
     with {:ok, usage} <- report_json(root, ["issue-#{number}", sha, receipt], "review-usage.json"),
          true <- report_worker?(usage, number, sha) do
-      not report_after_reopen?(%{reviewed_s: usage["observed_at_epoch"]}, timeline)
+      report_reopen_order(%{reviewed_s: usage["observed_at_epoch"]}, timeline) == :before
     else
       _ -> false
     end
@@ -319,19 +321,23 @@ defmodule SymphonyElixir.GitHub.Client do
 
   defp prior_report_reference?(_, _, _, _), do: false
 
-  defp report_after_reopen?(report, timeline) do
-    case timeline |> Enum.filter(&(&1["event"] == "reopened")) |> List.last() do
-      nil ->
-        true
+  defp report_reopen_order(report, timeline) do
+    with %{"created_at" => at} <- timeline |> Enum.filter(&(&1["event"] == "reopened")) |> List.last(),
+         {:ok, reopened, _} <- DateTime.from_iso8601(to_string(at)) do
+      report_time_order(report.reviewed_s, reopened)
+    else
+      nil -> :after
+      _ -> :ambiguous
+    end
+  end
 
-      %{"created_at" => at} ->
-        case DateTime.from_iso8601(to_string(at)) do
-          {:ok, reopened, _} -> report.reviewed_s >= DateTime.to_unix(reopened, :microsecond) / 1_000_000
-          _ -> false
-        end
+  defp report_time_order(reviewed, reopened) do
+    at = DateTime.to_unix(reopened, :microsecond) / 1_000_000
 
-      _ ->
-        false
+    cond do
+      reviewed < at -> :before
+      reopened.microsecond == {0, 0} and reviewed < at + 1 -> :ambiguous
+      true -> :after
     end
   end
 

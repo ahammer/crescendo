@@ -152,8 +152,11 @@ Conflicting scopes at one GitHub timestamp stay unknown across replay/restart un
 Wrong-source, wrong-issue, foreign, ambiguous or incomplete evidence remains unknown. The immutable association
 survives closure/restart, preserves original attempt budgets and unmet parent scope, and expires
 with the original worker. GitHub time precision is preserved; native times use one-second buckets.
-Reopen retains evidence; a later closure needs its own proof. Canonical review timestamps exclude
-pre-reopen references from the new closure's ambiguity check. Receipt polling
+Reopen retains evidence; a later closure needs its own proof. GitHub lifecycle event IDs identify
+closures and order observations with the same issue update timestamp, preventing reused closure
+timestamps from inheriting old proof even when the reopen is missed between polls. Missing event
+identity supplies no report proof. Canonical review timestamps exclude demonstrably pre-reopen
+references; reviews within a second-precision reopen's second stay ambiguous. Receipt polling
 adds no usage, and existing auxiliary review run-ID deduplication stays separate from native workers.
 Raw receipts and paths stay private. Historical runs without prospective tracking remain unknown;
 independent acceptance and helper coverage remain unknown, so verified cost and latency stay null. See

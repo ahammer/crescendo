@@ -227,6 +227,8 @@ defmodule SymphonyElixir.ReportDeliveryTest do
 
     for events <- [
           [closed],
+          [Map.delete(closed, "id"), comment],
+          [Map.put(closed, "id", "invalid"), comment],
           [comment],
           [closed, second],
           [closed, comment, second],
@@ -271,14 +273,32 @@ defmodule SymphonyElixir.ReportDeliveryTest do
       [{key, run}] = :dets.lookup(table, {:lineage_run, run_id})
 
       case invalid do
-        :ambiguous -> Operations.start_run(table, "other-#{id}", details)
-        :wrong_run -> change_json(attempt, "review-usage", %{"parent_run_id" => "missing"})
-        :wrong_issue -> :dets.insert(table, {key, %{run | issue_id: "other"}})
-        :foreign_repo -> :dets.insert(table, {key, %{run | issue_url: "https://github.com/foreign/repo/issues/#{id}"}})
-        :historical -> :dets.insert(table, {key, %{run | delivery_tracking: false}})
-        :outside -> :dets.insert(table, {key, %{run | started_s: run.started_s + 30}})
-        :no_attempt -> :dets.insert(table, {key, Map.delete(run, :item_attempt)})
-        :no_receipts -> File.rm!(Path.join(attempt, "review.json"))
+        :ambiguous ->
+          other = "other-#{id}"
+          Operations.start_run(table, other, details)
+          [{other_key, other_run}] = :dets.lookup(table, {:lineage_run, other})
+          :dets.insert(table, {other_key, %{other_run | started_s: run.started_s}})
+
+        :wrong_run ->
+          change_json(attempt, "review-usage", %{"parent_run_id" => "missing"})
+
+        :wrong_issue ->
+          :dets.insert(table, {key, %{run | issue_id: "other"}})
+
+        :foreign_repo ->
+          :dets.insert(table, {key, %{run | issue_url: "https://github.com/foreign/repo/issues/#{id}"}})
+
+        :historical ->
+          :dets.insert(table, {key, %{run | delivery_tracking: false}})
+
+        :outside ->
+          :dets.insert(table, {key, %{run | started_s: run.started_s + 30}})
+
+        :no_attempt ->
+          :dets.insert(table, {key, Map.delete(run, :item_attempt)})
+
+        :no_receipts ->
+          File.rm!(Path.join(attempt, "review.json"))
       end
 
       {:ok, observed} = observation(root, issue, timeline)
@@ -453,7 +473,7 @@ defmodule SymphonyElixir.ReportDeliveryTest do
     [accepted] = Operations.snapshot(table).delivery_metrics.issue_associations
     assert accepted.disposition == "repository_reported_verification"
 
-    reopened = %{"event" => "reopened", "created_at" => at.(20)}
+    reopened = %{"id" => closed["id"] + 1, "event" => "reopened", "created_at" => at.(20)}
     open = %{issue | "state" => "open", "closed_at" => nil, "updated_at" => at.(20)}
     {:ok, observed_open} = observation(root, open, [closed, reopened, comment])
     Operations.observe_delivery(table, observed_open, "crescendo")
@@ -466,7 +486,7 @@ defmodule SymphonyElixir.ReportDeliveryTest do
     issue = %{issue | "closed_at" => at.(40), "updated_at" => at.(40), "body" => issue["body"] <> "; revalidated criterion"}
     change_json(new_attempt, "input", %{"issue" => %{issue | "state" => "open"}})
     change_json(new_attempt, "closure-intent", %{"scope" => [issue["title"], issue["body"]]})
-    reclosed = %{reclosed | "created_at" => at.(40)}
+    reclosed = %{reclosed | "id" => closed["id"] + 2, "created_at" => at.(40)}
     annotation = String.replace(new_comment["body"], "<!-- symphony-workpad -->\n\n", "")
     workpad = %{comment | "body" => comment["body"] <> "\n\n" <> annotation}
     timeline = [closed, reopened, reclosed, workpad]
@@ -503,6 +523,83 @@ defmodule SymphonyElixir.ReportDeliveryTest do
     [association] = Operations.snapshot(table).delivery_metrics.issue_associations
     assert association.disposition == "unknown_acceptance"
     assert association.report_verifications == []
+  end
+
+  test "a later closure in the same GitHub second cannot reuse retained proof", %{root: root, table: table, path: path} do
+    Operations.start_run(table, "worker", %{issue_id: "42", issue_identifier: "GH-42", issue_url: "https://github.com/ahammer/metalrain/issues/42", kind: :issue, item_attempt: 1})
+    {issue, [closed, comment], attempt} = receipt(root, 42, "worker")
+    second = System.os_time(:second) - 60
+    at = DateTime.from_unix!(second) |> DateTime.to_iso8601()
+    [{key, run}] = :dets.lookup(table, {:lineage_run, "worker"})
+    :dets.insert(table, {key, %{run | started_s: second - 10}})
+    change_json(attempt, "review-usage", %{"observed_at_epoch" => second - 1})
+    issue = %{issue | "closed_at" => at, "updated_at" => at}
+    closed = Map.merge(closed, %{"id" => 100, "created_at" => at})
+    {:ok, original} = observation(root, issue, [closed, comment])
+    Operations.observe_delivery(table, original, "crescendo")
+    [accepted] = Operations.snapshot(table).delivery_metrics.issue_associations
+    assert accepted.disposition == "repository_reported_verification"
+
+    reopened = %{"id" => 101, "event" => "reopened", "created_at" => at}
+    reclosed = %{closed | "id" => 102}
+    assert {:ok, %{report_verifications: []} = later} = observation(root, issue, [closed, reopened, reclosed, comment])
+
+    for observed <- [later, original, later] do
+      Operations.observe_delivery(table, observed, "crescendo")
+      [retained] = Operations.snapshot(table).delivery_metrics.issue_associations
+      assert retained.disposition == "unknown_acceptance"
+      assert retained.report_verifications == accepted.report_verifications
+      Operations.close(table)
+      {:ok, ^table} = Operations.open(path, table)
+    end
+  end
+
+  test "same-second reopen observations cannot be replaced by an older closure", %{root: root, table: table, path: path} do
+    Operations.start_run(table, "worker", %{issue_id: "42", issue_identifier: "GH-42", issue_url: "https://github.com/ahammer/metalrain/issues/42", kind: :issue, item_attempt: 1})
+    {issue, [closed, comment], attempt} = receipt(root, 42, "worker")
+    second = System.os_time(:second) - 60
+    at = DateTime.from_unix!(second) |> DateTime.to_iso8601()
+    [{key, run}] = :dets.lookup(table, {:lineage_run, "worker"})
+    :dets.insert(table, {key, %{run | started_s: second - 10}})
+    change_json(attempt, "review-usage", %{"observed_at_epoch" => second - 1})
+    issue = %{issue | "closed_at" => at, "updated_at" => at}
+    closed = Map.merge(closed, %{"id" => 100, "created_at" => at})
+    {:ok, original} = observation(root, issue, [closed, comment])
+    Operations.observe_delivery(table, original, "crescendo")
+    reopened = %{"id" => 101, "event" => "reopened", "created_at" => at}
+    open = %{issue | "state" => "open", "state_reason" => nil, "closed_at" => nil}
+    {:ok, observed_open} = observation(root, open, [closed, reopened, comment])
+
+    for observed <- [observed_open, original, observed_open] do
+      Operations.observe_delivery(table, observed, "crescendo")
+      [retained] = Operations.snapshot(table).delivery_metrics.issue_associations
+      assert retained.disposition == "open"
+      Operations.close(table)
+      {:ok, ^table} = Operations.open(path, table)
+    end
+  end
+
+  test "a second-precision reopen cannot establish the order of a review in that second", %{root: root} do
+    {issue, [closed, comment], attempt} = receipt(root, 42, "worker")
+    second = System.os_time(:second)
+    at = DateTime.from_unix!(second + 2) |> DateTime.to_iso8601()
+    issue = %{issue | "closed_at" => at, "updated_at" => at}
+    closed = %{closed | "created_at" => at}
+    reopened = %{"id" => 1, "event" => "reopened", "created_at" => DateTime.from_unix!(second) |> DateTime.to_iso8601()}
+    change_json(attempt, "review-usage", %{"observed_at_epoch" => second + 0.1})
+    assert {:ok, %{report_verifications: []}} = observation(root, issue, [reopened, closed, comment])
+
+    change_json(attempt, "review-usage", %{"observed_at_epoch" => second + 1})
+    assert {:ok, %{report_verifications: [_]}} = observation(root, issue, [reopened, closed, comment])
+
+    {_, [_, ambiguous_comment], ambiguous_attempt} = receipt(root, 42, "worker", String.duplicate("c", 32))
+    change_json(ambiguous_attempt, "review-usage", %{"observed_at_epoch" => second + 0.1})
+    assert {:ok, %{report_verifications: []}} = observation(root, issue, [reopened, closed, comment, ambiguous_comment])
+
+    reopened_at = DateTime.from_unix!(second * 1_000_000 + 200_000, :microsecond) |> DateTime.to_iso8601()
+    change_json(attempt, "review-usage", %{"observed_at_epoch" => second + 0.3})
+    precise = %{reopened | "created_at" => reopened_at}
+    assert {:ok, %{report_verifications: [_]}} = observation(root, issue, [precise, closed, comment])
   end
 
   defp observation(root, issue, timeline, id \\ nil) do
@@ -590,6 +687,6 @@ defmodule SymphonyElixir.ReportDeliveryTest do
       "<!-- symphony-workpad -->\n\n## Symphony existing-implementation verification\n" <>
         "Reviewed current main `#{sha}`. Retained evidence: `issue-#{number}/#{sha}/#{receipt_id}`."
 
-    {issue, [%{"event" => "closed", "created_at" => at}, %{"event" => "commented", "body" => annotation}], attempt}
+    {issue, [%{"id" => number * 10, "event" => "closed", "created_at" => at}, %{"event" => "commented", "body" => annotation}], attempt}
   end
 end
