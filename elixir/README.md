@@ -141,8 +141,29 @@ removal of the record or label.
 GitHub source ownership accepts a closing directive or an exact standalone `Symphony issue: #N`
 line with the matching same-repository worker branch. Incidental mentions provide no ownership.
 Malformed handoff evidence retained from closure keeps acceptance unknown after marker removal.
-Historical unknown acceptance is not backfilled, and helper coverage remains unknown, so verified
-cost and latency stay null. See
+Canonical report-only `--verify-existing` closures use `repository_reported_verification`, with
+`delivery_kind: report_only` and separate `report_verifications`, without a fabricated PR source.
+A matching GitHub closure event and one exact-source canonical reference must agree with bounded
+private closure/input/acceptance/review/validation receipts under the existing
+`METALRAIN_SYMPHONY_EVIDENCE_ROOT`. An approved review and reviewer run/time must join one unique
+retained issue worker. Hosted commit status and check-run SHAs must match the reviewed source.
+Headings and successful turns alone cannot establish acceptance. Captured scope must match the observed
+issue; a fingerprint prevents later criteria edits inheriting old proof.
+Conflicting scopes at one GitHub timestamp stay unknown across replay/restart until a newer observation,
+even when lifecycle ordering rejects the conflicting observation; the latest retained lifecycle stays intact.
+Wrong-source, wrong-issue, foreign, ambiguous or incomplete evidence remains unknown. The immutable association
+survives closure/restart, preserves original attempt budgets and unmet parent scope, and expires
+with the original worker. GitHub time precision is preserved; native times use one-second buckets.
+Reopen retains evidence; a later closure needs its own proof. GitHub lifecycle event IDs identify
+closures and order observations with the same issue update timestamp. Lifecycle IDs are retained
+only when the separately read issue state and closure timestamp match the timeline event, so
+corrected reads after a race remain eligible for refresh. This prevents reused closure
+timestamps from inheriting old proof even when the reopen is missed between polls. Missing event
+identity supplies no report proof. Canonical review timestamps exclude demonstrably pre-reopen
+references; reviews within a second-precision reopen's or closure's second stay ambiguous. Receipt polling
+adds no usage, and existing auxiliary review run-ID deduplication stays separate from native workers.
+Raw receipts and paths stay private. Historical runs without prospective tracking remain unknown;
+independent acceptance and helper coverage remain unknown, so verified cost and latency stay null. See
 [retained delivery evidence](../docs/crescendo.md#retained-issue-delivery-evidence) for the contract.
 
 `developer_instructions` appends explicitly reviewed service-owned rules to existing configured

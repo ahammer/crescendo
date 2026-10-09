@@ -164,7 +164,13 @@ defmodule SymphonyElixir.Operations do
 
     evidence = :dets.match_object(table, {{:lineage_evidence, :_, :_}, :_})
 
-    for {key, value} <- evidence, elem(key, 1) in ["issue", "issue_source"], value.issue_id not in ids do
+    for {key, value} <- evidence, elem(key, 1) in ["issue", "issue_source", "issue_report"], value.issue_id not in ids do
+      :dets.delete(table, key)
+    end
+
+    for {key, report} <- evidence,
+        elem(key, 1) == "issue_report",
+        not :dets.member(table, {:lineage_run, report.run_id}) do
       :dets.delete(table, key)
     end
   end
@@ -563,8 +569,9 @@ defmodule SymphonyElixir.Operations do
       key = {:lineage_evidence, "issue", issue.id}
       previous = lookup(table, key, %{})
       updated_at = if issue.updated_at, do: DateTime.to_iso8601(issue.updated_at)
+      refresh = refresh_delivery_issue?(previous, updated_at, observation[:lifecycle_id], observation[:scope_digest])
 
-      if previous == %{} or newer_evidence?(updated_at, previous[:updated_at]) do
+      if refresh do
         scope = retained_delivery_scope(delivery_runs(table, issue.id), previous, issue)
 
         value = %{
@@ -575,26 +582,52 @@ defmodule SymphonyElixir.Operations do
           state_reason: issue.state_reason,
           updated_at: updated_at,
           closed_at: observation.closed_at,
+          lifecycle_id: observation[:lifecycle_id],
           labels: issue.labels,
           handoff: scope.handoff,
           prefix: prefix,
           evidence_source: observation.evidence_source,
+          scope_digest: observed_scope_digest(previous, updated_at, observation[:scope_digest]),
           observed_at: DateTime.to_iso8601(DateTime.utc_now())
         }
 
         value = Map.put(value, :reduced_scope, previous[:reduced_scope] == true or scope.reduced_scope or reduced_delivery?(value))
-        history = Map.take(value, [:state, :state_reason, :updated_at, :closed_at, :handoff, :reduced_scope, :evidence_source, :observed_at])
+        history = Map.take(value, [:state, :state_reason, :updated_at, :closed_at, :lifecycle_id, :handoff, :reduced_scope, :evidence_source, :observed_at])
         value = Map.put(value, :tracker_observations, (previous[:tracker_observations] || []) ++ [history])
         :ok = :dets.insert(table, {key, value})
       end
 
+      if not refresh and is_binary(observation[:scope_digest]) and
+           observed_scope_digest(previous, updated_at, observation[:scope_digest]) == :ambiguous do
+        :ok = :dets.insert(table, {key, Map.put(previous, :scope_digest, :ambiguous)})
+      end
+
       Enum.each(observation.sources, &retain_delivery_source(table, issue.id, &1))
+      Enum.each(Map.get(observation, :report_verifications, []), &retain_report_verification(table, issue, &1))
       :ok = :dets.sync(table)
     end)
   end
 
+  defp refresh_delivery_issue?(previous, updated_at, lifecycle_id, scope_digest) do
+    previous == %{} or newer_evidence?(updated_at, previous[:updated_at]) or
+      (updated_at == previous[:updated_at] and
+         (newer_evidence?(lifecycle_id, previous[:lifecycle_id]) or
+            (lifecycle_id == previous[:lifecycle_id] and is_binary(scope_digest) and
+               previous[:scope_digest] not in [scope_digest, :ambiguous])))
+  end
+
+  defp observed_scope_digest(previous, updated_at, scope_digest) do
+    # GitHub's timestamp cannot order conflicting scopes within the same second.
+    if updated_at == previous[:updated_at] and
+         (previous[:scope_digest] == :ambiguous or
+            (is_binary(previous[:scope_digest]) and previous[:scope_digest] != scope_digest)),
+       do: :ambiguous,
+       else: scope_digest
+  end
+
   defp delivery_runs(table, issue_id) do
     for {_, run} = entry <- :dets.match_object(table, {{:lineage_run, :_}, :_}),
+        # Native worker times identify one-second buckets, including the complete finish second.
         run[:issue_id] == issue_id and run[:kind] == :issue,
         do: entry
   end
@@ -643,6 +676,27 @@ defmodule SymphonyElixir.Operations do
     end
   end
 
+  defp retain_report_verification(table, issue, report) do
+    with %{run_id: id, reviewed_s: reviewed, issue_url: url, closed_at: closed_at} <- report,
+         true <- is_number(reviewed) and url == issue.url,
+         [{{:lineage_run, ^id}, run}] <-
+           Enum.filter(delivery_runs(table, issue.id), fn {_, run} ->
+             source_created_during_run?(run, issue.id, reviewed)
+           end),
+         true <- run[:issue_url] == url and is_integer(run[:item_attempt]),
+         {:ok, closed, _} <- DateTime.from_iso8601(to_string(closed_at)),
+         true <- report_before_closure?(reviewed, closed) do
+      key = {:lineage_evidence, "issue_report", {issue.id, report.verification_id}}
+      value = Map.take(report, [:verification_id, :source_sha, :scope_digest, :run_id, :reviewed_s, :lifecycle_id, :evidence_source])
+      :dets.insert_new(table, {key, Map.merge(value, %{issue_id: issue.id, item_attempt: run.item_attempt, closed_at: closed_at})})
+    end
+  end
+
+  defp report_before_closure?(reviewed, closed) do
+    at = DateTime.to_unix(closed, :microsecond) / 1_000_000
+    if closed.microsecond == {0, 0}, do: reviewed < at, else: reviewed <= at
+  end
+
   defp delivery_source_run(table, issue_id, created_at) do
     case DateTime.from_iso8601(to_string(created_at)) do
       {:ok, created, _} ->
@@ -660,7 +714,7 @@ defmodule SymphonyElixir.Operations do
 
   defp source_created_during_run?(run, issue_id, created_s) do
     run[:issue_id] == issue_id and run[:kind] == :issue and run[:delivery_tracking] == true and
-      run.started_s <= created_s and created_s <= (run[:finished_s] || System.os_time(:second))
+      run.started_s <= created_s and created_s < (run[:finished_s] || System.os_time(:second)) + 1
   end
 
   defp delivery_associations(table) do
@@ -685,8 +739,12 @@ defmodule SymphonyElixir.Operations do
       for {{:lineage_run, id}, run} <- runs,
           do: Map.put(Map.take(run, [:item_attempt, :status, :started_s, :finished_s, :delivery_key]), :run_id, id)
 
-    proven = is_binary(issue.closed_at) and Enum.any?(sources, &merged_worker_source?/1)
-    disposition = delivery_disposition(issue, proven)
+    reports =
+      for {_, report} <- :dets.match_object(table, {{:lineage_evidence, "issue_report", {issue.issue_id, :_}}, :_}),
+          do: report
+
+    proof = delivery_proof(table, issue, sources, reports)
+    disposition = delivery_disposition(issue, proof)
     canonical_owner = if is_map(issue.handoff), do: to_string(issue.handoff["owner"]), else: issue.issue_id
 
     issue
@@ -695,10 +753,12 @@ defmodule SymphonyElixir.Operations do
       canonical_owner: canonical_owner,
       disposition: disposition,
       sources: Enum.sort_by(sources, & &1.pr_number),
+      report_verifications: Enum.sort_by(reports, &{&1.reviewed_s, &1.verification_id}),
+      delivery_kind: proof,
       attempts: Enum.sort_by(attempts, &{&1.started_s, &1.run_id}),
       helper_usage_coverage: "unknown",
-      acceptance_proof: if(disposition in ["accepted_reduced_scope", "repository_reported_completion"], do: "repository_reported", else: "incomplete"),
-      canonical_outcome_complete: disposition == "repository_reported_completion" and is_nil(issue.handoff),
+      acceptance_proof: if(disposition in ["accepted_reduced_scope", "repository_reported_completion", "repository_reported_verification"], do: "repository_reported", else: "incomplete"),
+      canonical_outcome_complete: disposition in ["repository_reported_completion", "repository_reported_verification"] and is_nil(issue.handoff),
       verified_cost: nil,
       verified_latency: nil
     })
@@ -714,16 +774,35 @@ defmodule SymphonyElixir.Operations do
       (is_map(issue.handoff) and issue.handoff["change"] == "partial_delivery")
   end
 
-  defp delivery_disposition(issue, proven) do
+  defp delivery_proof(table, issue, sources, reports) do
+    cond do
+      not is_binary(issue.closed_at) -> "unknown"
+      Enum.any?(sources, &merged_worker_source?/1) -> "merged_source"
+      Enum.any?(reports, &current_report_proof?(table, issue, &1)) -> "report_only"
+      true -> "unknown"
+    end
+  end
+
+  defp current_report_proof?(table, issue, report) do
+    report.closed_at == issue.closed_at and is_binary(report[:scope_digest]) and
+      report.scope_digest == issue[:scope_digest] and is_integer(report[:lifecycle_id]) and
+      report.lifecycle_id == issue[:lifecycle_id] and :dets.member(table, {:lineage_run, report.run_id})
+  end
+
+  defp delivery_disposition(issue, proof) do
     cond do
       issue.state != "closed" -> "open"
       issue.state_reason == "not_planned" -> "retirement"
       issue.handoff == :invalid -> "unknown_acceptance"
-      proven and issue.reduced_scope -> "accepted_reduced_scope"
-      proven and issue.state_reason == "completed" -> "repository_reported_completion"
+      proof != "unknown" and issue.reduced_scope -> "accepted_reduced_scope"
+      issue.state_reason == "completed" -> reported_disposition(proof)
       true -> "unknown_acceptance"
     end
   end
+
+  defp reported_disposition("merged_source"), do: "repository_reported_completion"
+  defp reported_disposition("report_only"), do: "repository_reported_verification"
+  defp reported_disposition("unknown"), do: "unknown_acceptance"
 
   @doc "Replaces a thread's native cumulative account estimate; null stays unknown."
   @spec account_usage(handle(), term(), String.t(), map() | nil) :: :ok | {:error, term()}

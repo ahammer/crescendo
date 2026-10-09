@@ -681,6 +681,43 @@ historical runs are not backfilled into accepted deliveries. Associations expire
 removed from the public projection. No public mutation control or local configuration change is
 introduced.
 
+Canonical report-only `--verify-existing` delivery uses `repository_reported_verification`
+with `delivery_kind: report_only` and separate `report_verifications`; it never invents a PR source.
+The GitHub observer requires a completed closure with a matching final authenticated lifecycle event and
+one unique exact-source canonical workpad reference. It reads bounded regular files beneath the
+existing private `METALRAIN_SYMPHONY_EVIDENCE_ROOT`: closure intent, input, acceptance, approved
+review, clean source, adjudicated failures, unchanged review-input digest, hosted checks and
+reviewer usage. Issue/repository identity, captured scope, source SHAs and reviewer work item must
+agree with the observed issue scope. A retained scope fingerprint prevents later criteria edits from
+inheriting earlier report acceptance. Hosted commit status and check-run SHAs must match the
+reviewed source; successful unrelated checks supply no proof. Conflicting scopes at the same GitHub
+timestamp remain unknown
+across replay/restart until a newer observation resolves the scope, even when lifecycle ordering
+rejects the conflicting observation. The latest retained lifecycle stays intact. A heading, successful turn,
+missing receipt, rejected review or ambiguous reference supplies no proof.
+Symlinked receipt paths are rejected; raw receipts, local paths and credentials are never
+projected onto the public API.
+
+Operations joins the reviewer parent run and review timestamp to exactly one prospectively tracked
+issue worker window, retaining its original run ID and item attempt. The association is immutable,
+closure-specific, idempotent across polls/restarts and expires with its original worker history.
+The GitHub lifecycle event ID identifies the closure and orders reopen/closure observations that
+share an issue update timestamp. Lifecycle IDs are retained only when the separately read issue
+state and closure timestamp match the timeline event, allowing corrected reads after a race.
+Missing identity supplies no report proof. Reusing a closure
+timestamp cannot reuse an earlier report, including when the reopen is missed between polls.
+GitHub timestamps preserve supplied precision; native worker times identify one-second buckets.
+Reopen retains the report but a later closure needs its own proof; references with canonical review
+times before that reopen do not make the new closure ambiguous. Reviews within a reopen's second
+remain ambiguous when GitHub supplies only second precision and cannot be excluded as prior evidence.
+Reviews within a closure's second likewise cannot prove that review preceded closure and supply no report proof.
+Dispatch/terminal handoffs, canonical ownership, original attempt budgets and unmet scope stay
+intact; a child report cannot accept its broader parent. Report receipt observation adds no usage:
+nested reviewer accounting
+continues through the existing auxiliary run-ID deduplication, separate from worker usage and budget.
+This remains repository-reported verification, not independently verified acceptance. Verified
+cost, latency, delivery count and helper coverage stay unknown until their own proof exists.
+
 ## Canonical final-attempt handoffs (Crescendo extension)
 
 An issue number is a dispatch identity, not authorization for a new outcome budget. Final-attempt

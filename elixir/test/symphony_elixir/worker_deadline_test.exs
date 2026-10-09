@@ -767,13 +767,20 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
   defp state(ctx), do: :sys.get_state(ctx.orchestrator)
 
   defp await_entry(ctx, phase) do
-    await(fn -> get_in(state(ctx).running, [ctx.issue.id, :phase]) == phase end, 300)
-    state(ctx).running[ctx.issue.id]
+    await(
+      fn ->
+        case state(ctx).running[ctx.issue.id] do
+          %{phase: ^phase} = entry -> entry
+          _ -> false
+        end
+      end,
+      300
+    )
   end
 
   defp await(check, attempts \\ 250) do
     cond do
-      check.() -> :ok
+      result = check.() -> result
       attempts == 0 -> flunk("condition never held")
       true -> Process.sleep(10) && await(check, attempts - 1)
     end
