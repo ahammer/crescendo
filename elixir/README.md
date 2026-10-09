@@ -147,11 +147,13 @@ A matching GitHub closure event and one exact-source canonical reference must ag
 private closure/input/acceptance/review/validation receipts under the existing
 `METALRAIN_SYMPHONY_EVIDENCE_ROOT`. An approved review and reviewer run/time must join one unique
 retained issue worker; headings and successful turns alone cannot establish acceptance. Captured
-scope must match the observed issue; a fingerprint prevents later criteria edits inheriting old proof. Wrong-source,
-wrong-issue, foreign, ambiguous or incomplete evidence remains unknown. The immutable association
+scope must match the observed issue; a fingerprint prevents later criteria edits inheriting old proof.
+Conflicting scopes at one GitHub timestamp stay unknown across replay/restart until a newer observation.
+Wrong-source, wrong-issue, foreign, ambiguous or incomplete evidence remains unknown. The immutable association
 survives closure/restart, preserves original attempt budgets and unmet parent scope, and expires
 with the original worker. GitHub time precision is preserved; native times use one-second buckets.
-Reopen retains evidence; a later closure needs its own proof. Receipt polling
+Reopen retains evidence; a later closure needs its own proof. Canonical review timestamps exclude
+pre-reopen references from the new closure's ambiguity check. Receipt polling
 adds no usage, and existing auxiliary review run-ID deduplication stays separate from native workers.
 Raw receipts and paths stay private. Historical runs without prospective tracking remain unknown;
 independent acceptance and helper coverage remain unknown, so verified cost and latency stay null. See

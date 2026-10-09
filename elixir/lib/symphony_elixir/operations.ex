@@ -585,7 +585,7 @@ defmodule SymphonyElixir.Operations do
           handoff: scope.handoff,
           prefix: prefix,
           evidence_source: observation.evidence_source,
-          scope_digest: observation[:scope_digest],
+          scope_digest: observed_scope_digest(previous, updated_at, observation[:scope_digest]),
           observed_at: DateTime.to_iso8601(DateTime.utc_now())
         }
 
@@ -603,7 +603,15 @@ defmodule SymphonyElixir.Operations do
 
   defp refresh_delivery_issue?(previous, updated_at, scope_digest) do
     previous == %{} or newer_evidence?(updated_at, previous[:updated_at]) or
-      (updated_at == previous[:updated_at] and is_nil(previous[:scope_digest]) and is_binary(scope_digest))
+      (updated_at == previous[:updated_at] and is_binary(scope_digest) and
+         previous[:scope_digest] not in [scope_digest, :ambiguous])
+  end
+
+  defp observed_scope_digest(previous, updated_at, scope_digest) do
+    # GitHub's timestamp cannot order conflicting scopes within the same second.
+    if updated_at == previous[:updated_at] and is_binary(previous[:scope_digest]),
+      do: :ambiguous,
+      else: scope_digest
   end
 
   defp delivery_runs(table, issue_id) do

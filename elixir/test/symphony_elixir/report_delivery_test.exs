@@ -404,6 +404,88 @@ defmodule SymphonyElixir.ReportDeliveryTest do
     assert {:ok, %{report_verifications: []}} = observation(root, %{issue | "title" => "Broader outcome"}, timeline)
   end
 
+  test "conflicting scopes at the same GitHub timestamp stay unknown across replay and restart", %{root: root, table: table, path: path} do
+    Operations.start_run(table, "worker", %{issue_id: "42", issue_identifier: "GH-42", issue_url: "https://github.com/ahammer/metalrain/issues/42", kind: :issue, item_attempt: 1})
+    {issue, timeline, _} = receipt(root, 42, "worker")
+    {:ok, original} = observation(root, issue, timeline)
+    Operations.observe_delivery(table, original, "crescendo")
+    [accepted] = Operations.snapshot(table).delivery_metrics.issue_associations
+    assert accepted.disposition == "repository_reported_verification"
+
+    edited = %{issue | "body" => issue["body"] <> "; new unmet criterion"}
+    assert {:ok, %{report_verifications: []} = changed} = observation(root, edited, timeline)
+    Operations.observe_delivery(table, changed, "crescendo")
+    [conflicted] = Operations.snapshot(table).delivery_metrics.issue_associations
+    assert conflicted.disposition == "unknown_acceptance"
+    assert conflicted.report_verifications == accepted.report_verifications
+
+    Operations.close(table)
+    {:ok, ^table} = Operations.open(path, table)
+
+    for observed <- [original, changed, original] do
+      Operations.observe_delivery(table, observed, "crescendo")
+      [retained] = Operations.snapshot(table).delivery_metrics.issue_associations
+      assert retained.disposition == "unknown_acceptance"
+      refute retained.canonical_outcome_complete
+    end
+
+    updated = DateTime.add(original.issue.updated_at, 1) |> DateTime.to_iso8601()
+    {:ok, restored} = observation(root, %{issue | "updated_at" => updated}, timeline)
+    Operations.observe_delivery(table, restored, "crescendo")
+    [unambiguous] = Operations.snapshot(table).delivery_metrics.issue_associations
+    assert unambiguous.disposition == "repository_reported_verification"
+  end
+
+  test "a reopened issue can retain an old annotation and accept one new canonical report", %{root: root, table: table} do
+    details = %{issue_id: "42", issue_identifier: "GH-42", issue_url: "https://github.com/ahammer/metalrain/issues/42", kind: :issue, item_attempt: 1}
+    second = System.os_time(:second) - 60
+    at = fn offset -> DateTime.from_unix!(second + offset) |> DateTime.to_iso8601() end
+    Operations.start_run(table, "worker", details)
+    Operations.finish_run(table, "worker", "completed", %{})
+    [{key, run}] = :dets.lookup(table, {:lineage_run, "worker"})
+    :dets.insert(table, {key, %{run | started_s: second, finished_s: second + 15}})
+    {issue, [closed, comment], attempt} = receipt(root, 42, "worker")
+    issue = %{issue | "closed_at" => at.(10), "updated_at" => at.(10)}
+    closed = %{closed | "created_at" => at.(10)}
+    change_json(attempt, "review-usage", %{"observed_at_epoch" => second + 5})
+    {:ok, original} = observation(root, issue, [closed, comment])
+    Operations.observe_delivery(table, original, "crescendo")
+    [accepted] = Operations.snapshot(table).delivery_metrics.issue_associations
+    assert accepted.disposition == "repository_reported_verification"
+
+    reopened = %{"event" => "reopened", "created_at" => at.(20)}
+    open = %{issue | "state" => "open", "closed_at" => nil, "updated_at" => at.(20)}
+    {:ok, observed_open} = observation(root, open, [closed, reopened, comment])
+    Operations.observe_delivery(table, observed_open, "crescendo")
+    Operations.start_run(table, "later", %{details | item_attempt: 2})
+    Operations.finish_run(table, "later", "completed", %{})
+    [{key, run}] = :dets.lookup(table, {:lineage_run, "later"})
+    :dets.insert(table, {key, %{run | started_s: second + 25, finished_s: second + 45}})
+    {_, [reclosed, new_comment], new_attempt} = receipt(root, 42, "later", String.duplicate("c", 32))
+    change_json(new_attempt, "review-usage", %{"observed_at_epoch" => second + 30})
+    issue = %{issue | "closed_at" => at.(40), "updated_at" => at.(40), "body" => issue["body"] <> "; revalidated criterion"}
+    change_json(new_attempt, "input", %{"issue" => %{issue | "state" => "open"}})
+    change_json(new_attempt, "closure-intent", %{"scope" => [issue["title"], issue["body"]]})
+    reclosed = %{reclosed | "created_at" => at.(40)}
+    annotation = String.replace(new_comment["body"], "<!-- symphony-workpad -->\n\n", "")
+    workpad = %{comment | "body" => comment["body"] <> "\n\n" <> annotation}
+    timeline = [closed, reopened, reclosed, workpad]
+
+    assert {:ok, %{report_verifications: [%{run_id: "later"}]} = observed} = observation(root, issue, timeline)
+    Operations.observe_delivery(table, observed, "crescendo")
+    [association] = Operations.snapshot(table).delivery_metrics.issue_associations
+    assert association.disposition == "repository_reported_verification"
+    assert [%{run_id: "worker", closed_at: old_at}, %{run_id: "later", closed_at: new_at}] = association.report_verifications
+    assert old_at == at.(10)
+    assert new_at == at.(40)
+    assert association.sources == []
+
+    # An incomplete second reference in this closure remains ambiguous.
+    other = String.replace(annotation, String.duplicate("c", 32), String.duplicate("d", 32))
+    ambiguous = %{workpad | "body" => workpad["body"] <> "\n\n" <> other}
+    assert {:ok, %{report_verifications: []}} = observation(root, issue, [closed, reopened, reclosed, ambiguous])
+  end
+
   test "precise GitHub boundaries reject pre-reopen and post-closure reports", %{root: root, table: table} do
     Operations.start_run(table, "worker", %{issue_id: "42", issue_identifier: "GH-42", issue_url: "https://github.com/ahammer/metalrain/issues/42", kind: :issue, item_attempt: 1})
     {issue, [closed, comment], attempt} = receipt(root, 42, "worker")
@@ -452,9 +534,8 @@ defmodule SymphonyElixir.ReportDeliveryTest do
     Orchestrator.snapshot(orchestrator, 5_000).operations.delivery_metrics.issue_associations
   end
 
-  defp receipt(root, number, run_id) do
+  defp receipt(root, number, run_id, receipt_id \\ String.duplicate("b", 32)) do
     sha = String.duplicate("a", 40)
-    receipt_id = String.duplicate("b", 32)
     attempt = Path.join([root, "issue-#{number}", sha, receipt_id])
     File.mkdir_p!(attempt)
     at = DateTime.to_iso8601(DateTime.utc_now())

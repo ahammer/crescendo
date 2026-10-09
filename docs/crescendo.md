@@ -681,15 +681,18 @@ existing private `METALRAIN_SYMPHONY_EVIDENCE_ROOT`: closure intent, input, acce
 review, clean source, adjudicated failures, unchanged review-input digest, hosted checks and
 reviewer usage. Issue/repository identity, captured scope, source SHAs and reviewer work item must
 agree with the observed issue scope. A retained scope fingerprint prevents later criteria edits from
-inheriting earlier report acceptance. A heading, successful turn, missing receipt, rejected review or ambiguous reference supplies
-no proof. Symlinked receipt paths are rejected; raw receipts, local paths and credentials are never
+inheriting earlier report acceptance. Conflicting scopes at the same GitHub timestamp remain unknown
+across replay/restart until a newer observation resolves the scope. A heading, successful turn,
+missing receipt, rejected review or ambiguous reference supplies no proof.
+Symlinked receipt paths are rejected; raw receipts, local paths and credentials are never
 projected onto the public API.
 
 Operations joins the reviewer parent run and review timestamp to exactly one prospectively tracked
 issue worker window, retaining its original run ID and item attempt. The association is immutable,
 closure-specific, idempotent across polls/restarts and expires with its original worker history.
 GitHub timestamps preserve supplied precision; native worker times identify one-second buckets.
-Reopen retains the report but a later closure needs its own proof. Dispatch/terminal handoffs,
+Reopen retains the report but a later closure needs its own proof; references with canonical review
+times before that reopen do not make the new closure ambiguous. Dispatch/terminal handoffs,
 canonical ownership, original attempt budgets and unmet scope stay intact; a child report cannot
 accept its broader parent. Report receipt observation adds no usage: nested reviewer accounting
 continues through the existing auxiliary run-ID deduplication, separate from worker usage and budget.

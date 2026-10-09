@@ -280,7 +280,8 @@ defmodule SymphonyElixir.GitHub.Client do
 
   # Canonical receipts are repository reports, never independent acceptance or billing proof.
   defp report_verifications(raw, timeline, settings, root) do
-    url = "https://github.com/#{settings.repo}/issues/#{raw["number"]}"
+    number = to_string(raw["number"])
+    url = "https://github.com/#{settings.repo}/issues/#{number}"
     closed = Enum.filter(timeline, &(&1["event"] == "closed"))
 
     references =
@@ -297,8 +298,8 @@ defmodule SymphonyElixir.GitHub.Client do
          true <- raw["state"] == "closed" and raw["state_reason"] == "completed",
          %{"created_at" => at} <- List.last(closed),
          true <- is_binary(at) and at == raw["closed_at"],
-         [[sha, number, sha, receipt]] <- Enum.uniq(references),
-         true <- number == to_string(raw["number"]),
+         references <- Enum.reject(Enum.uniq(references), &prior_report_reference?(&1, root, number, timeline)),
+         [[sha, ^number, sha, receipt]] <- references,
          {:ok, report} <- read_report(root, number, sha, receipt, url, [raw["title"], raw["body"]]),
          true <- report_after_reopen?(report, timeline) do
       [Map.put(report, :closed_at, at)]
@@ -306,6 +307,17 @@ defmodule SymphonyElixir.GitHub.Client do
       _ -> []
     end
   end
+
+  defp prior_report_reference?([sha, number, sha, receipt], root, number, timeline) do
+    with {:ok, usage} <- report_json(root, ["issue-#{number}", sha, receipt], "review-usage.json"),
+         true <- report_worker?(usage, number, sha) do
+      not report_after_reopen?(%{reviewed_s: usage["observed_at_epoch"]}, timeline)
+    else
+      _ -> false
+    end
+  end
+
+  defp prior_report_reference?(_, _, _, _), do: false
 
   defp report_after_reopen?(report, timeline) do
     case timeline |> Enum.filter(&(&1["event"] == "reopened")) |> List.last() do
