@@ -4,7 +4,11 @@ defmodule SymphonyElixir.ServiceWebTest do
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
-  alias SymphonyElixir.{Governor, Projects, Service, SourceRevision}
+  alias SymphonyElixir.{Governor, Operations, Project, Projects, Service, SourceRevision}
+
+  defmodule PollTracker do
+    def fetch_issues_by_states(_states), do: {:error, :offline_tracker}
+  end
 
   @endpoint SymphonyElixirWeb.Endpoint
 
@@ -82,6 +86,61 @@ defmodule SymphonyElixir.ServiceWebTest do
     wait_for(fn -> length(json_response(get(build_conn(), "/api/v1/state"), 200)["upcoming"]["waiting"]) == 2 end)
     assert Governor.snapshot().quiet_window.phase == "idle"
     assert json_response(get(build_conn(), "/api/v1/state"), 200)["snapshot_status"] == "complete"
+    assert healthy(SymphonyElixirWeb.Presenter.payload(timeout: 1_000)) == 0
+  end
+
+  test "persisted inventory and a fresh sibling cannot establish restarted project tracker readiness", %{service: service} do
+    beta = GenServer.whereis(Project.via("beta", :orchestrator))
+    before = :sys.get_state(beta)
+    assert Orchestrator.snapshot(beta, 1_000).tracker_ready
+    inventory = [%{number: 7, title: "Private persisted inventory", url: "https://github.test/pull/7", draft: true}]
+    Operations.save_pull_inventory(before.operations, inventory, before.issues_observed_at)
+
+    previous = Application.get_env(:symphony_elixir, :linear_client_module)
+    Application.put_env(:symphony_elixir, :linear_client_module, PollTracker)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:symphony_elixir, :linear_client_module, previous),
+        else: Application.delete_env(:symphony_elixir, :linear_client_module)
+    end)
+
+    workflow = Enum.find(Service.projects(service), &(&1.id == "beta")).workflow
+    write_workflow_file!(workflow, tracker_kind: "linear", poll_interval_ms: 3_600_000)
+    Project.with_project("beta", &WorkflowStore.force_reload/0)
+    send(beta, :run_poll_cycle)
+    failed = Orchestrator.snapshot(beta, 1_000)
+    refute failed.tracker_ready
+    assert failed.upcoming.observed_at == before.issues_observed_at
+    assert failed.upcoming.error == "tracker fetch failed"
+    state = SymphonyElixirWeb.Presenter.payload(timeout: 1_000)
+    assert [%{tracker_ready: true}, %{tracker_ready: false}] = state.projects
+    assert healthy(state) == 1
+
+    runtime = Project.via("beta", :agent_runtime)
+    :ok = Supervisor.terminate_child(runtime, Project.via("beta", :orchestrator))
+    assert {:ok, restarted} = Supervisor.restart_child(runtime, Project.via("beta", :orchestrator))
+    refute restarted == beta
+    unobserved = Orchestrator.snapshot(restarted, 1_000)
+    assert unobserved.pull_requests.items == inventory
+    assert unobserved.pull_requests.observed_at == before.issues_observed_at
+    assert unobserved.upcoming.observed_at == nil
+    refute unobserved.tracker_ready
+    assert healthy(SymphonyElixirWeb.Presenter.payload(timeout: 1_000)) == 1
+
+    # An empty successful read in the new process is sufficient; inventory and queue size are independent.
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    write_workflow_file!(workflow, tracker_kind: "memory", poll_interval_ms: 3_600_000)
+    Project.with_project("beta", &WorkflowStore.force_reload/0)
+    send(restarted, :run_poll_cycle)
+    recovered = Orchestrator.snapshot(restarted, 1_000)
+    assert recovered.tracker_ready
+    assert recovered.upcoming.observed_at
+    assert recovered.upcoming.error == nil
+    assert recovered.upcoming.ready == []
+    state = SymphonyElixirWeb.Presenter.payload(timeout: 1_000)
+    assert Enum.all?(state.projects, & &1.tracker_ready)
+    assert healthy(state) == 0
   end
 
   @tag quiet_startup: true
@@ -301,7 +360,10 @@ defmodule SymphonyElixir.ServiceWebTest do
       assert state.snapshot_status == "partial"
       assert Enum.all?(Map.values(state.counts), &is_nil/1)
       assert [%{project: "alpha", title: "Held work"}] = state.upcoming.waiting
-      assert [%{id: "alpha", snapshot_status: "ok"}, %{id: "beta", snapshot_status: "timeout", running: nil, ready: nil}] = state.projects
+      assert [alpha, beta] = state.projects
+      assert %{id: "alpha", snapshot_status: "ok", tracker_ready: true} = alpha
+      assert %{id: "beta", snapshot_status: "timeout", tracker_ready: nil, running: nil, ready: nil} = beta
+      assert healthy(state) == 1
       assert state.health.coordinator.status == "degraded"
       assert state.health.system.status in ["degraded", "down"]
       assert %{name: "Dispatch", status: "warning", detail: detail} = Enum.find(state.health.coordinator.checks, &(&1.name == "Dispatch"))
@@ -318,6 +380,8 @@ defmodule SymphonyElixir.ServiceWebTest do
       assert alpha.counts.waiting == 1
       assert Enum.at(alpha.projects, 1).snapshot_status == "not_selected"
       assert Enum.at(alpha.projects, 1).running == nil
+      assert Enum.at(alpha.projects, 1).tracker_ready == nil
+      assert healthy(alpha) == 1
       assert SymphonyElixirWeb.Presenter.payload(timeout: 100, project: "beta").snapshot_status == "partial"
 
       {:ok, _view, html} = live(build_conn(), "/")
@@ -340,6 +404,7 @@ defmodule SymphonyElixir.ServiceWebTest do
     refute Enum.any?(recovered.health.coordinator.checks, &(&1.name == "Project snapshots"))
     assert recovered.counts.waiting == 2
     assert Enum.all?(recovered.projects, &(&1.snapshot_status == "ok"))
+    assert healthy(recovered) == 0
     assert Enum.map(recovered.upcoming.waiting, & &1.title) == ["Held work", "Private work"]
   end
 
@@ -352,7 +417,7 @@ defmodule SymphonyElixir.ServiceWebTest do
       state = SymphonyElixirWeb.Presenter.payload(timeout: 100)
       assert state.snapshot_status == "partial"
       assert [alpha, beta] = state.projects
-      assert %{id: "alpha", started: false, snapshot_status: "unavailable", running: nil, ready: nil} = alpha
+      assert %{id: "alpha", started: false, snapshot_status: "unavailable", tracker_ready: nil, running: nil, ready: nil} = alpha
       assert %{id: "beta", snapshot_status: "ok"} = beta
       assert [%{project: "beta", title: "Private work"}] = state.upcoming.waiting
       refute Jason.encode!(state.upcoming) =~ "Held work"
@@ -403,4 +468,11 @@ defmodule SymphonyElixir.ServiceWebTest do
 
   defp dispatch_detail(state),
     do: state["health"]["coordinator"]["checks"] |> Enum.find(&(&1["name"] == "Dispatch")) |> Map.fetch!("detail")
+
+  defp healthy(state) do
+    validator = Path.expand("../../../ops/bin/deploy-state.py", __DIR__)
+    wrapper = "import subprocess, sys; sys.exit(subprocess.run(sys.argv[2:], input=sys.argv[1].encode()).returncode)"
+    {_output, status} = System.cmd("python3", ["-c", wrapper, Jason.encode!(state), "python3", validator, "healthy"], stderr_to_stdout: true)
+    status
+  end
 end

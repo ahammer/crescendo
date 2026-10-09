@@ -572,6 +572,12 @@ The observability UI now runs on a minimal Phoenix stack:
   Fully idle services deploy immediately after rechecking under the hold. The deployment journal
   records hold start/end, elapsed and sampled idle time, ready work and quota/budget restrictions.
   See [deployment policy](../docs/crescendo.md#install-and-deploy) for overrides and recovery.
+  Deployment health also requires every enabled project's `tracker_ready` to be `true`: its
+  Orchestrator has successfully polled active issues in this process generation with no subsequent
+  poll/configuration error. Restart resets readiness even with persisted PR inventory; a failed
+  poll clears it until recovery. Unavailable and unselected snapshots report `null`. Empty queues,
+  quiet holds and slot counts stay separate; drain/helper accounting is unchanged. The existing
+  24 health attempts (five seconds apart, ten-second HTTP timeout) allow startup polling and retain rollback.
 - An agent card opens the full-screen agent inspector at `/agents/<issue_identifier>`. It shows the
   agent's run as a chat, rebuilt from Codex app-server notifications: messages and reasoning
   (streamed as they are written), commands with exit code, duration and the last 60 lines or 8 KB of

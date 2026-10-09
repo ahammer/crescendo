@@ -173,8 +173,9 @@ It never enables a unit or overwrites local configuration.
      keep the drain waiting too.
   3. It points `service.env` at the release and restarts the service.
   4. It waits for a complete, unfiltered state response with every project started, no project
-     failure, every project snapshot `ok`, and known Governor-held slot counts; otherwise it
-     rolls back.
+     failure, every project snapshot `ok`, `tracker_ready: true` for every enabled project, and
+     known Governor-held slot counts; otherwise it rolls back. The existing wait makes up to 24
+     attempts, five seconds apart, with a ten-second HTTP timeout per attempt.
 
   A release that fails its gate or health check is not tried again. Each outcome is appended to
   `<state>/deploys.jsonl`, and the five newest releases are kept. `CRESCENDO_DRAIN_LIMIT_SECONDS`
@@ -204,6 +205,14 @@ service slots can still be shown; they do not imply a queue count. A successful 
 warning. `ops/bin/deploy-state.py` validates deployment observations independently of the deploy
 script. Its validation modes read JSON from stdin; its drain mode reads the state API and owns
 only the temporary drain flag and journal. It never restarts the service.
+
+`projects[].tracker_ready` comes from each Orchestrator's in-memory successful active-issue poll
+observation and latest poll/configuration error. It starts false in each process generation,
+including restarts that restore persisted PR inventory, becomes true after a successful poll,
+and becomes false on poll failure until recovery. Unavailable or unselected snapshots report
+`null`. A responsive process, fresh sibling, empty queue or PR inventory cannot establish this
+readiness. Idle and quiet-held projects remain healthy after polling. This health requirement
+does not change drain slot/helper accounting or expose tracker errors, credentials or local paths.
 
 The current service admission holds appear in `throttle.draining` (deployment drain) and
 `throttle.research_hold` (`null` or `{project, phase}`). A global research request waiting for

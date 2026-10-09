@@ -14,12 +14,31 @@ spec.loader.exec_module(policy)
 
 def state(running=1, ready=4, paused=None, budget=None):
     return dict(snapshot_status="complete", project=None,
-                projects=[dict(started=True, failure=None, snapshot_status="ok", running=running, ready=ready)],
+                projects=[dict(started=True, failure=None, snapshot_status="ok", tracker_ready=True,
+                               running=running, ready=ready)],
                 running=[{}] * running, counts=dict(running=running),
                 throttle=dict(busy=running, service_slots=3, paused=paused, over_budget=budget))
 
 
 class DrainTest(unittest.TestCase):
+    def test_health_requires_each_project_tracker_but_drain_keeps_capacity_accounting(self):
+        snapshot = state(0, 0, "quota", "budget")
+        snapshot["throttle"].update(busy=2, helpers=dict(busy=1, slots=5))
+        self.assertEqual(policy.validate(snapshot, "healthy"), 3)
+        sibling = dict(snapshot["projects"][0])
+        snapshot["projects"].append(sibling)
+        for readiness in (None, False, 1, "true"):
+            sibling["tracker_ready"] = readiness
+            with self.assertRaisesRegex(ValueError, "tracker not ready"):
+                policy.validate(snapshot, "healthy")
+            self.assertEqual(policy.validate(snapshot, "running"), 3)
+        del sibling["tracker_ready"]  # Legacy/pre-poll observations must also fail closed.
+        with self.assertRaisesRegex(ValueError, "tracker not ready"):
+            policy.validate(snapshot, "healthy")
+        self.assertEqual(policy.validate(snapshot, "running"), 3)
+        sibling["tracker_ready"] = True
+        self.assertEqual(policy.validate(snapshot, "healthy"), 3)
+
     def test_helpers_participate_in_drain_without_counting_as_primary_workers(self):
         snapshot = state(0)
         snapshot["throttle"]["helpers"] = dict(busy=2, slots=5)
