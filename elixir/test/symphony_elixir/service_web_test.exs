@@ -133,6 +133,39 @@ defmodule SymphonyElixir.ServiceWebTest do
     assert json_response(get(build_conn(), "/api/v1/MT-404"), 404)["error"]["code"] == "issue_not_found"
   end
 
+  test "polling health requires tracker observations from every selected project" do
+    beta = GenServer.whereis(SymphonyElixir.Project.via("beta", :orchestrator))
+    now = DateTime.utc_now()
+
+    for {observed_at, error, status, detail} <- [
+          {nil, nil, "warning", "Tracker observation incomplete"},
+          {DateTime.add(now, -600), nil, "warning", "Last read 10m ago"},
+          {now, "tracker unavailable", "critical", "Read failed: beta: tracker unavailable"},
+          {now, nil, "healthy", nil}
+        ],
+        checking? <- [false, true] do
+      :sys.replace_state(beta, fn state ->
+        %{state | issues_observed_at: observed_at, issues_error: error, poll_check_in_progress: checking?}
+      end)
+
+      for query <- ["", "?project=beta", "?project=beta&history=full"] do
+        payload = json_response(get(build_conn(), "/api/v1/state" <> query), 200)
+        polling = Enum.find(payload["health"]["coordinator"]["checks"], &(&1["name"] == "Polling loop"))
+        tracker = Enum.find(payload["health"]["system"]["checks"], &(&1["name"] == "Tracker"))
+        assert polling["status"] == status
+        assert tracker["status"] == status
+        expected = detail || if(checking?, do: "Polling now", else: "Every 30s")
+        assert polling["detail"] == expected
+        if detail, do: assert(tracker["detail"] == detail)
+        if is_nil(observed_at), do: assert(is_nil(payload["upcoming"]["observed_at"]))
+      end
+
+      alpha = json_response(get(build_conn(), "/api/v1/state?project=alpha"), 200)
+      assert alpha["health"]["coordinator"]["status"] == "operational"
+      assert alpha["upcoming"]["observed_at"]
+    end
+  end
+
   test "service revision is shared across real snapshots, private filters and dashboard errors" do
     revision = String.duplicate("c", 40)
     root = Path.join(System.tmp_dir!(), "service-release-#{System.unique_integer([:positive])}")
@@ -299,6 +332,9 @@ defmodule SymphonyElixir.ServiceWebTest do
       assert :ok = Governor.acquire("beta", "held-slot", :issue)
       state = SymphonyElixirWeb.Presenter.payload(timeout: 100)
       assert state.snapshot_status == "partial"
+      assert state.upcoming.observed_at == nil
+      assert %{status: "warning"} = Enum.find(state.health.system.checks, &(&1.name == "Tracker"))
+      assert %{status: "warning"} = Enum.find(state.health.coordinator.checks, &(&1.name == "Polling loop"))
       assert Enum.all?(Map.values(state.counts), &is_nil/1)
       assert [%{project: "alpha", title: "Held work"}] = state.upcoming.waiting
       assert [%{id: "alpha", snapshot_status: "ok"}, %{id: "beta", snapshot_status: "timeout", running: nil, ready: nil}] = state.projects

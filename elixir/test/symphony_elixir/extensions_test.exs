@@ -462,7 +462,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert %{"status" => "warning", "detail" => "1 blocked · 1 retrying"} = Enum.find(coordinator_checks, &(&1["name"] == "Retries"))
     assert %{"status" => "down", "checks" => system_checks} = state_payload["health"]["system"]
     assert %{"status" => "critical"} = Enum.find(system_checks, &(&1["name"] == "Usage history"))
-    refute Enum.any?(system_checks, &(&1["name"] in ["Tracker", "GitHub pull requests"]))
+    assert %{"status" => "warning", "detail" => "Tracker observation incomplete"} = Enum.find(system_checks, &(&1["name"] == "Tracker"))
+    refute Enum.any?(system_checks, &(&1["name"] == "GitHub pull requests"))
 
     assert length(state_payload["usage"]["daily"]) == 14
     assert List.last(state_payload["usage"]["daily"])["date"] == Date.utc_today() |> Date.to_iso8601()

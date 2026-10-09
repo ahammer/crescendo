@@ -21,7 +21,7 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
       codex_totals: snapshots |> Enum.map(fn {_id, snapshot} -> snapshot[:codex_totals] || %{} end) |> sum(),
       operations: operations(snapshots, opts, length(results)),
       operations_error: joined(snapshots, fn snapshot -> snapshot[:operations_error] end),
-      upcoming: upcoming(snapshots, governor),
+      upcoming: upcoming(snapshots, governor, failed == []),
       autopilot: autopilot(snapshots),
       pull_requests: pull_requests(snapshots),
       rate_limits: nil,
@@ -38,14 +38,15 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
 
   # Ready work interleaves across projects (the order it would run in with
   # equal weights); everything else keeps each project's own order.
-  defp upcoming(snapshots, governor) do
+  defp upcoming(snapshots, governor, complete?) do
     upcomings = for {id, snapshot} <- snapshots, upcoming = snapshot[:upcoming], do: {id, upcoming}
     ready = Enum.map(upcomings, fn {id, upcoming} -> Enum.map(upcoming.ready, &Map.put(&1, :project, id)) end)
+    observations = Enum.map(snapshots, fn {_id, snapshot} -> get_in(snapshot, [:upcoming, :observed_at]) end)
 
     %{
       ready: interleave(ready),
       waiting: for({id, upcoming} <- upcomings, item <- upcoming.waiting, do: Map.put(item, :project, id)),
-      observed_at: oldest(Enum.map(upcomings, fn {_id, upcoming} -> upcoming.observed_at end)),
+      observed_at: if(complete? and Enum.all?(observations, &match?(%DateTime{}, &1)), do: oldest(observations)),
       error: joined(snapshots, fn snapshot -> get_in(snapshot, [:upcoming, :error]) end),
       available_slots: available_slots(governor, upcomings)
     }

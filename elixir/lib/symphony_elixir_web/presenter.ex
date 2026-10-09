@@ -580,14 +580,15 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
-  # Health comes only from signals Symphony actually observes; a check that
-  # cannot be judged is left out rather than shown as healthy.
+  # A configured interval cannot establish polling health without a tracker observation.
   defp health_payload(snapshot, usage, settings, now) do
+    tracker = tracker_check(Map.get(snapshot, :upcoming), settings, now)
+
     coordinator =
       Enum.reject(
         [
           snapshot_check(snapshot),
-          polling_check(Map.get(snapshot, :polling)),
+          polling_check(Map.get(snapshot, :polling), tracker),
           dispatch_check(snapshot, settings),
           throttle_check(throttle_payload(Map.get(snapshot, :throttle))),
           attention_check(snapshot),
@@ -600,7 +601,7 @@ defmodule SymphonyElixirWeb.Presenter do
       Enum.reject(
         [
           snapshot_check(snapshot),
-          tracker_check(Map.get(snapshot, :upcoming), settings, now),
+          tracker,
           pulls_check(Map.get(snapshot, :pull_requests), now),
           model_check(Map.get(snapshot, :quota), usage, now),
           store_check(usage),
@@ -625,9 +626,12 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp check(name, status, detail), do: %{name: name, status: status, detail: detail}
 
-  defp polling_check(%{checking?: true}), do: check("Polling loop", "healthy", "Polling now")
-  defp polling_check(%{poll_interval_ms: ms}) when is_integer(ms), do: check("Polling loop", "healthy", "Every #{div(ms, 1_000)}s")
-  defp polling_check(_polling), do: check("Polling loop", "idle", "No polling data yet")
+  defp polling_check(_polling, %{status: status, detail: detail}) when status in ["warning", "critical"],
+    do: check("Polling loop", status, detail)
+
+  defp polling_check(%{checking?: true}, _tracker), do: check("Polling loop", "healthy", "Polling now")
+  defp polling_check(%{poll_interval_ms: ms}, _tracker) when is_integer(ms), do: check("Polling loop", "healthy", "Every #{div(ms, 1_000)}s")
+  defp polling_check(_polling, _tracker), do: check("Polling loop", "idle", "No polling data yet")
 
   defp snapshot_check(%{snapshot_errors: [_ | _] = errors}) do
     detail = Enum.map_join(errors, " · ", &"#{&1.project}: #{&1.status}")
@@ -705,7 +709,7 @@ defmodule SymphonyElixirWeb.Presenter do
     if age > interval * 5, do: check("Tracker", "warning", "Last read #{age_text(age)} ago"), else: check("Tracker", "healthy", "Read #{age_text(age)} ago")
   end
 
-  defp tracker_check(_upcoming, _settings, _now), do: nil
+  defp tracker_check(_upcoming, _settings, _now), do: check("Tracker", "warning", "Tracker observation incomplete")
 
   defp pulls_check(%{enabled: true, error: error}, _now) when is_binary(error), do: check("GitHub pull requests", "warning", error)
 

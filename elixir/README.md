@@ -529,6 +529,11 @@ The observability UI now runs on a minimal Phoenix stack:
   `operations.dets`). Below them are the 14-day runs and spend charts (with each model's and
   project's spend) and cards for system health, autopilot, model usage and per-task averages (cost
   and time per delivery, review, research and marketing task over 14 days).
+  Polling and tracker health warn before the first tracker observation and after five missed
+  poll intervals; tracker errors make both checks critical. Polling in progress does not hide
+  stale observations. The combined tracker timestamp stays unknown until every selected project
+  has an available snapshot and observation, then uses the oldest one. Fresh successful reads
+  clear the warnings.
   The work timeline runs the full height on the right: up next (retries and the ready queue with
   estimated start times, soonest nearest the middle, waiting items folded away), now (running
   agents) and done (finished runs, merges, closes and failures, newest first with their time and
