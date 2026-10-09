@@ -525,6 +525,33 @@ defmodule SymphonyElixir.ReportDeliveryTest do
     assert association.report_verifications == []
   end
 
+  test "a second-precision closure cannot establish the order of a review in that second", %{root: root, table: table} do
+    Operations.start_run(table, "worker", %{issue_id: "42", issue_identifier: "GH-42", issue_url: "https://github.com/ahammer/metalrain/issues/42", kind: :issue, item_attempt: 1})
+    {issue, [closed, comment], attempt} = receipt(root, 42, "worker")
+    second = System.os_time(:second) - 60
+    at = DateTime.from_unix!(second) |> DateTime.to_iso8601()
+    [{key, run}] = :dets.lookup(table, {:lineage_run, "worker"})
+    :dets.insert(table, {key, %{run | started_s: second - 10}})
+    issue = %{issue | "closed_at" => at, "updated_at" => at}
+    closed = %{closed | "created_at" => at}
+
+    for reviewed <- [second + 0.1, second] do
+      change_json(attempt, "review-usage", %{"observed_at_epoch" => reviewed})
+      {:ok, observed} = observation(root, issue, [closed, comment])
+      Operations.observe_delivery(table, observed, "crescendo")
+      [retained] = Operations.snapshot(table).delivery_metrics.issue_associations
+      assert retained.disposition == "unknown_acceptance"
+      assert retained.report_verifications == []
+    end
+
+    change_json(attempt, "review-usage", %{"observed_at_epoch" => second - 0.1})
+    {:ok, earlier} = observation(root, issue, [closed, comment])
+    Operations.observe_delivery(table, earlier, "crescendo")
+    [retained] = Operations.snapshot(table).delivery_metrics.issue_associations
+    assert retained.disposition == "repository_reported_verification"
+    assert [%{run_id: "worker"}] = retained.report_verifications
+  end
+
   test "a later closure in the same GitHub second cannot reuse retained proof", %{root: root, table: table, path: path} do
     Operations.start_run(table, "worker", %{issue_id: "42", issue_identifier: "GH-42", issue_url: "https://github.com/ahammer/metalrain/issues/42", kind: :issue, item_attempt: 1})
     {issue, [closed, comment], attempt} = receipt(root, 42, "worker")
@@ -571,6 +598,66 @@ defmodule SymphonyElixir.ReportDeliveryTest do
     {:ok, observed_open} = observation(root, open, [closed, reopened, comment])
 
     for observed <- [observed_open, original, observed_open] do
+      Operations.observe_delivery(table, observed, "crescendo")
+      [retained] = Operations.snapshot(table).delivery_metrics.issue_associations
+      assert retained.disposition == "open"
+      Operations.close(table)
+      {:ok, ^table} = Operations.open(path, table)
+    end
+  end
+
+  test "an issue read before a same-second closure cannot hide the corrected closure", %{root: root, table: table, path: path} do
+    Operations.start_run(table, "worker", %{issue_id: "42", issue_identifier: "GH-42", issue_url: "https://github.com/ahammer/metalrain/issues/42", kind: :issue, item_attempt: 1})
+    {issue, [closed, comment], attempt} = receipt(root, 42, "worker")
+    second = System.os_time(:second) - 60
+    at = DateTime.from_unix!(second) |> DateTime.to_iso8601()
+    [{key, run}] = :dets.lookup(table, {:lineage_run, "worker"})
+    :dets.insert(table, {key, %{run | started_s: second - 10}})
+    change_json(attempt, "review-usage", %{"observed_at_epoch" => second - 1})
+    issue = %{issue | "closed_at" => at, "updated_at" => at}
+    closed = %{closed | "created_at" => at}
+    open = %{issue | "state" => "open", "state_reason" => nil, "closed_at" => nil}
+
+    # The issue GET finishes before closure; the timeline GET already includes that closure.
+    {:ok, mixed} = observation(root, open, [closed, comment])
+    Operations.observe_delivery(table, mixed, "crescendo")
+    Operations.close(table)
+    {:ok, ^table} = Operations.open(path, table)
+    {:ok, corrected} = observation(root, issue, [closed, comment])
+
+    for observed <- [corrected, mixed, corrected] do
+      Operations.observe_delivery(table, observed, "crescendo")
+      [retained] = Operations.snapshot(table).delivery_metrics.issue_associations
+      assert retained.disposition == "repository_reported_verification"
+      assert [%{run_id: "worker"}] = retained.report_verifications
+      Operations.close(table)
+      {:ok, ^table} = Operations.open(path, table)
+    end
+  end
+
+  test "an issue read before a same-second reopen cannot hide the corrected reopen", %{root: root, table: table, path: path} do
+    Operations.start_run(table, "worker", %{issue_id: "42", issue_identifier: "GH-42", issue_url: "https://github.com/ahammer/metalrain/issues/42", kind: :issue, item_attempt: 1})
+    {issue, [closed, comment], attempt} = receipt(root, 42, "worker")
+    second = System.os_time(:second) - 60
+    at = DateTime.from_unix!(second) |> DateTime.to_iso8601()
+    [{key, run}] = :dets.lookup(table, {:lineage_run, "worker"})
+    :dets.insert(table, {key, %{run | started_s: second - 10}})
+    change_json(attempt, "review-usage", %{"observed_at_epoch" => second - 1})
+    issue = %{issue | "closed_at" => at, "updated_at" => at}
+    closed = %{closed | "created_at" => at}
+    {:ok, original} = observation(root, issue, [closed, comment])
+    Operations.observe_delivery(table, original, "crescendo")
+    reopened = %{"id" => closed["id"] + 1, "event" => "reopened", "created_at" => at}
+    open = %{issue | "state" => "open", "state_reason" => nil, "closed_at" => nil}
+
+    # The old closed issue and newer reopened timeline come from separate GitHub GETs.
+    {:ok, mixed} = observation(root, issue, [closed, reopened, comment])
+    Operations.observe_delivery(table, mixed, "crescendo")
+    Operations.close(table)
+    {:ok, ^table} = Operations.open(path, table)
+    {:ok, corrected} = observation(root, open, [closed, reopened, comment])
+
+    for observed <- [corrected, mixed, corrected] do
       Operations.observe_delivery(table, observed, "crescendo")
       [retained] = Operations.snapshot(table).delivery_metrics.issue_associations
       assert retained.disposition == "open"

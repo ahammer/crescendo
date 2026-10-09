@@ -688,7 +688,7 @@ defmodule SymphonyElixir.Operations do
 
   defp report_before_closure?(reviewed, closed) do
     at = DateTime.to_unix(closed, :microsecond) / 1_000_000
-    if closed.microsecond == {0, 0}, do: reviewed < at + 1, else: reviewed <= at
+    if closed.microsecond == {0, 0}, do: reviewed < at, else: reviewed <= at
   end
 
   defp delivery_source_run(table, issue_id, created_at) do

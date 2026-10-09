@@ -153,10 +153,12 @@ Wrong-source, wrong-issue, foreign, ambiguous or incomplete evidence remains unk
 survives closure/restart, preserves original attempt budgets and unmet parent scope, and expires
 with the original worker. GitHub time precision is preserved; native times use one-second buckets.
 Reopen retains evidence; a later closure needs its own proof. GitHub lifecycle event IDs identify
-closures and order observations with the same issue update timestamp, preventing reused closure
+closures and order observations with the same issue update timestamp. Lifecycle IDs are retained
+only when the separately read issue state and closure timestamp match the timeline event, so
+corrected reads after a race remain eligible for refresh. This prevents reused closure
 timestamps from inheriting old proof even when the reopen is missed between polls. Missing event
 identity supplies no report proof. Canonical review timestamps exclude demonstrably pre-reopen
-references; reviews within a second-precision reopen's second stay ambiguous. Receipt polling
+references; reviews within a second-precision reopen's or closure's second stay ambiguous. Receipt polling
 adds no usage, and existing auxiliary review run-ID deduplication stays separate from native workers.
 Raw receipts and paths stay private. Historical runs without prospective tracking remain unknown;
 independent acceptance and helper coverage remain unknown, so verified cost and latency stay null. See

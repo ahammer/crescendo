@@ -262,7 +262,11 @@ defmodule SymphonyElixir.GitHub.Client do
       issue = normalize_issue(raw, settings.repo)
       root = Keyword.get(opts, :evidence_root, System.get_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT"))
       lifecycle = timeline |> Enum.filter(&(&1["event"] in ["closed", "reopened"])) |> List.last() || %{}
-      lifecycle_id = if is_integer(lifecycle["id"]) and lifecycle["id"] > 0, do: lifecycle["id"]
+
+      lifecycle_id =
+        if is_integer(lifecycle["id"]) and lifecycle["id"] > 0 and matching_delivery_lifecycle?(raw, lifecycle),
+          do: lifecycle["id"]
+
       reports = report_verifications(raw, timeline, settings, root, lifecycle)
 
       {:ok,
@@ -280,6 +284,17 @@ defmodule SymphonyElixir.GitHub.Client do
       error -> error
     end
   end
+
+  # Separate GitHub GETs can straddle a lifecycle change within one timestamp second.
+  defp matching_delivery_lifecycle?(raw, %{"event" => "closed", "created_at" => at}) do
+    raw["state"] == "closed" and is_binary(at) and raw["closed_at"] == at
+  end
+
+  defp matching_delivery_lifecycle?(raw, %{"event" => "reopened"}) do
+    raw["state"] == "open" and is_nil(raw["closed_at"])
+  end
+
+  defp matching_delivery_lifecycle?(_, _), do: false
 
   # Canonical receipts are repository reports, never independent acceptance or billing proof.
   defp report_verifications(raw, timeline, settings, root, lifecycle) do

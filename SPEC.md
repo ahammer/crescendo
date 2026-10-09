@@ -1463,12 +1463,15 @@ Operations joins the reviewer parent run and review timestamp to exactly one pro
 issue worker window, retaining its original run ID and item attempt. The association is immutable,
 closure-specific, idempotent across polls/restarts and expires with its original worker history.
 The GitHub lifecycle event ID identifies the closure and orders reopen/closure observations that
-share an issue update timestamp; missing identity supplies no report proof. Reusing a closure
+share an issue update timestamp. Lifecycle IDs are retained only when the separately read issue
+state and closure timestamp match the timeline event, allowing corrected reads after a race.
+Missing identity supplies no report proof. Reusing a closure
 timestamp cannot reuse an earlier report, including when the reopen is missed between polls.
 GitHub timestamps preserve supplied precision; native worker times identify one-second buckets.
 Reopen retains the report but a later closure needs its own proof; references with canonical review
 times before that reopen do not make the new closure ambiguous. Reviews within a reopen's second
 remain ambiguous when GitHub supplies only second precision and cannot be excluded as prior evidence.
+Reviews within a closure's second likewise cannot prove that review preceded closure and supply no report proof.
 Dispatch/terminal handoffs, canonical ownership, original attempt budgets and unmet scope stay
 intact; a child report cannot accept its broader parent. Report receipt observation adds no usage:
 nested reviewer accounting
