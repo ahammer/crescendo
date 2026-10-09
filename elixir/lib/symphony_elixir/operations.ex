@@ -164,7 +164,7 @@ defmodule SymphonyElixir.Operations do
 
     evidence = :dets.match_object(table, {{:lineage_evidence, :_, :_}, :_})
 
-    for {key, value} <- evidence, elem(key, 1) in ["issue", "issue_source"], value.issue_id not in ids do
+    for {key, value} <- evidence, elem(key, 1) in ["issue", "issue_source", "issue_report"], value.issue_id not in ids do
       :dets.delete(table, key)
     end
   end
@@ -589,6 +589,7 @@ defmodule SymphonyElixir.Operations do
       end
 
       Enum.each(observation.sources, &retain_delivery_source(table, issue.id, &1))
+      Enum.each(Map.get(observation, :report_verifications, []), &retain_report_verification(table, issue, &1))
       :ok = :dets.sync(table)
     end)
   end
@@ -643,6 +644,22 @@ defmodule SymphonyElixir.Operations do
     end
   end
 
+  defp retain_report_verification(table, issue, report) do
+    with %{run_id: id, reviewed_s: reviewed, issue_url: url, closed_at: closed_at} <- report,
+         true <- is_number(reviewed) and url == issue.url,
+         [{{:lineage_run, ^id}, run}] <-
+           Enum.filter(delivery_runs(table, issue.id), fn {_, run} ->
+             source_created_during_run?(run, issue.id, trunc(reviewed))
+           end),
+         true <- run[:issue_url] == url and is_integer(run[:item_attempt]),
+         {:ok, closed, _} <- DateTime.from_iso8601(to_string(closed_at)),
+         true <- reviewed <= DateTime.to_unix(closed) + 1 do
+      key = {:lineage_evidence, "issue_report", {issue.id, report.verification_id}}
+      value = Map.take(report, [:verification_id, :source_sha, :run_id, :reviewed_s, :evidence_source])
+      :dets.insert_new(table, {key, Map.merge(value, %{issue_id: issue.id, item_attempt: run.item_attempt, closed_at: closed_at})})
+    end
+  end
+
   defp delivery_source_run(table, issue_id, created_at) do
     case DateTime.from_iso8601(to_string(created_at)) do
       {:ok, created, _} ->
@@ -685,8 +702,12 @@ defmodule SymphonyElixir.Operations do
       for {{:lineage_run, id}, run} <- runs,
           do: Map.put(Map.take(run, [:item_attempt, :status, :started_s, :finished_s, :delivery_key]), :run_id, id)
 
-    proven = is_binary(issue.closed_at) and Enum.any?(sources, &merged_worker_source?/1)
-    disposition = delivery_disposition(issue, proven)
+    reports =
+      for {_, report} <- :dets.match_object(table, {{:lineage_evidence, "issue_report", {issue.issue_id, :_}}, :_}),
+          do: report
+
+    proof = delivery_proof(issue, sources, reports)
+    disposition = delivery_disposition(issue, proof)
     canonical_owner = if is_map(issue.handoff), do: to_string(issue.handoff["owner"]), else: issue.issue_id
 
     issue
@@ -695,10 +716,12 @@ defmodule SymphonyElixir.Operations do
       canonical_owner: canonical_owner,
       disposition: disposition,
       sources: Enum.sort_by(sources, & &1.pr_number),
+      report_verifications: Enum.sort_by(reports, &{&1.reviewed_s, &1.verification_id}),
+      delivery_kind: proof,
       attempts: Enum.sort_by(attempts, &{&1.started_s, &1.run_id}),
       helper_usage_coverage: "unknown",
-      acceptance_proof: if(disposition in ["accepted_reduced_scope", "repository_reported_completion"], do: "repository_reported", else: "incomplete"),
-      canonical_outcome_complete: disposition == "repository_reported_completion" and is_nil(issue.handoff),
+      acceptance_proof: if(disposition in ["accepted_reduced_scope", "repository_reported_completion", "repository_reported_verification"], do: "repository_reported", else: "incomplete"),
+      canonical_outcome_complete: disposition in ["repository_reported_completion", "repository_reported_verification"] and is_nil(issue.handoff),
       verified_cost: nil,
       verified_latency: nil
     })
@@ -714,16 +737,29 @@ defmodule SymphonyElixir.Operations do
       (is_map(issue.handoff) and issue.handoff["change"] == "partial_delivery")
   end
 
-  defp delivery_disposition(issue, proven) do
+  defp delivery_proof(issue, sources, reports) do
+    cond do
+      not is_binary(issue.closed_at) -> "unknown"
+      Enum.any?(sources, &merged_worker_source?/1) -> "merged_source"
+      Enum.any?(reports, &(&1.closed_at == issue.closed_at)) -> "report_only"
+      true -> "unknown"
+    end
+  end
+
+  defp delivery_disposition(issue, proof) do
     cond do
       issue.state != "closed" -> "open"
       issue.state_reason == "not_planned" -> "retirement"
       issue.handoff == :invalid -> "unknown_acceptance"
-      proven and issue.reduced_scope -> "accepted_reduced_scope"
-      proven and issue.state_reason == "completed" -> "repository_reported_completion"
+      proof != "unknown" and issue.reduced_scope -> "accepted_reduced_scope"
+      issue.state_reason == "completed" -> reported_disposition(proof)
       true -> "unknown_acceptance"
     end
   end
+
+  defp reported_disposition("merged_source"), do: "repository_reported_completion"
+  defp reported_disposition("report_only"), do: "repository_reported_verification"
+  defp reported_disposition("unknown"), do: "unknown_acceptance"
 
   @doc "Replaces a thread's native cumulative account estimate; null stays unknown."
   @spec account_usage(handle(), term(), String.t(), map() | nil) :: :ok | {:error, term()}

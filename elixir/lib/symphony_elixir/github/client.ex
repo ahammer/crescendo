@@ -256,13 +256,158 @@ defmodule SymphonyElixir.GitHub.Client do
 
     with {:ok, settings} <- settings(tracker),
          {:ok, raw} when is_map(raw) <- delivery_issue(settings, request_fun, id),
+         true <- to_string(raw["number"]) == id or {:error, :github_wrong_issue},
          {:ok, timeline} <- delivery_timeline(settings, request_fun, id, 1, []),
          {:ok, sources} <- delivery_sources(timeline, settings, request_fun, id) do
       issue = normalize_issue(raw, settings.repo)
-      {:ok, %{issue: issue, closed_at: raw["closed_at"], sources: sources, evidence_source: "github_issue_and_cross_reference"}}
+      root = Keyword.get(opts, :evidence_root, System.get_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT"))
+      reports = report_verifications(raw, timeline, settings, root)
+      {:ok, %{issue: issue, closed_at: raw["closed_at"], sources: sources, report_verifications: reports, evidence_source: "github_issue_and_cross_reference"}}
     else
       {:ok, _} -> {:error, :github_unknown_payload}
       error -> error
+    end
+  end
+
+  # Canonical receipts are repository reports, never independent acceptance or billing proof.
+  defp report_verifications(raw, timeline, settings, root) do
+    url = "https://github.com/#{settings.repo}/issues/#{raw["number"]}"
+    closed = Enum.filter(timeline, &(&1["event"] == "closed"))
+
+    references =
+      for %{"event" => "commented", "body" => body} <- timeline,
+          is_binary(body),
+          match <-
+            Regex.scan(
+              ~r/## Symphony existing-implementation verification\r?\nReviewed current main `([a-f0-9]{40})`\. Retained evidence: `issue-([1-9][0-9]*)\/([a-f0-9]{40})\/([a-f0-9]{32})`\./,
+              body
+            ),
+          do: tl(match)
+
+    with true <- is_binary(root) and raw["html_url"] == url,
+         true <- raw["state"] == "closed" and raw["state_reason"] == "completed",
+         %{"created_at" => at} <- List.last(closed),
+         true <- is_binary(at) and at == raw["closed_at"],
+         [[sha, number, sha, receipt]] <- Enum.uniq(references),
+         true <- number == to_string(raw["number"]),
+         {:ok, report} <- read_report(root, number, sha, receipt, url),
+         true <- report_after_reopen?(report, timeline) do
+      [Map.put(report, :closed_at, at)]
+    else
+      _ -> []
+    end
+  end
+
+  defp report_after_reopen?(report, timeline) do
+    case timeline |> Enum.filter(&(&1["event"] == "reopened")) |> List.last() do
+      nil ->
+        true
+
+      %{"created_at" => at} ->
+        case DateTime.from_iso8601(to_string(at)) do
+          {:ok, reopened, _} -> report.reviewed_s >= DateTime.to_unix(reopened)
+          _ -> false
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  defp read_report(root, number, sha, receipt, url) do
+    parts = ["issue-#{number}", sha, receipt]
+
+    with {:ok, intent} <- report_json(root, parts, "closure-intent.json"),
+         {:ok, input} <- report_json(root, parts, "input.json"),
+         true <- report_scope?(intent, input, number, sha, url),
+         {:ok, acceptance} <- report_bytes(root, parts, "acceptance.md"),
+         true <- String.valid?(acceptance) and String.contains?(acceptance, sha),
+         {:ok, review} <- report_json(root, parts, "review.json"),
+         true <- approved_report_review?(review, sha),
+         {:ok, source} <- report_json(root, parts, "delivery-source.json"),
+         true <- exact_report_source?(source, sha) and source["clean_after"] == true,
+         {:ok, adjudicated} <- report_json(root, parts, "adjudicated-failures.json"),
+         true <- exact_report_source?(adjudicated, sha) and is_list(adjudicated["failures"]),
+         {:ok, digest} <- report_json(root, parts, "review-input-digest.json"),
+         true <- unchanged_report_inputs?(digest),
+         {:ok, hosted} <- report_json(root, parts, "hosted-checks.json"),
+         true <- completed_report_checks?(hosted),
+         {:ok, usage} <- report_json(root, parts, "review-usage.json"),
+         true <- report_worker?(usage, number, sha) do
+      {:ok,
+       %{
+         verification_id: receipt,
+         source_sha: sha,
+         issue_url: url,
+         run_id: usage["parent_run_id"],
+         reviewed_s: usage["observed_at_epoch"],
+         evidence_source: "canonical_verify_existing_receipts_and_github_closure"
+       }}
+    else
+      _ -> {:error, :incomplete_report_verification}
+    end
+  end
+
+  defp report_scope?(intent, input, number, sha, url) do
+    case input["issue"] do
+      %{"number" => issue_number, "html_url" => ^url, "title" => title, "body" => body} ->
+        issue_number == String.to_integer(number) and intent["issue"] == issue_number and
+          intent["head"] == sha and input["head"] == sha and intent["retirement"] == false and
+          intent["scope"] == [title, body]
+
+      _ ->
+        false
+    end
+  end
+
+  defp unchanged_report_inputs?(digest) do
+    is_binary(digest["before"]) and digest["before"] == digest["after"] and digest["new_own_issue_paths"] == []
+  end
+
+  defp report_worker?(usage, number, sha) do
+    usage["role"] == "reviewer" and usage["source_sha"] == sha and usage["terminal_event"] == "turn.completed" and
+      usage["work_item"] == "GH-#{number}" and is_binary(usage["parent_run_id"]) and is_number(usage["observed_at_epoch"])
+  end
+
+  defp approved_report_review?(review, sha) do
+    exact_report_source?(review, sha) and review["approved"] == true and
+      is_binary(review["summary"]) and String.trim(review["summary"]) != "" and
+      review["findings"] == [] and review["missing_evidence"] == [] and is_list(review["preexisting"])
+  end
+
+  defp exact_report_source?(record, sha), do: record["base"] == sha and record["head"] == sha
+
+  defp completed_report_checks?(%{"statuses" => %{"total_count" => count} = statuses, "checks" => checks})
+       when is_integer(count) and count >= 0 and is_list(checks) do
+    (count == 0 or statuses["state"] == "success") and
+      Enum.all?(checks, fn
+        %{"status" => "completed", "conclusion" => conclusion} -> conclusion in ["success", "neutral", "skipped"]
+        _ -> false
+      end)
+  end
+
+  defp completed_report_checks?(_), do: false
+
+  defp report_json(root, parts, name) do
+    with {:ok, bytes} <- report_bytes(root, parts, name),
+         {:ok, %{} = value} <- Jason.decode(bytes) do
+      {:ok, value}
+    else
+      _ -> {:error, :invalid_report_receipt}
+    end
+  end
+
+  defp report_bytes(root, parts, name) do
+    paths = Enum.scan(parts ++ [name], Path.expand(root), &Path.join(&2, &1))
+
+    with true <- Enum.all?(Enum.drop(paths, -1), &match?({:ok, %{type: :directory}}, File.lstat(&1))),
+         path = List.last(paths),
+         {:ok, %{type: :regular, size: size}} when size <= 131_072 <- File.lstat(path),
+         {:ok, bytes} <- File.open(path, [:read, :binary], &IO.binread(&1, 131_073)),
+         true <- is_binary(bytes) and byte_size(bytes) <= 131_072 do
+      {:ok, bytes}
+    else
+      _ -> {:error, :report_receipt_unavailable}
     end
   end
 

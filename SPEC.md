@@ -1445,6 +1445,28 @@ and helper usage remain explicit. Verified delivery count, cost and latency stay
 historical runs are not backfilled into accepted deliveries. Associations expire with retained worker history and respect private-project redaction. No public
 mutation control or local configuration change is introduced.
 
+Canonical report-only `--verify-existing` delivery uses `repository_reported_verification`
+with `delivery_kind: report_only` and separate `report_verifications`; it never invents a PR source.
+The GitHub observer requires a completed closure with a matching authenticated timeline event and
+one unique exact-source canonical workpad reference. It reads bounded regular files beneath the
+existing private `METALRAIN_SYMPHONY_EVIDENCE_ROOT`: closure intent, input, acceptance, approved
+review, clean source, adjudicated failures, unchanged review-input digest, hosted checks and
+reviewer usage. Issue/repository identity, captured scope, source SHAs and reviewer work item must
+agree. A heading, successful turn, missing receipt, rejected review or ambiguous reference supplies
+no proof. Symlinked receipt paths are rejected; raw receipts, local paths and credentials are never
+projected onto the public API.
+
+Operations joins the reviewer parent run and review timestamp to exactly one prospectively tracked
+issue worker window, retaining its original run ID and item attempt. The association is immutable,
+closure-specific, idempotent across polls/restarts and expires with retained worker history.
+Reopen retains the report but a later closure needs its own proof. Dispatch/terminal handoffs,
+canonical ownership, original attempt budgets and unmet scope stay intact; a child report cannot
+accept its broader parent. Report receipt observation adds no usage: nested reviewer accounting
+continues through the existing auxiliary run-ID deduplication, separate from worker usage and budget.
+This remains repository-reported verification, not independently verified acceptance. Verified
+cost, latency, delivery count and helper coverage stay unknown until their own proof exists.
+
+
 
 ### 13.1 Logging Conventions
 
