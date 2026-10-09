@@ -297,10 +297,23 @@ defmodule SymphonyElixirWeb.ServiceSnapshotTest do
 
     assert merged.running == [%{identifier: "GH-1", project: "a"}]
     assert merged.upcoming.ready != []
+    assert merged.upcoming.observed_at == nil
 
     empty = ServiceSnapshot.merge([{"b", :timeout}], nil)
     assert empty.snapshot_status == "partial"
     assert empty.running == []
+  end
+
+  test "a fresh sibling cannot establish a complete tracker observation" do
+    fresh = snapshot(%{})
+
+    for incomplete <- [nil, %{fresh.upcoming | observed_at: nil}, %{fresh.upcoming | observed_at: "unknown"}] do
+      merged = ServiceSnapshot.merge([{"a", fresh}, {"b", snapshot(%{upcoming: incomplete})}], nil)
+      assert merged.snapshot_status == "complete"
+      assert merged.upcoming.observed_at == nil
+    end
+
+    assert ServiceSnapshot.merge([{"a", fresh}], nil).upcoming.observed_at == @later
   end
 
   test "no projects merge into an empty snapshot" do

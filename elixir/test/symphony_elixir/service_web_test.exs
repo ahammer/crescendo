@@ -192,6 +192,70 @@ defmodule SymphonyElixir.ServiceWebTest do
     assert json_response(get(build_conn(), "/api/v1/MT-404"), 404)["error"]["code"] == "issue_not_found"
   end
 
+  test "polling health requires tracker observations from every selected project" do
+    beta = GenServer.whereis(SymphonyElixir.Project.via("beta", :orchestrator))
+    now = DateTime.utc_now()
+
+    for {observed_at, error, status, detail} <- [
+          {nil, nil, "warning", "Tracker observation incomplete"},
+          {DateTime.add(now, -600), nil, "warning", "Last read 10m ago"},
+          {now, "tracker unavailable", "critical", "Read failed: beta: tracker unavailable"},
+          {now, nil, "healthy", nil}
+        ],
+        checking? <- [false, true] do
+      :sys.replace_state(beta, fn state ->
+        %{state | issues_observed_at: observed_at, issues_error: error, poll_check_in_progress: checking?}
+      end)
+
+      for query <- ["", "?project=beta", "?project=beta&history=full"] do
+        payload = json_response(get(build_conn(), "/api/v1/state" <> query), 200)
+        polling = Enum.find(payload["health"]["coordinator"]["checks"], &(&1["name"] == "Polling loop"))
+        tracker = Enum.find(payload["health"]["system"]["checks"], &(&1["name"] == "Tracker"))
+        assert polling["status"] == status
+        assert tracker["status"] == status
+        expected = detail || if(checking?, do: "Polling now", else: "Every 30s")
+        assert polling["detail"] == expected
+        if detail, do: assert(tracker["detail"] == detail)
+        if is_nil(observed_at), do: assert(is_nil(payload["upcoming"]["observed_at"]))
+      end
+
+      alpha = json_response(get(build_conn(), "/api/v1/state?project=alpha"), 200)
+      assert alpha["health"]["coordinator"]["status"] == "operational"
+      assert alpha["upcoming"]["observed_at"]
+    end
+  end
+
+  test "tracker freshness uses each selected project's poll interval", %{service: service} do
+    for {alpha_interval, alpha_age, beta_interval, beta_age, expected} <- [
+          {3_600_000, 60, 30_000, 600, "warning"},
+          {3_600_000, 3_600, 30_000, 600, "warning"},
+          {30_000, 60, 3_600_000, 600, "healthy"},
+          {3_600_000, 600, 30_000, 60, "healthy"},
+          {3_600_000, 60, 1_500, 6, "healthy"},
+          {3_600_000, 60, 500, 1, "healthy"},
+          {3_600_000, 60, 500, 3, "warning"}
+        ] do
+      now = DateTime.utc_now()
+
+      for {id, interval, age} <- [{"alpha", alpha_interval, alpha_age}, {"beta", beta_interval, beta_age}] do
+        workflow = Enum.find(Service.projects(service), &(&1.id == id)).workflow
+        write_workflow_file!(workflow, tracker_kind: "memory", poll_interval_ms: interval)
+        Project.with_project(id, &WorkflowStore.force_reload/0)
+        pid = GenServer.whereis(Project.via(id, :orchestrator))
+        :sys.replace_state(pid, &%{&1 | poll_interval_ms: interval, issues_observed_at: DateTime.add(now, -age)})
+      end
+
+      for {query, status} <- [{"", expected}, {"?project=alpha", "healthy"}, {"?project=beta", expected}] do
+        payload = json_response(get(build_conn(), "/api/v1/state" <> query), 200)
+        tracker = Enum.find(payload["health"]["system"]["checks"], &(&1["name"] == "Tracker"))
+        polling = Enum.find(payload["health"]["coordinator"]["checks"], &(&1["name"] == "Polling loop"))
+        assert tracker["status"] == status
+        assert polling["status"] == status
+        if status == "warning" and beta_age == 600, do: assert(tracker["detail"] == "Last read 10m ago")
+      end
+    end
+  end
+
   test "service revision is shared across real snapshots, private filters and dashboard errors" do
     revision = String.duplicate("c", 40)
     root = Path.join(System.tmp_dir!(), "service-release-#{System.unique_integer([:positive])}")
@@ -358,6 +422,9 @@ defmodule SymphonyElixir.ServiceWebTest do
       assert :ok = Governor.acquire("beta", "held-slot", :issue)
       state = SymphonyElixirWeb.Presenter.payload(timeout: 100)
       assert state.snapshot_status == "partial"
+      assert state.upcoming.observed_at == nil
+      assert %{status: "warning"} = Enum.find(state.health.system.checks, &(&1.name == "Tracker"))
+      assert %{status: "warning"} = Enum.find(state.health.coordinator.checks, &(&1.name == "Polling loop"))
       assert Enum.all?(Map.values(state.counts), &is_nil/1)
       assert [%{project: "alpha", title: "Held work"}] = state.upcoming.waiting
       assert [alpha, beta] = state.projects

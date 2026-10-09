@@ -475,6 +475,14 @@ The `SYMPHONY_*` names are kept for tools that predate the service.
 
 ## Dashboard and API
 
+Polling and tracker health require successful tracker observations from every selected project.
+Both checks warn before a first observation or when any selected project's data is older than
+five of its own configured poll intervals; tracker errors make both checks critical.
+A poll in progress does not hide stale data.
+The combined tracker timestamp stays `null` if any selected project has no observation or its
+snapshot is unavailable, otherwise it uses the oldest one. Fresh successful reads clear the
+warnings. These are read-only signals; they do not restart projects or dispatch work.
+
 Crescendo's state responses include service-wide `service: {revision, commit_url}` metadata,
 including project-filtered, full-history and snapshot-error responses. `revision` is the full
 40-character source commit and `commit_url` links to that commit in `ahammer/crescendo`.
