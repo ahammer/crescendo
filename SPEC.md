@@ -1508,11 +1508,11 @@ reject partial, filtered, or unknown project state and unknown Governor-held slo
 treating an observation as safe.
 
 Polling and tracker health MUST warn until the selected projects have successful tracker
-observations. Tracker errors make both checks critical; an observation older than five configured
-poll intervals makes both checks warn, even while a poll is in progress. A fresh successful read
-clears those warnings. The combined tracker observation time MUST remain unknown when any
-selected project has no observation or its snapshot is unavailable; otherwise it uses the oldest
-selected observation.
+observations. Tracker errors make both checks critical; a selected observation older than five of
+its project's configured poll intervals makes both checks warn, even while a poll is in progress.
+A fresh successful read clears those warnings. The combined tracker observation time MUST remain
+unknown when any selected project has no observation or its snapshot is unavailable; otherwise it
+uses the oldest selected observation.
 
 Deployment health MUST additionally require `projects[].tracker_ready: true` for every enabled
 project. The Orchestrator owns this signal: it is true only after a successful active-issue poll
