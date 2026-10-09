@@ -713,10 +713,11 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp tracker_check(%{upcoming: %{observed_at: %DateTime{} = at}} = snapshot, settings, now) do
-    age = DateTime.diff(now, at)
+    age_ms = DateTime.diff(now, at, :millisecond)
+    age = div(age_ms, 1_000)
     default_interval = if settings, do: settings.polling.interval_ms, else: 30_000
-    interval = div(get_in(snapshot, [:polling, :poll_interval_ms]) || default_interval, 1_000)
-    if age > interval * 5, do: check("Tracker", "warning", "Last read #{age_text(age)} ago"), else: check("Tracker", "healthy", "Read #{age_text(age)} ago")
+    interval = get_in(snapshot, [:polling, :poll_interval_ms]) || default_interval
+    if age_ms > interval * 5, do: check("Tracker", "warning", "Last read #{age_text(age)} ago"), else: check("Tracker", "healthy", "Read #{age_text(age)} ago")
   end
 
   defp tracker_check(_snapshot, _settings, _now), do: check("Tracker", "warning", "Tracker observation incomplete")

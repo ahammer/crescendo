@@ -226,14 +226,17 @@ defmodule SymphonyElixir.ServiceWebTest do
   end
 
   test "tracker freshness uses each selected project's poll interval", %{service: service} do
-    now = DateTime.utc_now()
-
     for {alpha_interval, alpha_age, beta_interval, beta_age, expected} <- [
           {3_600_000, 60, 30_000, 600, "warning"},
           {3_600_000, 3_600, 30_000, 600, "warning"},
           {30_000, 60, 3_600_000, 600, "healthy"},
-          {3_600_000, 600, 30_000, 60, "healthy"}
+          {3_600_000, 600, 30_000, 60, "healthy"},
+          {3_600_000, 60, 1_500, 6, "healthy"},
+          {3_600_000, 60, 500, 1, "healthy"},
+          {3_600_000, 60, 500, 3, "warning"}
         ] do
+      now = DateTime.utc_now()
+
       for {id, interval, age} <- [{"alpha", alpha_interval, alpha_age}, {"beta", beta_interval, beta_age}] do
         workflow = Enum.find(Service.projects(service), &(&1.id == id)).workflow
         write_workflow_file!(workflow, tracker_kind: "memory", poll_interval_ms: interval)
@@ -248,7 +251,7 @@ defmodule SymphonyElixir.ServiceWebTest do
         polling = Enum.find(payload["health"]["coordinator"]["checks"], &(&1["name"] == "Polling loop"))
         assert tracker["status"] == status
         assert polling["status"] == status
-        if status == "warning", do: assert(tracker["detail"] == "Last read 10m ago")
+        if status == "warning" and beta_age == 600, do: assert(tracker["detail"] == "Last read 10m ago")
       end
     end
   end
