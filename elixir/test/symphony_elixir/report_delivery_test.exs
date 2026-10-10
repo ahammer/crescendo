@@ -39,7 +39,7 @@ defmodule SymphonyElixir.ReportDeliveryTest do
   end
 
   test "three canonical report closures retain unique workers through OTP inventory and restart", context do
-    %{root: root, path: path, table: table} = context
+    %{root: root, table: table} = context
 
     fixtures =
       Enum.reduce([1243, 1244, 1189], %{}, fn number, acc ->
@@ -81,30 +81,7 @@ defmodule SymphonyElixir.ReportDeliveryTest do
 
     budget = %{item_attempts: %{"1233" => 2, "1234" => 1, "1188" => 2}, handoff_owners: %{"original-budget-1243" => "1243", "original-budget-1244" => "1244", "original-budget-1189" => "1189"}}
     Operations.save_autopilot_state(table, budget)
-    Operations.close(table)
-    agent_start = {Agent, :start_link, [fn -> {root, fixtures} end, [name: DeliveryClient]]}
-    start_supervised!(%{id: DeliveryClient, start: agent_start})
-    Application.put_env(:symphony_elixir, :github_client_module, DeliveryClient)
-
-    File.write!(Workflow.workflow_file_path(), """
-    ---
-    tracker:
-      kind: github
-      provider:
-        repo: ahammer/metalrain
-        token: test-token
-      active_states: [open]
-      terminal_states: [closed]
-    ---
-    Work on {{ issue.identifier }}.
-    """)
-
-    WorkflowStore.force_reload()
-    supervisor = Module.concat(__MODULE__, TaskSupervisor)
-    orchestrator = Module.concat(__MODULE__, Orchestrator)
-    start_supervised!({Task.Supervisor, name: supervisor})
-    opts = [name: orchestrator, task_supervisor: supervisor, operations_path: path, operations_table: table]
-    start_supervised!({Orchestrator, opts})
+    {orchestrator, opts} = start_inventory(context, fixtures)
     associations = await_reports(orchestrator)
 
     assert length(associations) == 3
@@ -133,6 +110,104 @@ defmodule SymphonyElixir.ReportDeliveryTest do
     assert Orchestrator.snapshot(orchestrator, 5_000).operations.external.reports == 0
     assert :sys.get_state(orchestrator).autopilot.item_attempts == budget.item_attempts
     assert :sys.get_state(orchestrator).autopilot.handoff_owners == budget.handoff_owners
+  end
+
+  test "retained production timing shapes stay unknown through inventory replay and restart", context do
+    %{root: root, table: table} = context
+
+    shapes = [
+      {1245, 1_791_538_687.429, "2026-10-09T09:35:57Z", 506.806},
+      {1247, 1_791_535_566.545, "2026-10-09T08:43:55Z", 658.443},
+      {1168, 1_791_544_289.623, "2026-10-09T11:09:18Z", 533.280}
+    ]
+
+    # Shift published times together to keep the same ordering inside native history retention.
+    offset = System.os_time(:second) - 60 - 1_791_544_289
+
+    fixtures =
+      Enum.reduce(shapes, %{}, fn {number, observed_s, closed_at, elapsed}, acc ->
+        observed_s = observed_s + offset
+        {:ok, closure, _} = DateTime.from_iso8601(closed_at)
+        closed_at = closure |> DateTime.add(offset) |> DateTime.to_iso8601()
+        id = to_string(number)
+        run_id = "scrubbed-worker-#{id}"
+
+        Operations.start_run(table, run_id, %{
+          issue_id: id,
+          issue_identifier: "GH-#{id}",
+          issue_url: "https://github.com/ahammer/metalrain/issues/#{id}",
+          kind: :issue,
+          item_attempt: 2,
+          delivery_key: "original-budget-#{id}"
+        })
+
+        {issue, [closed, comment], attempt} = receipt(root, number, run_id)
+        issue = %{issue | "closed_at" => closed_at, "updated_at" => closed_at}
+        closed = %{closed | "created_at" => closed_at}
+
+        change_json(attempt, "review-usage", %{
+          "observed_at_epoch" => observed_s,
+          "codex_version" => "codex-cli 0.160.0",
+          "elapsed_seconds" => elapsed,
+          "account_credits" => nil,
+          "account_usd" => nil,
+          "attribution" => "cli_terminal_event"
+        })
+
+        File.write!(
+          Path.join(attempt, "review.timing.json"),
+          Jason.encode!(%{"elapsed_s" => elapsed, "exit" => 0, "attempt" => "scrubbed-attempt", "command" => ["scrubbed-review"], "lease_records" => [], "lease_held_s" => 0, "lease_waited_s" => 0})
+        )
+
+        Operations.finish_run(table, run_id, "completed", %{})
+        [{key, run}] = :dets.lookup(table, {:lineage_run, run_id})
+        :dets.insert(table, {key, %{run | started_s: trunc(observed_s) - 900, finished_s: trunc(observed_s) + 60}})
+        # #1168 also carries an older closed/reopened lifecycle before its final completed closure.
+        earlier =
+          if number == 1168 do
+            Enum.map(
+              [{"closed", "2026-10-05T01:43:20Z"}, {"reopened", "2026-10-05T09:24:58Z"}],
+              fn {event, at} ->
+                {:ok, at, _} = DateTime.from_iso8601(at)
+                %{"event" => event, "created_at" => at |> DateTime.add(offset) |> DateTime.to_iso8601()}
+              end
+            )
+          else
+            []
+          end
+
+        timeline = earlier ++ [closed, comment]
+
+        assert {:ok, %{report_verifications: [%{reviewed_s: ^observed_s, run_id: ^run_id}]}} =
+                 observation(root, issue, timeline)
+
+        {:ok, closure, _} = DateTime.from_iso8601(closed_at)
+        assert observed_s > DateTime.to_unix(closure)
+
+        Map.merge(acc, %{"/repos/ahammer/metalrain/issues/#{id}" => issue, "/repos/ahammer/metalrain/issues/#{id}/timeline" => timeline})
+      end)
+
+    budget = %{item_attempts: %{"1245" => 2, "1247" => 2, "1168" => 2}}
+    Operations.save_autopilot_state(table, budget)
+    {orchestrator, opts} = start_inventory(context, fixtures)
+    associations = await_reports(orchestrator)
+
+    for association <- associations do
+      assert association.disposition == "unknown_acceptance"
+      assert association.report_verifications == []
+      assert association.sources == []
+      assert association.verified_cost == nil
+      assert association.verified_latency == nil
+      assert association.helper_usage_coverage == "unknown"
+      assert [%{item_attempt: 2, delivery_key: key}] = association.attempts
+      assert key == "original-budget-#{association.issue_id}"
+    end
+
+    stop_supervised!(SymphonyElixir.Orchestrator)
+    start_supervised!({Orchestrator, opts})
+    assert await_reports(orchestrator) == associations
+    assert :sys.get_state(orchestrator).autopilot.item_attempts == budget.item_attempts
+    assert Orchestrator.snapshot(orchestrator, 5_000).operations.external.reports == 0
   end
 
   test "canonical receipts reject unapproved, wrong-source, wrong-issue and incomplete evidence", %{root: root} do
@@ -741,6 +816,34 @@ defmodule SymphonyElixir.ReportDeliveryTest do
   defp change_json(attempt, name, changes) do
     path = Path.join(attempt, name <> ".json")
     File.write!(path, Jason.encode!(Map.merge(Jason.decode!(File.read!(path)), changes)))
+  end
+
+  defp start_inventory(%{root: root, path: path, table: table}, fixtures) do
+    Operations.close(table)
+    agent_start = {Agent, :start_link, [fn -> {root, fixtures} end, [name: DeliveryClient]]}
+    start_supervised!(%{id: DeliveryClient, start: agent_start})
+    Application.put_env(:symphony_elixir, :github_client_module, DeliveryClient)
+
+    File.write!(Workflow.workflow_file_path(), """
+    ---
+    tracker:
+      kind: github
+      provider:
+        repo: ahammer/metalrain
+        token: test-token
+      active_states: [open]
+      terminal_states: [closed]
+    ---
+    Work on {{ issue.identifier }}.
+    """)
+
+    WorkflowStore.force_reload()
+    supervisor = Module.concat(__MODULE__, TaskSupervisor)
+    orchestrator = Module.concat(__MODULE__, Orchestrator)
+    start_supervised!({Task.Supervisor, name: supervisor})
+    opts = [name: orchestrator, task_supervisor: supervisor, operations_path: path, operations_table: table]
+    start_supervised!({Orchestrator, opts})
+    {orchestrator, opts}
   end
 
   defp await_reports(orchestrator) do

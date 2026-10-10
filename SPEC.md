@@ -1445,6 +1445,10 @@ and helper usage remain explicit. Verified delivery count, cost and latency stay
 historical runs are not backfilled into accepted deliveries. Associations expire with retained worker history and respect private-project redaction. No public
 mutation control or local configuration change is introduced.
 
+The current usage receipt records accounting observation, not an immutable review-completion event.
+Cross-clock ordering is unresolved for some production receipts; these remain unknown.
+See the [GH-72 timing investigation](docs/report-verification-timing.md) and producer prerequisite before changing validation.
+
 Canonical report-only `--verify-existing` delivery uses `repository_reported_verification`
 with `delivery_kind: report_only` and separate `report_verifications`; it never invents a PR source.
 The GitHub observer requires a completed closure with a matching final authenticated lifecycle event and

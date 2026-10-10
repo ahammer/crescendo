@@ -141,6 +141,11 @@ removal of the record or label.
 GitHub source ownership accepts a closing directive or an exact standalone `Symphony issue: #N`
 line with the matching same-repository worker branch. Incidental mentions provide no ownership.
 Malformed handoff evidence retained from closure keeps acceptance unknown after marker removal.
+
+The current usage receipt records accounting observation, not an immutable review-completion event.
+Cross-clock ordering is unresolved for some production receipts; these remain unknown.
+See the [GH-72 timing investigation](../docs/report-verification-timing.md) and producer prerequisite before changing validation.
+
 Canonical report-only `--verify-existing` closures use `repository_reported_verification`, with
 `delivery_kind: report_only` and separate `report_verifications`, without a fabricated PR source.
 A matching GitHub closure event and one exact-source canonical reference must agree with bounded
