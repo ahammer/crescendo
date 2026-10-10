@@ -1563,7 +1563,14 @@ successful poll. Drain slot/helper accounting does not depend on tracker readine
 polling uses the existing bounded health wait and unsuccessful readiness follows the existing rollback.
 
 Service snapshots MUST also expose the Governor's current admission holds in `throttle`:
-`draining` is the deployment drain flag; `research_hold` is `null` or a map with the public
+`draining` covers a present dispatch drain flag, quiet-window preparation, or a quiet run finishing
+outside its active window. `drain_reason` explains that same observation: `dispatch drain flag is present`,
+`preparing for quiet acceptance`, or `waiting for a quiet acceptance run to finish`; otherwise it is
+`null`. The explicit flag takes precedence when holds overlap. Its presence does not prove a deployment
+is running; manual flags use the same hold. Quiet phase MUST be observed once per policy/snapshot and
+reused for its drain reason so a window boundary cannot make those fields disagree.
+Flag contents, owner tokens and paths MUST NOT be exposed.
+Unavailable or legacy reasons remain unknown. `research_hold` is `null` or a map with the public
 project ID and `phase` (`reserved` while global research waits for idle, `running` while it holds
 the service). Expired reservations and research with project/none exclusivity MUST NOT appear
 as global holds. Dispatch health details show the hold, including in filtered and partial views,
@@ -1720,9 +1727,11 @@ Minimum endpoints:
     before treating a window as complete. Daily totals and 14-day task averages keep their existing windows.
 
     Five-minute samples retain a credential-free Governor `admission` observation: `source: governor`,
-    `scope: service`, ISO8601 `observed_at`, shared `slots`, Governor-held `busy`, `draining`, and
+    `scope: service`, ISO8601 `observed_at`, shared `slots`, Governor-held `busy`, `draining`, `drain_reason`, and
     `research_hold` (existing public project ID and `reserved`/`running` phase, or null). Project/none
     research MUST NOT appear as a global hold; unavailable and legacy observations MUST remain null.
+    Legacy drain reasons MUST NOT be inferred or backfilled. Reasons describe the observed admission
+    predicate, not drain ownership, intended duration or historical causality.
     Service samples MUST select one whole latest observation per bucket with `observed_by` provenance,
     never sum shared capacity or join different observation times. `project_samples` preserves each
     selected project's counts and timestamps; aggregate counts have `counts_scope: selected_projects`.

@@ -18,7 +18,7 @@ defmodule SymphonyElixir.GovernorTest do
     assert Governor.snapshot().quiet_window.phase == "active"
   end
 
-  test "pending quiet work drains at turn boundaries, waits for all capacity, and releases after its window", %{service: service} do
+  test "pending quiet work drains at turn boundaries, waits for all capacity, and releases after its window", %{service: service, state_root: root} do
     service = %{service | quiet_window: %Service.QuietWindow{}}
     Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2026-10-08 08:00:00Z] end)
     on_exit(fn -> Application.delete_env(:symphony_elixir, :governor_now) end)
@@ -29,10 +29,17 @@ defmodule SymphonyElixir.GovernorTest do
     assert :ok = Governor.acquire("b", "ordinary", :issue)
     Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2026-10-08 09:30:00Z] end)
     assert Governor.draining?()
+    assert Governor.observe().drain_reason == "preparing for quiet acceptance"
     assert Governor.checkin("a", 0, 0, 1).slots == 0
-    assert {:wait, "draining for a deploy"} = Governor.acquire("b", "new", :issue)
+    assert {:wait, "preparing for quiet acceptance"} = Governor.acquire("b", "new", :issue)
+    File.mkdir_p!(root)
+    File.write!(Path.join(root, "drain"), "private-owner-token")
+    assert Governor.snapshot().drain_reason == "dispatch drain flag is present"
+    File.rm!(Path.join(root, "drain"))
+    assert Governor.observe().drain_reason == "preparing for quiet acceptance"
     Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2026-10-08 10:00:00Z] end)
     refute Governor.draining?()
+    assert Governor.snapshot().drain_reason == nil
     assert {:wait, "holding the service for quiet acceptance"} = Governor.acquire("b", "new", :issue)
     assert {:wait, _} = Governor.acquire("a", "acceptance", :issue, quiet: true)
     Governor.release("b", "ordinary")
@@ -41,11 +48,43 @@ defmodule SymphonyElixir.GovernorTest do
     assert Governor.snapshot().quiet_window.phase == "active"
     Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2026-10-08 11:00:00Z] end)
     assert Governor.draining?()
+    assert Governor.checkin("b", 0, 0).drain_reason == "waiting for a quiet acceptance run to finish"
+    assert {:wait, "waiting for a quiet acceptance run to finish"} = Governor.acquire("b", "new", :issue)
     Governor.release("a", "acceptance")
     refute Governor.draining?()
+    assert Governor.observe().drain_reason == nil
     assert :ok = Governor.acquire("b", "new", :issue)
     Governor.checkin("a", 0, 0, 0)
     assert Governor.snapshot().quiet_window == %{phase: "idle"}
+  end
+
+  test "drain reasons and quiet phases share one clock observation at a window boundary", %{service: service} do
+    service = %{service | quiet_window: %Service.QuietWindow{}}
+    Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2026-10-08 08:00:00Z] end)
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :governor_now) end)
+    start_supervised!({Governor, service})
+    Governor.checkin("a", 0, 0, 1)
+    Governor.checkin("b", 0, 0)
+
+    observations =
+      for observe <- [&Governor.snapshot/0, fn -> Governor.checkin("a", 0, 0, 1) end] do
+        key = make_ref()
+
+        Application.put_env(:symphony_elixir, :governor_now, fn ->
+          if Process.put(key, true), do: ~U[2026-10-08 10:00:00Z], else: ~U[2026-10-08 09:59:59Z]
+        end)
+
+        {observe.(), observe.()}
+      end
+
+    for {preparing, active} <- observations do
+      assert preparing.draining
+      assert preparing.drain_reason == "preparing for quiet acceptance"
+      assert preparing.quiet_window.phase == "preparing"
+      refute active.draining
+      assert active.drain_reason == nil
+      assert active.quiet_window.phase == "active"
+    end
   end
 
   test "helper history is bounded, raw exits fail visibly, and start errors do not consume capacity", %{service: service, state_root: root} do
@@ -309,9 +348,9 @@ defmodule SymphonyElixir.GovernorTest do
     File.mkdir_p!(state_root)
     File.write!(Path.join(state_root, "drain"), "")
 
-    assert {:wait, "draining for a deploy"} = Governor.acquire("a", "GH-1", :pull_request)
+    assert {:wait, "dispatch drain flag is present"} = Governor.acquire("a", "GH-1", :pull_request)
     assert Governor.draining?()
-    assert %{slots: 0, draining: true} = Governor.checkin("a", 0, 1)
+    assert %{slots: 0, draining: true, drain_reason: "dispatch drain flag is present"} = Governor.checkin("a", 0, 1)
   end
 
   test "capacity observations follow reservation, expiry, research and drain lifecycle", %{service: service, state_root: root} do

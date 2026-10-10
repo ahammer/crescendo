@@ -377,10 +377,43 @@ defmodule SymphonyElixir.ServiceWebTest do
     File.write!(drain, "")
     state = json_response(get(build_conn(), "/api/v1/state"), 200)
     assert state["throttle"]["draining"] == true
-    assert dispatch_detail(state) =~ "Deployment drain holds new runs"
-    assert {:wait, "draining for a deploy"} = Governor.acquire("alpha", "next-slot", :issue)
+    assert state["throttle"]["drain_reason"] == "dispatch drain flag is present"
+    assert dispatch_detail(state) =~ "New runs held: dispatch drain flag is present"
+    assert {:wait, "dispatch drain flag is present"} = Governor.acquire("alpha", "next-slot", :issue)
     File.rm!(drain)
-    assert json_response(get(build_conn(), "/api/v1/state"), 200)["throttle"]["draining"] == false
+    throttle = json_response(get(build_conn(), "/api/v1/state"), 200)["throttle"]
+    assert throttle["draining"] == false
+    assert throttle["drain_reason"] == nil
+  end
+
+  @tag quiet_startup: true
+  test "quiet drains retain their actual reason in API, dashboard and sampled history" do
+    for id <- ["alpha", "beta"] do
+      pid = GenServer.whereis(Project.via(id, :orchestrator))
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).issues_observed_at
+    end
+
+    assert Governor.snapshot().quiet_window.phase == "preparing"
+
+    for query <- ["?history=full", "?project=beta&history=full"] do
+      state = json_response(get(build_conn(), "/api/v1/state" <> query), 200)
+      assert state["throttle"]["drain_reason"] == "preparing for quiet acceptance"
+      assert dispatch_detail(state) =~ "New runs held: preparing for quiet acceptance"
+      assert List.last(state["usage"]["samples"])["admission"]["drain_reason"] == "preparing for quiet acceptance"
+      refute dispatch_detail(state) =~ "Deployment"
+    end
+
+    {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ "New runs held: preparing for quiet acceptance"
+    Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2025-10-08 10:00:00Z] end)
+    assert :ok = Governor.acquire("alpha", "quiet-observation", :issue, quiet: true)
+    Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2025-10-08 11:00:00Z] end)
+    state = json_response(get(build_conn(), "/api/v1/state"), 200)
+    assert state["throttle"]["drain_reason"] == "waiting for a quiet acceptance run to finish"
+    assert dispatch_detail(state) =~ "waiting for a quiet acceptance run to finish"
+    Governor.release("alpha", "quiet-observation")
+    assert json_response(get(build_conn(), "/api/v1/state"), 200)["throttle"]["drain_reason"] == nil
   end
 
   test "full history includes older work across projects with the usual privacy and filters" do
