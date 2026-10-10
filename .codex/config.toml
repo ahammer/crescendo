@@ -1,0 +1,3 @@
+[mcp_servers.crescendo]
+command = "sh"
+args = ["-c", "exec \"${CRESCENDO_INSTALL_ROOT:-$HOME/.local/lib/crescendo}/bin/crescendo\" mcp \"${CRESCENDO_CONFIG_DIR:-$HOME/.config/crescendo}/crescendo.yml\""]
