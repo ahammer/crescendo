@@ -1567,7 +1567,9 @@ Service snapshots MUST also expose the Governor's current admission holds in `th
 outside its active window. `drain_reason` explains that same observation: `dispatch drain flag is present`,
 `preparing for quiet acceptance`, or `waiting for a quiet acceptance run to finish`; otherwise it is
 `null`. The explicit flag takes precedence when holds overlap. Its presence does not prove a deployment
-is running; manual flags use the same hold. Flag contents, owner tokens and paths MUST NOT be exposed.
+is running; manual flags use the same hold. Quiet phase MUST be observed once per policy/snapshot and
+reused for its drain reason so a window boundary cannot make those fields disagree.
+Flag contents, owner tokens and paths MUST NOT be exposed.
 Unavailable or legacy reasons remain unknown. `research_hold` is `null` or a map with the public
 project ID and `phase` (`reserved` while global research waits for idle, `running` while it holds
 the service). Expired reservations and research with project/none exclusivity MUST NOT appear

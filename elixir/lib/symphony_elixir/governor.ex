@@ -137,7 +137,7 @@ defmodule SymphonyElixir.Governor do
 
   def handle_call({:acquire, project, item, class, opts}, {pid, _tag}, state) do
     state = monitor(state, project, pid)
-    drain_reason = drain_reason(state)
+    drain_reason = drain_reason(state, quiet_window(state))
 
     cond do
       drain_reason != nil ->
@@ -178,7 +178,8 @@ defmodule SymphonyElixir.Governor do
 
   def handle_call(:snapshot, _from, state) do
     now = DateTime.utc_now()
-    drain_reason = drain_reason(state)
+    quiet_window = quiet_window(state)
+    drain_reason = drain_reason(state, quiet_window)
 
     projects =
       for {id, project} <- Enum.sort(state.schedule.projects) do
@@ -198,7 +199,7 @@ defmodule SymphonyElixir.Governor do
        spend_micro: total_spend(state),
        quota: state.quota,
        pacing: Quota.pacing(state.quota, state.quota_epoch, now),
-       quiet_window: quiet_window(state),
+       quiet_window: quiet_window,
        throttle: throttle(state, now),
        helpers: %{slots: state.service.helpers.slots, busy: helper_busy(state), model: state.service.helpers.model, effort: state.service.helpers.effort}
      }, state}
@@ -482,7 +483,8 @@ defmodule SymphonyElixir.Governor do
   defp helper_outcome(_helper, reason), do: {"failed", Helpers.error_text(reason)}
 
   defp policy(state, project, now) do
-    drain_reason = drain_reason(state)
+    quiet_window = quiet_window(state)
+    drain_reason = drain_reason(state, quiet_window)
     draining = drain_reason != nil
     free = Scheduling.free_for(state.schedule, project, System.monotonic_time(:millisecond))
 
@@ -491,7 +493,7 @@ defmodule SymphonyElixir.Governor do
     |> Map.merge(%{
       slots: if(draining or warming_up?(state), do: 0, else: free),
       research_exclusive: state.schedule.projects[project].exclusive,
-      quiet_window: quiet_window(state),
+      quiet_window: quiet_window,
       draining: draining,
       drain_reason: drain_reason
     })
@@ -551,11 +553,9 @@ defmodule SymphonyElixir.Governor do
     :ok
   end
 
-  defp draining?(state), do: drain_reason(state) != nil
+  defp draining?(state), do: drain_reason(state, quiet_window(state)) != nil
 
-  defp drain_reason(state) do
-    quiet = quiet_window(state)
-
+  defp drain_reason(state, quiet) do
     cond do
       File.exists?(Path.join(Service.state_root(state.service), "drain")) -> "dispatch drain flag is present"
       quiet.phase == "preparing" -> "preparing for quiet acceptance"

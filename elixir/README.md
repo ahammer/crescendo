@@ -586,6 +586,7 @@ The observability UI now runs on a minimal Phoenix stack:
   finishing outside its active window. `throttle.drain_reason` reports `dispatch drain flag is present`,
   `preparing for quiet acceptance`, or `waiting for a quiet acceptance run to finish`; otherwise
   it is `null`. Explicit/manual flags take precedence and do not establish a running deployment.
+  Policy and snapshot reasons reuse their captured quiet phase so fields agree at window boundaries.
   Flag contents, tokens and paths stay private; missing/legacy reasons remain unknown.
   `throttle.research_hold` is
   `null` or `{project, phase}` for a current global research reservation (`reserved`) or running

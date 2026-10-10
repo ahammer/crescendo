@@ -225,8 +225,10 @@ policy stays unchanged; intentional holds are informational, and unknown counts 
 outside its active window. `throttle.drain_reason` reports `dispatch drain flag is present`,
 `preparing for quiet acceptance`, or `waiting for a quiet acceptance run to finish`; otherwise
 it is `null`. A flag takes precedence over quiet holds. Manual flags have the same effect;
-the message does not establish that a deployment is running. Owner tokens, flag contents and
-paths stay private. Missing/legacy reasons remain unknown. These read-only current signals
+the message does not establish that a deployment is running. Each policy/snapshot captures the
+quiet phase once for both the reason and returned phase, including at window boundaries.
+Owner tokens, flag contents and paths stay private. Missing/legacy reasons remain unknown.
+These read-only current signals
 do not establish hold ownership, intended duration or the cause of historical unused capacity.
 
 ## Commands

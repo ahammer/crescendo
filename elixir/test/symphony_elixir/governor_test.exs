@@ -58,6 +58,35 @@ defmodule SymphonyElixir.GovernorTest do
     assert Governor.snapshot().quiet_window == %{phase: "idle"}
   end
 
+  test "drain reasons and quiet phases share one clock observation at a window boundary", %{service: service} do
+    service = %{service | quiet_window: %Service.QuietWindow{}}
+    Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2026-10-08 08:00:00Z] end)
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :governor_now) end)
+    start_supervised!({Governor, service})
+    Governor.checkin("a", 0, 0, 1)
+    Governor.checkin("b", 0, 0)
+
+    observations =
+      for observe <- [&Governor.snapshot/0, fn -> Governor.checkin("a", 0, 0, 1) end] do
+        key = make_ref()
+
+        Application.put_env(:symphony_elixir, :governor_now, fn ->
+          if Process.put(key, true), do: ~U[2026-10-08 10:00:00Z], else: ~U[2026-10-08 09:59:59Z]
+        end)
+
+        {observe.(), observe.()}
+      end
+
+    for {preparing, active} <- observations do
+      assert preparing.draining
+      assert preparing.drain_reason == "preparing for quiet acceptance"
+      assert preparing.quiet_window.phase == "preparing"
+      refute active.draining
+      assert active.drain_reason == nil
+      assert active.quiet_window.phase == "active"
+    end
+  end
+
   test "helper history is bounded, raw exits fail visibly, and start errors do not consume capacity", %{service: service, state_root: root} do
     {service, context} = helper_fixture(service, root, 2)
     start_supervised!({Governor, service})
