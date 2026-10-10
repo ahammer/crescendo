@@ -995,6 +995,147 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     assert File.read!(Path.join(fixture.workspace, "WORKPAD.md")) == "progress"
   end
 
+  test "prepared quiet acceptance yields real workers, survives restart and revalidates changed source" do
+    fixture = native_fixture()
+    issue = %{fixture.issue | state: "In Progress", dispatchable: true, description: "Retain this PR"}
+
+    File.write!(Path.join(fixture.root, "review.md"), "Review")
+    File.write!(Path.join(fixture.root, "research.md"), "Research")
+
+    config = [
+      tracker_kind: "memory",
+      workspace_root: Path.join(fixture.root, "workspaces"),
+      codex_command: "python3 #{Path.join(fixture.root, "server.py")}",
+      max_turns: 1,
+      poll_interval_ms: 3_600_000,
+      autopilot: %{
+        "enabled" => true,
+        "max_item_attempts" => 3,
+        "max_open_issues" => 1,
+        "channels" => %{"fixture" => "Unused fixture research"},
+        "prompts" => %{"pull_request" => Path.join(fixture.root, "review.md"), "research" => Path.join(fixture.root, "research.md")}
+      }
+    ]
+
+    write_workflow_file!(Workflow.workflow_file_path(), config)
+    start_supervised!({WorkflowStore, name: Project.via("quiet-test", :workflow_store), project: "quiet-test", path: Workflow.workflow_file_path()})
+
+    {:ok, service} =
+      Service.parse(
+        %{"paths" => %{"state" => "service-state"}, "pool" => %{"slots" => 1}, "quiet_window" => %{}, "projects" => %{"quiet-test" => %{}}},
+        Path.join(fixture.root, "service.yml")
+      )
+
+    previous_service = Service.current()
+    Service.put_current(service)
+    Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2026-10-10 22:00:00Z] end)
+
+    on_exit(fn ->
+      :persistent_term.put({Service, :current}, previous_service)
+      Application.delete_env(:symphony_elixir, :governor_now)
+      Application.delete_env(:symphony_elixir, :memory_tracker_writes)
+    end)
+
+    start_supervised!({Governor, service})
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    Application.put_env(:symphony_elixir, :memory_tracker_writes, [])
+    path = Path.join(fixture.root, "quiet.dets")
+    {:ok, table} = Operations.open(path, :quiet_worker_test)
+    Operations.save_autopilot_state(table, %{item_attempts: %{issue.id => 2}, tasks: %{"fixture" => %{finished_at: DateTime.add(DateTime.utc_now(), 1, :day), attempts: 0, last: :delivered}}})
+    Operations.close(table)
+    task_supervisor = start_supervised!(Task.Supervisor)
+    options = [task_supervisor: task_supervisor, name: Project.via("quiet-test", :orchestrator), project: "quiet-test", operations_path: path, operations_table: :quiet_worker_test]
+    change_fixture(fixture, %{"quiet_defer" => true})
+    pid = start_supervised!({Orchestrator, options})
+    eventually(fn -> File.exists?(Path.join(fixture.root, "quiet-result.json")) end)
+    assert %{"success" => true} = Jason.decode!(File.read!(Path.join(fixture.root, "quiet-result.json")))
+    eventually(fn -> :sys.get_state(pid).running == %{} end)
+    assert %{"success" => false} = Jason.decode!(File.read!(Path.join(fixture.root, "quiet-duplicate.json")))
+    state = :sys.get_state(pid)
+    prepared = state.quiet_continuations[issue.id]
+    assert {:error, :stale_worker} = GenServer.call(pid, {:defer_quiet, issue.id, prepared.run_id, prepared})
+    refute GenServer.call(pid, {:quiet_deferred?, issue.id, prepared.run_id})
+    assert prepared.item_attempt == 3 and prepared.final_attempt
+    assert prepared.unmet_acceptance == ["p99 21.00 ms exceeds unchanged 20 ms gate", "quiet digest/exact checks missing"]
+    assert prepared.pull_request == "https://github.test/pull/1257"
+    assert state.autopilot.item_attempts[issue.id] == 2
+    refute MapSet.member?(state.completed, issue.id)
+    assert state.retry_attempts == %{}
+    assert Governor.snapshot().busy == 0
+    assert [%{item_attempt: 3}] = Orchestrator.snapshot(pid, 1_000).deferred
+    activity = Operations.snapshot(state.operations).activity
+    assert Enum.any?(activity, &(&1.kind == "deferred"))
+    refute Enum.any?(activity, &(&1.kind in ["completed", "attempt_failed"]))
+    send(pid, :run_poll_cycle)
+    assert :sys.get_state(pid).running == %{}
+
+    # Useful independent work gets the released slot during daytime.
+    independent = %{issue | id: "2", identifier: "GH-2", description: "Independent work"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue, independent])
+    change_fixture(fixture, %{"wait_turn" => true})
+    send(pid, :run_poll_cycle)
+    eventually(fn -> :sys.get_state(pid).running["2"] != nil end)
+    assert :sys.get_state(pid).running["1"] == nil
+    File.write!(Path.join(fixture.root, "finish-turn"), "")
+    eventually(fn -> :sys.get_state(pid).running == %{} end)
+    assert Enum.any?(Operations.snapshot(state.operations).activity, &(&1.kind == "completed" and &1.issue_identifier == "GH-2"))
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    File.rm!(Path.join(fixture.root, "finish-turn"))
+    File.rm!(Path.join(fixture.root, "turn-started"))
+
+    stop_supervised!(Orchestrator)
+    stop_supervised!(Governor)
+    File.write!(Path.join(fixture.workspace, "AGENTS.md"), "changed source instructions")
+    git_commit(fixture.workspace)
+    start_supervised!({Governor, service})
+    pid = start_supervised!({Orchestrator, options})
+    eventually(fn -> :sys.get_state(pid).issues_observed_at != nil end)
+    assert :sys.get_state(pid).quiet_continuations[issue.id] == prepared
+    assert :sys.get_state(pid).running == %{}
+
+    # Quota, deployment drain and dependencies still prevent dispatch in the eligible hour.
+    Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2026-10-11 10:00:00Z] end)
+    send(Governor, :helper_heartbeat)
+    assert Governor.quiet_schedule().phase == "active"
+    drain = Path.join(Service.state_root(service), "drain")
+    File.mkdir_p!(Path.dirname(drain))
+    File.write!(drain, "test")
+    send(pid, :run_poll_cycle)
+    assert :sys.get_state(pid).running == %{}
+    File.rm!(drain)
+    dependent = %{issue | dispatchable: false, blocked_by: [%{id: "dependency", identifier: "GH-9", state: "In Progress"}]}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [dependent])
+    send(pid, :run_poll_cycle)
+    assert :sys.get_state(pid).running == %{}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    send(pid, :run_poll_cycle)
+    eventually(fn -> File.exists?(Path.join(fixture.root, "turn-started")) end)
+    resumed = :sys.get_state(pid).running[issue.id]
+    assert resumed.item_attempt == 3 and resumed.final_attempt
+    assert Governor.snapshot().busy == 1
+    assert {:wait, _} = Governor.acquire("quiet-test", "independent", :issue)
+    prompt = List.last(Enum.filter(requests(fixture), &(&1["method"] == "turn/start")))["params"]["input"] |> inspect()
+    assert prompt =~ "evidence_applicable"
+    assert prompt =~ "false"
+    assert prompt =~ "1257"
+    assert prompt =~ "21.00"
+    assert prompt =~ "No second quiet deferral"
+    File.write!(Path.join(fixture.root, "finish-turn"), "")
+    eventually(fn -> :sys.get_state(pid).running == %{} end)
+    assert :sys.get_state(pid).autopilot.item_attempts[issue.id] == 2
+
+    # The real failed product gate still consumes the final attempt and retires the original owner.
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | labels: ["symphony:blocked"]}])
+    send(pid, :run_poll_cycle)
+    assert :sys.get_state(pid).autopilot.item_attempts[issue.id] == 3
+    assert Enum.count(Application.get_env(:symphony_elixir, :memory_tracker_writes), &match?({:retire, _, _}, &1)) == 1
+  end
+
+  defp git_commit(workspace) do
+    {_, 0} = System.cmd("git", ["add", "."], cd: workspace)
+    {_, 0} = System.cmd("git", ["-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-qm", "changed"], cd: workspace)
+  end
+
   defp deployment_observation(pid) do
     running = map_size(:sys.get_state(pid).running)
 
@@ -1173,6 +1314,18 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
                     for item in (command, change):
                         emit({'method':notification,'params':{'threadId':thread,'turnId':turn,'item':item}})
                 emit({'method':'turn/diff/updated','params':{'threadId':thread,'turnId':turn,'diff':text}})
+            if cfg.get('quiet_defer') and not (root/'quiet-result.json').exists():
+                import subprocess
+                sha = subprocess.check_output(['git','rev-parse','HEAD'], cwd=workspace, text=True).strip()
+                arguments = {'reason':'Prepared delivery needs quiet digest/exact checks', 'source_sha':sha,
+                    'pull_request':'https://github.test/pull/1257', 'evidence':['AGENTS.md'],
+                    'unmet_acceptance':['p99 21.00 ms exceeds unchanged 20 ms gate','quiet digest/exact checks missing']}
+                emit({'id':'quiet','method':'item/tool/call','params':{'threadId':thread,'turnId':turn,'callId':'quiet','tool':'defer_quiet_acceptance','arguments':arguments}})
+                reply = json.loads(sys.stdin.readline())
+                (root/'quiet-result.json').write_text(json.dumps(reply['result']))
+                emit({'id':'quiet-duplicate','method':'item/tool/call','params':{'threadId':thread,'turnId':turn,'callId':'quiet-duplicate','tool':'defer_quiet_acceptance','arguments':arguments}})
+                duplicate = json.loads(sys.stdin.readline())
+                (root/'quiet-duplicate.json').write_text(json.dumps(duplicate['result']))
             if cfg.get('tool_before_response'):
                 arguments = {'original':'x'*20000}
                 emit({'id':'call','method':'item/tool/call','params':{'threadId':thread,'turnId':turn,'callId':'call','tool':'fixture','arguments':arguments}})

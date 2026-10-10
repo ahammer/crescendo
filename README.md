@@ -20,6 +20,8 @@ implements its [specification](SPEC.md). On top of the Symphony reference implem
 - **A read-only dashboard** across projects, with a filter per project and a
   [bounded history API](docs/crescendo.md#dashboard-and-api) for retrospectives.
   Dispatch details show global research reservations, helper capacity, quota pacing, quiet acceptance windows and deployment drains.
+  Prepared issue deliveries can yield once per logical attempt for their configured quiet window,
+  retaining the same issue, PR, source/evidence identity and unmet acceptance across restart.
 - **Thread usage accounting** that reconciles late terminal events and survives worker restarts,
   with native billing coverage and conservative, opt-in issue-thread resumption.
   Retained issue delivery evidence links explicit worker sources, canonical report verification and tracker dispositions.

@@ -277,6 +277,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              "service" => Jason.decode!(Jason.encode!(SymphonyElixir.SourceRevision.metadata())),
              "counts" => %{"running" => 1, "retrying" => 1, "blocked" => 1, "ready" => 0, "waiting" => 0, "open_prs" => 0},
              "helpers" => [],
+             "deferred" => [],
              "pacing" => nil,
              "running" => [
                %{

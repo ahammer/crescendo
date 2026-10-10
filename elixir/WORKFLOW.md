@@ -347,3 +347,13 @@ deliver an accepted reduced slice, explicitly decline the unmet remainder, or re
 bounded policy. A fresh successor requires grooming authorization and verified accepted partial
 PR delivery or a newly completed native prerequisite under the `crescendo:handoff` contract in
 [README.md](README.md#canonical-final-attempt-handoffs-crescendo-extension).
+
+## Prepared quiet acceptance
+
+If the service offers `defer_quiet_acceptance`, a prepared local issue worker may yield once per
+logical attempt until the configured quiet window. Commit source and evidence, keep one existing
+draft PR, and supply its URL, exact HEAD, committed evidence paths, a durable reason and every unmet
+acceptance gate (including failed product checks). After success update the workpad and end the turn
+without a blocked label. No worker waits or polls the window. Resume the same issue/PR/attempt,
+revalidate evidence against current source/task/environment and finish acceptance. A failed gate
+remains failed; final-attempt reduced-scope/retirement rules still apply.

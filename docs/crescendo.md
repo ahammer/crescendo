@@ -45,6 +45,23 @@ fresh complete source/dependency/PR inputs, findings, policy and protected execu
 Unknown inputs defer. Unchanged inputs advance a separate cursor, preserve completion/audit
 coverage and force a recheck within 24 hours.
 
+Prepared local issue workers can call `defer_quiet_acceptance` once per canonical logical attempt
+when this configured window is unavailable. Commit preparation and evidence first, retain one draft
+PR, and supply its URL, exact source commit, committed evidence paths, a durable reason and every
+unmet acceptance gate. Failed p99/product gates remain failures. A successful request is persisted
+before acknowledgment; update the workpad and end the turn without a blocked label. The worker
+yields at the completed turn, freeing its slot for independent work without spending another attempt.
+
+The same issue/attempt, final-attempt disposition, PR and evidence digests survive restart.
+Normal tracker polling wakes the continuation only in the current configured quiet window, with
+dependencies, quota/throttle, deployment drain and quiet exclusivity intact. A fresh resume prompt
+revalidates the source/evidence identity and requires task/environment applicability checks;
+changed, dirty or missing source/evidence is marked inapplicable. Acceptance remains incomplete
+until the gates pass; final attempts still deliver reduced scope or retire under the existing rules.
+The read-only `deferred` state contains retained reason, source/evidence, PR and wake identities,
+and `upcoming.waiting` displays the reason. Private-project details are redacted. This adds no local
+configuration and does not change the existing quiet-label policy for whole runs.
+
 The state API exposes `helpers`, `throttle.helpers`, `throttle.quiet_window`, `pacing`, and
 `usage.planning` (retained skip, promotion and startup events). Managed helper tokens have
 independent native run/thread attribution. `usage.external` keeps unverified reviewer/planner

@@ -172,6 +172,50 @@ defmodule SymphonyElixir.ServiceWebTest do
     end
   end
 
+  @tag quiet_startup: true
+  test "deferred unlabeled demand keeps throttle, route and dependency gates", %{quiet_issue: issue} do
+    issue = %{issue | labels: []}
+    pid = GenServer.whereis(Project.via("alpha", :orchestrator))
+    initial = :sys.get_state(pid)
+
+    prepared = %{
+      issue_id: issue.id,
+      item_attempt: 1,
+      run_id: "prepared",
+      retry_attempt: 0,
+      reason: "quiet digest required",
+      source_sha: "source",
+      pull_request: "https://github.test/pull/7",
+      evidence: [],
+      unmet_acceptance: ["p99 failed"],
+      final_attempt: false
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    for {policy, item, expected} <- [
+          {%{initial.throttle | paused: "quota low"}, issue, "idle"},
+          {%{initial.throttle | over_budget: "daily budget", allow: []}, issue, "idle"},
+          {%{initial.throttle | avoid: %{"gpt-6.1-sol" => "backed off"}}, issue, "idle"},
+          {initial.throttle, %{issue | dispatchable: false, blocked_by: [%{identifier: "GH-9"}]}, "idle"},
+          {%{initial.throttle | over_budget: "daily budget", allow: ["continuation"]}, issue, "preparing"}
+        ] do
+      Governor.checkin("alpha", 0, 0, 0)
+      Governor.checkin("beta", 0, 0, 0)
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [item])
+      :sys.replace_state(pid, &%{&1 | throttle: policy, quiet_continuations: %{issue.id => prepared}})
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).running == %{}
+      assert Governor.snapshot().quiet_window.phase == expected
+    end
+
+    state = json_response(get(build_conn(), "/api/v1/state?project=alpha"), 200)
+    assert [%{"reason" => "quiet digest required", "unmet_acceptance" => ["p99 failed"]}] = state["deferred"]
+    assert Enum.any?(state["upcoming"]["waiting"], &(&1["reason"] =~ "quiet digest required"))
+    assert get(build_conn(), "/api/v1/state").status == 200
+    assert post(build_conn(), "/api/v1/state", %{}).status == 405
+  end
+
   test "the state API merges every project and filters to one" do
     state = json_response(get(build_conn(), "/api/v1/state"), 200)
 

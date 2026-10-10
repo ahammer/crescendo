@@ -40,6 +40,18 @@ defmodule SymphonyElixirWeb.RedactionTest do
       running: [running, %{running | project: "metalrain", issue_identifier: "GH-2"}],
       retrying: [%{project: "nubu3d", issue_identifier: "GH-3", error: "stack trace", workspace_path: "/w", startup: %{context: "secret"}}],
       blocked: [blocked],
+      deferred: [
+        %{
+          project: "nubu3d",
+          identifier: "GH-3",
+          reason: "secret",
+          evidence: ["private.md"],
+          source_sha: "private",
+          pull_request: "private",
+          unmet_acceptance: ["private gate"],
+          wake_condition: "configured_quiet_window_active"
+        }
+      ],
       upcoming: %{
         ready: [%{project: "nubu3d", issue_identifier: "GH-5", title: "Secret"}],
         waiting: [%{project: "metalrain", issue_identifier: "GH-6", title: "Public"}]
@@ -72,6 +84,8 @@ defmodule SymphonyElixirWeb.RedactionTest do
     assert public.title == "Secret feature"
 
     assert [%{error: nil, workspace_path: nil}] = scrubbed.retrying
+    assert [%{identifier: "GH-3", wake_condition: "configured_quiet_window_active"} = deferred] = scrubbed.deferred
+    refute Map.has_key?(deferred, :reason) or Map.has_key?(deferred, :evidence) or Map.has_key?(deferred, :source_sha)
     assert [%{error: nil, session_id: nil, last_message: nil} = blocked] = scrubbed.blocked
     refute Map.has_key?(blocked, :startup) or Map.has_key?(blocked, :run_id) or Map.has_key?(blocked, :worker_pid)
     refute Map.has_key?(hd(scrubbed.retrying), :startup)

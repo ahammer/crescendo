@@ -45,6 +45,10 @@ defmodule SymphonyElixir.Governor do
   @spec running?() :: boolean()
   def running?, do: is_pid(Process.whereis(__MODULE__))
 
+  @doc "The configured quiet schedule, even before work reports quiet demand."
+  @spec quiet_schedule() :: map()
+  def quiet_schedule, do: GenServer.call(__MODULE__, :quiet_schedule)
+
   @doc "Reports a project's spend today and waiting work; returns its dispatch policy."
   @spec checkin(Project.id(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: policy()
   def checkin(project, spend_micro, demand, quiet_demand \\ 0), do: GenServer.call(__MODULE__, {:checkin, project, spend_micro, demand, quiet_demand})
@@ -175,6 +179,12 @@ defmodule SymphonyElixir.Governor do
   end
 
   def handle_call(:draining, _from, state), do: {:reply, draining?(state), state}
+
+  def handle_call(:quiet_schedule, _from, state) do
+    state = refresh_quiet_schedule(state)
+    schedule = if state.service.quiet_window, do: Map.put(state.quiet_schedule, :phase, quiet_phase(state)), else: state.quiet_schedule
+    {:reply, schedule, state}
+  end
 
   def handle_call(:snapshot, _from, state) do
     now = DateTime.utc_now()

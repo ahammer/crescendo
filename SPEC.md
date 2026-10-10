@@ -1577,6 +1577,28 @@ as global holds. Dispatch health details show the hold, including in filtered an
 without inferring unknown counts or treating intentional admission policy as a health failure.
 These are current read-only signals, not historical attribution or dispatch controls.
 
+Crescendo local issue workers MAY yield a prepared delivery with `defer_quiet_acceptance` when
+the existing service quiet window is configured and currently unavailable. This is bounded to
+one deferral per canonical logical attempt. The worker MUST commit preparation and evidence,
+identify its exact source commit and existing PR, provide a durable reason and retain every unmet
+acceptance criterion (including failed product gates). Operations MUST synchronously persist the
+canonical issue/attempt, final-attempt flag, PR, source, committed evidence paths and SHA-256 digests,
+and the wake condition before acknowledging the request. Missing persistence/evidence, stale workers,
+duplicate deferrals and unknown/active windows MUST fail closed.
+
+After acknowledgment the worker yields at its next completed turn; its run ends as `deferred`,
+without acceptance, logical failure, workspace removal or a new-budget issue/PR. The service releases
+its slot and continues independent work. Across worker exit and restart, ordinary tracker polling
+admits the same issue only in the currently configured active quiet window, under the existing
+canonical ownership, dependencies, quota/throttle, deployment drain and service quiet exclusivity.
+The original logical attempt and final-attempt disposition remain intact. Resume MUST use a fresh
+prompt and revalidate source and evidence identity before reuse; changed/dirty/missing source or
+changed/missing evidence is explicitly inapplicable. Workers MUST additionally check the current
+task/environment and repair product failures; deferral never passes a failed performance gate.
+Existing reduced-scope and retirement rules still govern unsuccessful acceptance. Read-only state
+exposes retained continuation identities in `deferred` and the scheduling reason in the waiting queue,
+with private-project redaction. No worker polls or sleeps on an unchanged unavailable window.
+
 Crescendo routine deployments MUST bound a busy drain (default five minutes) and leave a dispatch
 pause (default thirty minutes) before another busy drain, including superseding candidates. An
 idle service MAY bypass the pause but MUST recheck after acquiring the hold. Retry deadlines and
