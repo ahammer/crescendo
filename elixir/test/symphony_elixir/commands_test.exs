@@ -210,6 +210,22 @@ defmodule SymphonyElixir.CommandsTest do
     assert {:error, "cannot read " <> _} = Commands.run(["drain", "on", Path.join(root, "absent.yml")], &no_gh/1)
   end
 
+  test "manual drain commands journal their lifecycle without changing a managed hold", %{root: root, service: service} do
+    File.write!(service, "paths: {state: state}\nprojects: {a: {}}")
+    managed = Path.join([root, "state", "deploy-drain.json"])
+    File.mkdir_p!(Path.dirname(managed))
+    File.write!(managed, "private-managed-transaction")
+    assert capture_io(fn -> assert :ok = Commands.run(["drain", "on", service], &no_gh/1) end) =~ "Draining"
+    flag = managed |> Path.dirname() |> Path.join("drain") |> File.read!() |> Jason.decode!()
+    assert flag["kind"] == "manual"
+    assert capture_io(fn -> assert :ok = Commands.run(["drain", "off", service], &no_gh/1) end) =~ "Drain off"
+    assert File.read!(managed) == "private-managed-transaction"
+    journal = managed |> Path.dirname() |> Path.join("deploys.jsonl") |> File.read!()
+    assert journal =~ "manual_drain_started"
+    assert journal =~ "manual_drain_finished"
+    refute journal =~ "private-managed"
+  end
+
   test "drain off reports when the drain flag cannot be removed", %{root: root, service: service} do
     File.write!(service, "paths: {state: state}\nprojects: {a: {}}")
     drain = Path.join([root, "state", "drain"])

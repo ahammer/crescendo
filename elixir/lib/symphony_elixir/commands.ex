@@ -362,7 +362,9 @@ defmodule SymphonyElixir.Commands do
 
   defp change_drain("on", file) do
     File.mkdir_p!(Path.dirname(file))
-    File.write!(file, DateTime.utc_now() |> DateTime.to_iso8601())
+    started = DateTime.utc_now() |> DateTime.to_iso8601()
+    File.write!(file, Jason.encode!(%{kind: "manual", started_at: started}))
+    record_manual(file, "manual_drain_started")
     IO.puts("Draining: no new runs start until `crescendo drain off`.")
     :ok
   end
@@ -370,11 +372,17 @@ defmodule SymphonyElixir.Commands do
   defp change_drain("off", file) do
     case File.rm(file) do
       :ok ->
-        IO.puts("Drain off: dispatch resumes.")
+        record_manual(file, "manual_drain_finished")
+        IO.puts("Drain off: manual hold removed; managed and quiet holds remain independent.")
         :ok
 
       {:error, reason} ->
         {:error, "could not remove drain flag #{file}: #{:file.format_error(reason)}"}
     end
+  end
+
+  defp record_manual(file, outcome) do
+    event = %{at: DateTime.utc_now() |> DateTime.to_iso8601(), outcome: outcome, owner_kind: "manual"}
+    File.write(Path.join(Path.dirname(file), "deploys.jsonl"), Jason.encode!(event) <> "\n", [:append])
   end
 end

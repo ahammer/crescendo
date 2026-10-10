@@ -1,10 +1,105 @@
 #!/usr/bin/env python3
 """Deployment validation, bounded drain policy and journal (no service mutations)."""
 import json
+import fcntl
+import os
+import re
+import math
 import sys
 import time
 import urllib.request
+import uuid
 from pathlib import Path
+from contextlib import contextmanager
+
+
+@contextmanager
+def owner_lock(root, create=True):
+    """The shell and its swap children retain this lock until they exit."""
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+    with (root / "deploy-drain.lock").open("a" if create else "r+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+        else:
+            yield True
+
+
+def managed(root):
+    try:
+        value = json.loads((root / "deploy-drain.json").read_text())
+    except FileNotFoundError:
+        return None
+    if (not isinstance(value, dict) or value.get("phase") not in ("waiting", "swapping")
+            or not isinstance(value.get("token"), str)
+            or not isinstance(value.get("operation_id"), str)
+            or not isinstance(value.get("release"), str)
+            or not isinstance(value.get("started_at"), str)
+            or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value["started_at"])
+            or type(value.get("started_epoch")) not in (int, float)
+            or not math.isfinite(value["started_epoch"]) or value["started_epoch"] < 0
+            or type(value.get("pause_seconds")) not in (int, float)
+            or not math.isfinite(value["pause_seconds"]) or value["pause_seconds"] <= 0):
+        raise ValueError("invalid managed drain")
+    return value
+
+
+def save_managed(root, value):
+    temporary = root / "deploy-drain.next"
+    with temporary.open("w") as output:
+        temporary.chmod(0o600)
+        json.dump(value, output)
+        output.flush()
+        os.fsync(output.fileno())
+    temporary.replace(root / "deploy-drain.json")
+
+
+def public_owner(value, status):
+    release = value["release"]
+    return dict(kind="managed", phase=value["phase"], owner_status=status,
+                started_at=value["started_at"],
+                release=release if re.fullmatch(r"[0-9a-f]{40,64}", release) else None)
+
+
+def observe(root, reconcile=False):
+    # Reconciliation and a newer owner's acquisition use the same kernel lock.
+    with owner_lock(root, create=False) as acquired:
+        value = managed(root)
+        if value is None:
+            return None
+        if not acquired:
+            return public_owner(value, "live")
+        if value["phase"] == "swapping":
+            return public_owner(value, "recovery_required")
+        if not reconcile:
+            return public_owner(value, "abandoned")
+        finish(root, value["release"], value["token"], "abandoned")
+        return None
+
+
+def swap(root, target, token):
+    value = managed(root)
+    if value is None or value["token"] != token or value["release"] != target:
+        raise ValueError("managed drain ownership changed")
+    value["phase"] = "swapping"
+    # Publish the unsafe phase before the first configuration mutation.
+    save_managed(root, value)
+    record(root, "swap_started", target, owner_kind="managed", operation_id=value["operation_id"], started_at=value["started_at"])
+
+
+def recover(root):
+    """Called only by the deploy shell while it owns the kernel lock."""
+    value = managed(root)
+    if value is None:
+        return None
+    if value["phase"] == "waiting":
+        finish(root, value["release"], value["token"], "abandoned")
+        return None
+    if not re.fullmatch(r"[0-9a-f]{40,64}", value["release"]):
+        raise ValueError("invalid recovery release")
+    return value["release"]
 
 
 def count(value):
@@ -76,11 +171,15 @@ def record(root, outcome, target, **fields):
     event = dict(at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                  outcome=outcome, release=target, **fields)
     with (root / "deploys.jsonl").open("ab+") as journal:
+        fcntl.flock(journal, fcntl.LOCK_EX)
+        journal.seek(0, 2)
         if journal.tell():
             journal.seek(-1, 2)
             if journal.read(1) != b"\n":
                 journal.write(b"\n")  # Separate an interrupted append from the next event.
         journal.write((json.dumps(event) + "\n").encode())
+        journal.flush()
+        os.fsync(journal.fileno())
 
 
 def retry_until(root):
@@ -104,20 +203,21 @@ def drain(root, target, observe, limit, pause, token, force=False,
     if not force and running != 0 and paused:
         return 3  # Busy or unknown: leave dispatch open throughout the retry pause.
     root.mkdir(parents=True, exist_ok=True)
-    try:
-        with (root / "drain").open("x") as flag:
-            flag.write(token)
-    except FileExistsError as error:
-        raise ValueError("drain already held") from error
+    if (root / "drain").exists() or managed(root) is not None:
+        raise ValueError("drain already held")
     started = clock()
-    record(root, "drain_started", target, token=token, started_epoch=wall(),
-           pause_seconds=pause, retry_until=wall() + limit + pause)
+    owner = dict(token=token, operation_id=str(uuid.uuid4()), release=target, phase="waiting", started_epoch=wall(),
+                 started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(wall())),
+                 pause_seconds=pause, retry_until=wall() + limit + pause)
+    save_managed(root, owner)
+    record(root, "drain_started", target, owner_kind="managed", operation_id=owner["operation_id"], started_at=owner["started_at"],
+           started_epoch=owner["started_epoch"], pause_seconds=pause, retry_until=owner["retry_until"])
     state, running = snapshot()  # Recheck after holding dispatch; the preflight can race a new worker.
     if not force and running != 0 and paused:
         return 3
     while True:
         now = clock()
-        fields = dict(token=token, elapsed_seconds=now - started, observed_epoch=wall(),
+        fields = dict(owner_kind="managed", operation_id=owner["operation_id"], started_at=owner["started_at"], elapsed_seconds=now - started, observed_epoch=wall(),
                       running=running)
         if state is not None:
             throttle = state["throttle"]
@@ -134,36 +234,57 @@ def drain(root, target, observe, limit, pause, token, force=False,
 
 
 def finish(root, target, token, outcome, wall=time.time):
-    flag = root / "drain"
-    if not flag.exists() or flag.read_text() != token:
+    owner = managed(root)
+    if owner is None or owner["token"] != token or owner["release"] != target:
         return
-    try:
-        history = [event for event in events(root) if event.get("token") == token]
-        start = next((event for event in reversed(history) if event["outcome"] == "drain_started"), None)
-        if start is None:
-            return  # Failed journal append: still release our hold.
-        sample = next((event for event in reversed(history) if event["outcome"] == "drain_sample"), {})
-        idle_seconds = 0
-        if sample.get("running") == 0:
-            idle_seconds += max(0, wall() - sample["observed_epoch"])
-        record(root, "drain_finished", target, token=token, result=outcome, idle_seconds=idle_seconds,
-               elapsed_seconds=max(0, wall() - start["started_epoch"]),
-               retry_until=wall() + start["pause_seconds"])
-    finally:
-        if flag.exists() and flag.read_text() == token:
-            flag.unlink()
+    if owner["phase"] == "swapping" and outcome not in ("deployed", "rolled_back", "recovered"):
+        record(root, "swap_interrupted", target, owner_kind="managed", operation_id=owner["operation_id"], result=outcome,
+               started_at=owner["started_at"])
+        return  # A successful restart/rollback must precede releasing an interrupted swap.
+    history = [event for event in events(root) if event.get("release") == target
+               and event.get("operation_id") == owner["operation_id"]]
+    sample = next((event for event in reversed(history) if event["outcome"] == "drain_sample"), {})
+    idle_seconds = 0
+    if sample.get("running") == 0:
+        idle_seconds += max(0, wall() - sample["observed_epoch"])
+    record(root, "drain_finished", target, owner_kind="managed", operation_id=owner["operation_id"], started_at=owner["started_at"],
+           result=outcome, idle_seconds=idle_seconds,
+           elapsed_seconds=max(0, wall() - owner["started_epoch"]),
+           retry_until=wall() + owner["pause_seconds"])
+    current = managed(root)
+    if current is not None and current["token"] == token:
+        (root / "deploy-drain.json").unlink()
 
 
 def main(args):
     mode = args[0]
+    if mode in ("observe", "reconcile"):
+        print(json.dumps(observe(Path(args[1]), reconcile=mode == "reconcile")))
+        return 0
+    if mode == "recover":
+        target = recover(Path(args[1]))
+        if target is not None:
+            print(target)
+        return 0
+    if mode == "recovered":
+        root, target = args[1:]
+        owner = managed(Path(root))
+        if owner is None or owner["release"] != target:
+            raise ValueError("managed drain ownership changed")
+        finish(Path(root), target, owner["token"], "recovered")
+        return 0
+    if mode == "swap":
+        root, target, token = args[1:]
+        swap(Path(root), target, token)
+        return 0
     if mode == "drain":
         root, target, url, limit, pause, token, force = args[1:]
 
-        def observe():
+        def fetch_state():
             with urllib.request.urlopen(url, timeout=10) as response:
                 return json.load(response)
 
-        return drain(Path(root), target, observe, int(limit), int(pause), token, force == "0")
+        return drain(Path(root), target, fetch_state, int(limit), int(pause), token, force == "0")
     if mode == "finish":
         root, target, token, outcome = args[1:]
         finish(Path(root), target, token, outcome)

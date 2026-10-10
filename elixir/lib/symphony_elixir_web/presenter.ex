@@ -543,7 +543,8 @@ defmodule SymphonyElixirWeb.Presenter do
       helpers: throttle[:helpers],
       quiet_window: throttle[:quiet_window],
       draining: throttle[:draining],
-      drain_reason: throttle[:drain_reason]
+      drain_reason: throttle[:drain_reason],
+      drain_owner: throttle[:drain_owner]
     }
   end
 

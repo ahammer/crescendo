@@ -15,6 +15,7 @@ drain_limit=${CRESCENDO_DRAIN_LIMIT_SECONDS:-300}
 dispatch_pause=${CRESCENDO_DISPATCH_PAUSE_SECONDS:-1800}
 state_url=http://127.0.0.1:${CRESCENDO_PORT:-4280}/api/v1/state
 env_file=$config/service.env
+validator=$(dirname "$0")/deploy-state.py
 
 log() { printf 'deploy: %s\n' "$*" >&2; }
 record() {
@@ -26,6 +27,30 @@ record() {
 mkdir -p "$root/releases"
 exec 9>"$root/deploy.lock"
 if ! flock -n 9; then log "another deploy is running"; exit 0; fi
+
+# The service only reconciles abandoned pre-swap holds. Swaps require rollback here.
+mkdir -p "$state"
+exec 8>"$state/deploy-drain.lock"
+if ! flock -n 8; then log "another drain owner is running"; exit 0; fi
+healthy() {
+  curl -fsS --max-time 10 "$state_url" | python3 "$validator" healthy
+}
+wait_healthy() {
+  for _ in $(seq 1 24); do
+    sleep 5
+    if healthy; then return 0; fi
+  done
+  return 1
+}
+recovery=$(python3 "$validator" recover "$state")
+if [ -n "$recovery" ]; then
+  cp "$env_file.before-$recovery" "$env_file"
+  systemctl --user restart "$unit"
+  if ! wait_healthy; then log "interrupted swap rollback is not healthy; keeping admission held"; exit 1; fi
+  python3 "$validator" recovered "$state" "$recovery"
+  touch "$root/releases/$recovery/.failed"
+  record swap_recovered "$recovery" "previous release restored and healthy"
+fi
 
 current=$(sed -n 's/^CRESCENDO_RELEASE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$env_file")
 if [ -z "$current" ]; then log "CRESCENDO_RELEASE is not set in $env_file"; exit 1; fi
@@ -57,7 +82,7 @@ if [ ! -e "$release/.built" ]; then
   # A test can flake on a loaded machine, so the gate gets a second try before the release is given up.
   if ! gate > "$release/build.log" 2>&1 && ! gate >> "$release/build.log" 2>&1; then
     touch "$release/.failed"
-    record gate_failed "$target" "see $release/build.log"
+    record gate_failed "$target" "build log retained locally"
     log "gate failed for $target (see $release/build.log)"
     exit 1
   fi
@@ -67,7 +92,6 @@ fi
 # 3. Drain: no new runs start; wait for the running ones to finish.
 #    CRESCENDO_DRAIN=0 deploys at once instead: running work is interrupted and
 #    resumes from its workspace (an interruption is never a failed attempt).
-validator=$(dirname "$0")/deploy-state.py
 token="$target-$$-$(date +%s)"
 outcome=cancelled
 cleanup() {
@@ -75,7 +99,7 @@ cleanup() {
 }
 # Installed before acquiring the drain: timeout, cancellation and failed swaps all release it.
 trap cleanup EXIT
-trap 'exit 130' INT TERM
+trap 'outcome=cancelled; exit 130' INT TERM
 result=0
 python3 "$validator" drain "$state" "$target" "$state_url" \
   "$drain_limit" "$dispatch_pause" "$token" "${CRESCENDO_DRAIN:-1}" || result=$?
@@ -89,22 +113,18 @@ outcome=swap_failed
 
 # 4. Swap and restart.
 cp "$env_file" "$env_file.before-$target"
+python3 "$validator" swap "$state" "$target" "$token"
 sed -i "s|^CRESCENDO_RELEASE=.*|CRESCENDO_RELEASE=\"$release\"|" "$env_file"
 
 # 5. Every project must answer and have successfully polled its tracker since restart; otherwise roll back.
-healthy() {
-  curl -fsS --max-time 10 "$state_url" | python3 "$(dirname "$0")/deploy-state.py" healthy
-}
 ok=0
 if systemctl --user restart "$unit"; then
-  for _ in $(seq 1 24); do
-    sleep 5
-    if healthy; then ok=1; break; fi
-  done
+  if wait_healthy; then ok=1; fi
 fi
 if [ "$ok" -ne 1 ]; then
   cp "$env_file.before-$target" "$env_file"
   systemctl --user restart "$unit"
+  if ! wait_healthy; then log "rollback is not healthy; keeping admission held"; exit 1; fi
   touch "$release/.failed"
   outcome=rolled_back
   record rolled_back "$target" "not healthy after restart; back on $(basename "$current")"
