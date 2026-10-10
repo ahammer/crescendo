@@ -1564,10 +1564,12 @@ polling uses the existing bounded health wait and unsuccessful readiness follows
 
 Service snapshots MUST also expose the Governor's current admission holds in `throttle`:
 `draining` covers a present dispatch drain flag, quiet-window preparation, or a quiet run finishing
-outside its active window. `drain_reason` explains that same observation: `dispatch drain flag is present`,
+outside its active window. `drain_reason` explains that same observation: `managed deployment drain is present`,
+`interrupted deployment swap awaits verified rollback`, `dispatch drain flag is present`,
 `preparing for quiet acceptance`, or `waiting for a quiet acceptance run to finish`; otherwise it is
 `null`. The explicit flag takes precedence when holds overlap. Its presence does not prove a deployment
-is running; manual flags use the same hold. Quiet phase MUST be observed once per policy/snapshot and
+is running; manual flags are independent from managed deployment state. Quiet phase MUST be
+observed once per policy/snapshot and
 reused for its drain reason so a window boundary cannot make those fields disagree.
 Flag contents, owner tokens and paths MUST NOT be exposed.
 Unavailable or legacy reasons remain unknown. `research_hold` is `null` or a map with the public
@@ -1583,8 +1585,26 @@ idle service MAY bypass the pause but MUST recheck after acquiring the hold. Ret
 drain observations belong to the existing deployment journal. Observations MUST report actual
 hold start/end and elapsed time, sampled idle time, ready work and quota/budget restrictions
 without attributing every unused slot to deployment. Unknown observations MUST NOT imply idle.
-Gate failures precede the hold; postponement, cancellation, failed swap, health rollback and
-success MUST release the deployment's own hold while preserving a manual hold.
+Gate failures precede the hold. Pre-swap postponement/cancellation and verified deployment or
+rollback MUST release only the deployment's own hold. Interrupted swaps follow recovery below.
+Manual and legacy flags MUST remain independent.
+
+Explicit managed drains MUST publish atomic owner/lifecycle state before journal appends and hold
+an inherited kernel lock for the operation and its swap children. A live lock MUST NOT expire from
+elapsed time. Governor admission checks MAY reconcile a provably abandoned pre-swap hold under
+that same lock, recording its lifecycle before releasing it. Dashboard reads MUST only observe.
+Interrupted swaps MUST remain held until the deploy path restores the previous configuration,
+restarts and verifies every project's health, before any unchanged-target early exit. Failed rollback,
+invalid ownership state or failed lifecycle journalling MUST preserve admission for later recovery.
+No reconciliation or manual CLI command may remove a newer owner's managed hold.
+
+`throttle.drain_owner` and retained admission observations MUST expose only kind (`managed`,
+`manual`, `legacy_unknown`, `quiet`), phase and applicable credential-free lifecycle evidence:
+managed liveness (`live`, `abandoned`, `recovery_required`, `unknown`), start timestamp and commit.
+Owner tokens, commands and host paths MUST NOT appear. Legacy holds MUST remain unattributed and
+MUST NOT be automatically released. Manual CLI on/off events MUST use the shared serialized journal
+appender, preserving lifecycle evidence after interrupted appends. The CLI MUST report lifecycle append errors.
+Recovery MUST preserve active worker slots, spend, workspaces and logical attempt/retry budgets.
 
 Under a service Governor drain, an active issue worker MUST yield at a successfully completed
 native turn boundary before starting another turn, after persisting any enabled checkpoint and

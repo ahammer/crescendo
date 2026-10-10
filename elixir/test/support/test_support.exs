@@ -22,7 +22,13 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Workspace
 
       import SymphonyElixir.TestSupport,
-        only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2, stop_default_http_server: 0]
+        only: [
+          write_workflow_file!: 1,
+          write_workflow_file!: 2,
+          restore_env: 2,
+          stop_default_http_server: 0,
+          start_drain_owner: 1
+        ]
 
       setup do
         workflow_root =
@@ -324,5 +330,32 @@ defmodule SymphonyElixir.TestSupport do
       |> Enum.map_join("\n", &("    " <> &1))
 
     "  #{name}: |\n#{indented}"
+  end
+
+  def start_drain_owner(root) do
+    import ExUnit.Assertions
+    script = Path.expand("../../../ops/bin/deploy-state.py", __DIR__)
+
+    code = """
+    import importlib.util, sys
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location('policy', sys.argv[2])
+    policy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(policy)
+    root = Path(sys.argv[1])
+    with policy.owner_lock(root):
+        policy.save_managed(root, dict(token='private-owner', operation_id='test-receipt', release='a' * 40, phase='waiting',
+                           started_at='2026-10-10T22:00:00Z', started_epoch=0, pause_seconds=1800))
+        print('ready', flush=True)
+        if sys.stdin.readline().strip() == 'swap':
+            policy.swap(root, 'a' * 40, 'private-owner')
+            print('swapping', flush=True)
+            sys.stdin.readline()
+    """
+
+    port = Port.open({:spawn_executable, System.find_executable("python3")}, [:binary, :exit_status, args: ["-B", "-u", "-c", code, root, script]])
+    assert_receive {^port, {:data, "ready\n"}}, 5_000
+    ExUnit.Callbacks.on_exit(fn -> if Port.info(port), do: Port.close(port) end)
+    port
   end
 end

@@ -30,6 +30,7 @@ defmodule SymphonyElixir.GovernorTest do
     Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2026-10-08 09:30:00Z] end)
     assert Governor.draining?()
     assert Governor.observe().drain_reason == "preparing for quiet acceptance"
+    assert Governor.snapshot().drain_owner == %{"kind" => "quiet", "phase" => "preparing"}
     assert Governor.checkin("a", 0, 0, 1).slots == 0
     assert {:wait, "preparing for quiet acceptance"} = Governor.acquire("b", "new", :issue)
     File.mkdir_p!(root)
@@ -50,6 +51,7 @@ defmodule SymphonyElixir.GovernorTest do
     assert Governor.draining?()
     assert Governor.checkin("b", 0, 0).drain_reason == "waiting for a quiet acceptance run to finish"
     assert {:wait, "waiting for a quiet acceptance run to finish"} = Governor.acquire("b", "new", :issue)
+    assert Governor.snapshot().drain_owner == %{"kind" => "quiet", "phase" => "finishing"}
     Governor.release("a", "acceptance")
     refute Governor.draining?()
     assert Governor.observe().drain_reason == nil
@@ -341,6 +343,54 @@ defmodule SymphonyElixir.GovernorTest do
     assert %{slots: 2} = Governor.checkin("b", 0, 0)
     assert_receive :governor_wake
     assert :ok = Governor.acquire("a", "GH-1", :issue)
+  end
+
+  test "an abandoned managed wait releases admission without changing live slots or spend", %{service: service, state_root: root} do
+    start_supervised!({Governor, service})
+    Governor.checkin("a", 10_000, 2)
+    Governor.checkin("b", 20_000, 1)
+    assert :ok = Governor.acquire("a", "active", :issue)
+    owner = SymphonyElixir.TestSupport.start_drain_owner(root)
+    assert Governor.draining?()
+    assert Governor.observe().drain_owner["owner_status"] == "live"
+    assert {:wait, _} = Governor.acquire("a", "new", :issue)
+    snapshot = Governor.snapshot()
+    assert snapshot.busy == 1
+    assert snapshot.spend_micro == 30_000
+    Port.command(owner, "exit\n")
+    assert_receive {^owner, {:exit_status, 0}}, 5_000
+    assert Governor.observe().drain_owner["owner_status"] == "abandoned"
+    assert File.exists?(Path.join(root, "deploy-drain.json"))
+    assert Governor.draining?() == false
+    assert Governor.snapshot().busy == 1
+    assert Governor.snapshot().spend_micro == 30_000
+    assert :ok = Governor.acquire("b", "new", :issue)
+    assert Governor.snapshot().busy == 2
+    stop_supervised!(Governor)
+    start_supervised!({Governor, service})
+    assert Governor.draining?() == false
+    assert Governor.observe().drain_owner == nil
+    events = root |> Path.join("deploys.jsonl") |> File.read!()
+    assert events =~ "abandoned"
+    refute events =~ "private-owner"
+  end
+
+  test "an interrupted managed swap survives Governor restart and requires deployment recovery", %{service: service, state_root: root} do
+    start_supervised!({Governor, service})
+    owner = SymphonyElixir.TestSupport.start_drain_owner(root)
+    Port.command(owner, "swap\n")
+    assert_receive {^owner, {:data, "swapping\n"}}, 5_000
+    assert Governor.snapshot().drain_owner["phase"] == "swapping"
+    Port.command(owner, "exit\n")
+    assert_receive {^owner, {:exit_status, 0}}, 5_000
+    stop_supervised!(Governor)
+    start_supervised!({Governor, service})
+    snapshot = Governor.snapshot()
+    assert snapshot.draining
+    assert snapshot.drain_owner["owner_status"] == "recovery_required"
+    assert snapshot.drain_reason == "interrupted deployment swap awaits verified rollback"
+    assert {:wait, "interrupted deployment swap awaits verified rollback"} = Governor.acquire("a", "new", :issue)
+    assert File.exists?(Path.join(root, "deploy-drain.json"))
   end
 
   test "the drain flag holds all new dispatch", %{service: service, state_root: state_root} do
