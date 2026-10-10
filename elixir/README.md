@@ -615,8 +615,10 @@ The observability UI now runs on a minimal Phoenix stack:
   the deploy path restores the prior release and verifies health before its unchanged-target check.
   Failed rollback, invalid state or failed lifecycle append keeps admission held for later recovery.
   Manual `drain off` cannot remove managed state; legacy flags stay unattributed and never expire.
-  The release embeds the shared Python deployment policy from `ops/bin/deploy-state.py`; managed drains need `python3`
-  and kernel `flock` support. No new public mutation endpoint exists.
+  Manual lifecycle events use the shared locked journal appender, preserving events after truncated records;
+  the CLI reports append errors. The release embeds the shared Python deployment policy from
+  `ops/bin/deploy-state.py`; managed drains and manual lifecycle journalling need `python3` and kernel `flock` support.
+  No new public mutation endpoint exists.
   See [deployment policy](../docs/crescendo.md#install-and-deploy) for overrides and recovery.
   Deployment health also requires every enabled project's `tracker_ready` to be `true`: its
   Orchestrator has successfully polled active issues in this process generation with no subsequent

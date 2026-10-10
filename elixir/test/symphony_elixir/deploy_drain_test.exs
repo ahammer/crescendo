@@ -18,6 +18,10 @@ defmodule SymphonyElixir.DeployDrainTest do
     on_exit(fn -> System.put_env("PATH", path) end)
     System.put_env("PATH", root)
     assert DeployDrain.observe(root)["owner_status"] == "unknown"
+
+    assert DeployDrain.record_manual(root, "manual_drain_started") ==
+             {:error, "python3 is required for manual drain lifecycle journalling"}
+
     executable = Path.join(root, "python3")
     File.write!(executable, "#!/bin/sh\nprintf 'invalid'\n")
     File.chmod!(executable, 0o755)

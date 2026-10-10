@@ -1602,7 +1602,8 @@ No reconciliation or manual CLI command may remove a newer owner's managed hold.
 `manual`, `legacy_unknown`, `quiet`), phase and applicable credential-free lifecycle evidence:
 managed liveness (`live`, `abandoned`, `recovery_required`, `unknown`), start timestamp and commit.
 Owner tokens, commands and host paths MUST NOT appear. Legacy holds MUST remain unattributed and
-MUST NOT be automatically released. Manual CLI on/off events belong to the deployment journal.
+MUST NOT be automatically released. Manual CLI on/off events MUST use the shared serialized journal
+appender, preserving lifecycle evidence after interrupted appends. The CLI MUST report lifecycle append errors.
 Recovery MUST preserve active worker slots, spend, workspaces and logical attempt/retry budgets.
 
 Under a service Governor drain, an active issue worker MUST yield at a successfully completed

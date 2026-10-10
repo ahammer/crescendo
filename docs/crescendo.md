@@ -214,7 +214,8 @@ configuration, restarts and passes the existing health check. Cancellation durin
 this recovery path. A failed restart, unhealthy rollback, missing backup or malformed ownership
 state stays held. Recovery happens before the unchanged-target early exit. Manual on/off cannot
 release managed state; legacy flags stay intentional-or-unknown and are never automatically removed.
-Manual CLI transitions record credential-free lifecycle events in the deployment journal.
+Manual CLI transitions record credential-free lifecycle events through the same locked journal
+appender, preserving events after a truncated record. The CLI reports lifecycle append errors.
 
 `throttle.drain_owner` and admission history distinguish `managed`, `manual`, `legacy_unknown` and
 `quiet` holds. Managed evidence includes phase, start time, commit and owner status (`live`,
@@ -233,7 +234,8 @@ service slots can still be shown; they do not imply a queue count. A successful 
 warning. `ops/bin/deploy-state.py` validates deployment observations independently of the deploy
 script. Its validation modes read JSON from stdin; its drain mode reads the state API and owns
 only managed ownership state and the journal. The deployed Elixir release embeds the same Python
-policy from `ops/bin/deploy-state.py`; Governor managed observations require `python3` and kernel `flock` support.
+policy from `ops/bin/deploy-state.py`; managed observations and manual lifecycle journalling require
+`python3` and kernel `flock` support.
 The policy never restarts the service.
 
 `projects[].tracker_ready` comes from each Orchestrator's in-memory successful active-issue poll

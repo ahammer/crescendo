@@ -209,6 +209,19 @@ class DrainTest(unittest.TestCase):
         self.assertEqual(self.drain(target="new"), 3)
         self.assertFalse((self.root / "deploy-drain.json").exists())
 
+    def test_manual_lifecycle_uses_the_shared_partial_tail_safe_appender(self):
+        (self.root / "deploys.jsonl").write_text('{"outcome":"deployed","retry_until":12000}\n{"interrupted":')
+        for outcome in ("manual_drain_started", "manual_drain_finished"):
+            self.assertEqual(policy.main(["manual", str(self.root), outcome]), 0)
+        events = policy.events(self.root)
+        self.assertEqual([event["outcome"] for event in events],
+                         ["deployed", "manual_drain_started", "manual_drain_finished"])
+        self.assertTrue(all(event["owner_kind"] == "manual" and "token" not in event for event in events[1:]))
+        self.assertEqual(policy.retry_until(self.root), 12000)
+        with self.assertRaisesRegex(ValueError, "invalid manual drain lifecycle"):
+            policy.main(["manual", str(self.root), "private-unrecognized-event"])
+        self.assertEqual(policy.events(self.root), events)
+
     def test_force_is_explicit_and_invalid_limits_never_acquire(self):
         self.assertEqual(self.drain(force=True), 0)
         self.finish("deployed")

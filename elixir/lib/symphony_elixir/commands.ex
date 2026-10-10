@@ -21,7 +21,7 @@ defmodule SymphonyElixir.Commands do
   with `--workflow` it also checks task efforts against that project's ladder.
   """
 
-  alias SymphonyElixir.{Config.Schema, Service, Workflow}
+  alias SymphonyElixir.{Config.Schema, DeployDrain, Service, Workflow}
 
   @templates Path.expand("../../priv/templates/project", __DIR__)
   @template_files ["WORKFLOW.md.eex", "prompts/pull_request.md.eex", "prompts/research.md.eex", "prompts/marketing.md.eex"]
@@ -364,25 +364,21 @@ defmodule SymphonyElixir.Commands do
     File.mkdir_p!(Path.dirname(file))
     started = DateTime.utc_now() |> DateTime.to_iso8601()
     File.write!(file, Jason.encode!(%{kind: "manual", started_at: started}))
-    record_manual(file, "manual_drain_started")
-    IO.puts("Draining: no new runs start until `crescendo drain off`.")
-    :ok
+    record_manual(file, "manual_drain_started", "Draining: no new runs start until `crescendo drain off`.")
   end
 
   defp change_drain("off", file) do
     case File.rm(file) do
       :ok ->
-        record_manual(file, "manual_drain_finished")
-        IO.puts("Drain off: manual hold removed; managed and quiet holds remain independent.")
-        :ok
+        record_manual(file, "manual_drain_finished", "Drain off: manual hold removed; managed and quiet holds remain independent.")
 
       {:error, reason} ->
         {:error, "could not remove drain flag #{file}: #{:file.format_error(reason)}"}
     end
   end
 
-  defp record_manual(file, outcome) do
-    event = %{at: DateTime.utc_now() |> DateTime.to_iso8601(), outcome: outcome, owner_kind: "manual"}
-    File.write(Path.join(Path.dirname(file), "deploys.jsonl"), Jason.encode!(event) <> "\n", [:append])
+  defp record_manual(file, outcome, message) do
+    IO.puts(message)
+    DeployDrain.record_manual(Path.dirname(file), outcome)
   end
 end

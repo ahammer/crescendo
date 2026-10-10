@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.DeployDrain do
-  @moduledoc "Credential-free managed drain observation and reconciliation through the deployment policy."
+  @moduledoc "Credential-free drain lifecycle journalling, observation and reconciliation through the deployment policy."
 
   @policy_path Path.expand("../../../ops/bin/deploy-state.py", __DIR__)
   @external_resource @policy_path
@@ -18,6 +18,16 @@ defmodule SymphonyElixir.DeployDrain do
     end
   rescue
     _error in ErlangError -> unknown()
+  end
+
+  @spec record_manual(String.t(), String.t()) :: :ok | {:error, String.t()}
+  def record_manual(root, outcome) do
+    case System.cmd("python3", ["-c", @policy, "manual", root, outcome], stderr_to_stdout: true) do
+      {_output, 0} -> :ok
+      _error -> {:error, "could not append manual drain lifecycle to deployment journal"}
+    end
+  rescue
+    _error in ErlangError -> {:error, "python3 is required for manual drain lifecycle journalling"}
   end
 
   @spec manual(String.t()) :: map()

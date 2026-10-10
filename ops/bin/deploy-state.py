@@ -258,6 +258,12 @@ def finish(root, target, token, outcome, wall=time.time):
 
 def main(args):
     mode = args[0]
+    if mode == "manual":
+        root, outcome = args[1:]
+        if outcome not in ("manual_drain_started", "manual_drain_finished"):
+            raise ValueError("invalid manual drain lifecycle")
+        record(Path(root), outcome, None, owner_kind="manual")
+        return 0
     if mode in ("observe", "reconcile"):
         print(json.dumps(observe(Path(args[1]), reconcile=mode == "reconcile")))
         return 0
