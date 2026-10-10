@@ -771,12 +771,13 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp reconcile_running_issues(%State{} = state) do
     state = reconcile_stalled_running_issues(state)
-    running_ids = tracker_backed_ids(state.running)
+    quiet_ids = Enum.map(state.quiet_continuations, fn {_key, prepared} -> prepared.issue_id end)
+    tracked_ids = Enum.uniq(tracker_backed_ids(state.running) ++ quiet_ids)
 
-    if running_ids == [] do
+    if tracked_ids == [] do
       state
     else
-      case Tracker.fetch_issues_by_ids(running_ids) do
+      case Tracker.fetch_issues_by_ids(tracked_ids) do
         {:ok, issues} ->
           issues
           |> reconcile_running_issue_states(
@@ -784,7 +785,7 @@ defmodule SymphonyElixir.Orchestrator do
             active_state_set(),
             terminal_state_set()
           )
-          |> reconcile_missing_running_issue_ids(running_ids, issues)
+          |> reconcile_missing_running_issue_ids(tracked_ids, issues)
 
         {:error, reason} ->
           Logger.debug("Failed to refresh running issue states: #{inspect(reason)}; keeping active workers")
@@ -887,7 +888,9 @@ defmodule SymphonyElixir.Orchestrator do
 
         Operations.disposition(state.operations, Map.from_struct(issue), Config.settings!().labels.prefix)
 
-        terminate_running_issue(state, issue.id, true)
+        state
+        |> terminate_running_issue(issue.id, true)
+        |> clear_quiet_continuation(issue.id)
 
       !issue_routable?(issue) or not handoff_owner?(issue, state.autopilot) ->
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
@@ -958,7 +961,10 @@ defmodule SymphonyElixir.Orchestrator do
         state_acc
       else
         log_missing_running_issue(state_acc, issue_id)
-        terminate_running_issue(state_acc, issue_id, false)
+
+        state_acc
+        |> terminate_running_issue(issue_id, false)
+        |> clear_quiet_continuation(issue_id)
       end
     end)
   end
@@ -1273,7 +1279,7 @@ defmodule SymphonyElixir.Orchestrator do
       summary: "Attempt #{attempts}/#{settings.max_item_attempts}: #{reason}"
     })
 
-    state = state |> put_autopilot(autopilot) |> release_issue_claim(issue.id)
+    state = state |> put_autopilot(autopilot) |> release_issue_claim(issue.id) |> clear_quiet_continuation(issue.id)
     if attempts >= settings.max_item_attempts, do: retire_item(state, issue, reason), else: state
   end
 
@@ -1294,7 +1300,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         state = put_autopilot(state, Map.update(state.autopilot, :retired_items, %{issue.id => true}, &Map.put(&1, issue.id, true)))
         cleanup_issue_workspace(issue)
-        state
+        clear_quiet_continuation(state, issue.id)
 
       {:error, error} ->
         Logger.warning("Autopilot could not retire #{issue_context(issue)}: #{inspect(error)}; retrying next poll")
@@ -1366,7 +1372,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp settle_autopilot_item(state, %Issue{} = issue, settings) do
     case autopilot_item_status(state, issue, settings) do
       :blocked -> consume_blocked_marker(state, issue, settings)
-      :retired -> {[], state}
+      :retired -> {[], clear_quiet_continuation(state, issue.id)}
       :exhausted -> {[], retire_item(state, issue, "attempts exhausted")}
       :review_capped -> {[], retire_item(state, issue, "review run cap reached without merging")}
       :active -> {[issue], state}
@@ -2050,7 +2056,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         Operations.disposition(state.operations, Map.from_struct(issue), Config.settings!().labels.prefix)
         cleanup_issue_workspace(issue, metadata)
-        {:noreply, release_issue_claim(state, issue_id)}
+        {:noreply, state |> release_issue_claim(issue_id) |> clear_quiet_continuation(issue_id)}
 
       retry_candidate_issue?(issue, terminal_states) ->
         handle_active_retry(state, issue, attempt, metadata)
@@ -2817,6 +2823,17 @@ defmodule SymphonyElixir.Orchestrator do
 
       true ->
         persist_quiet_continuation(state, entry, issue, prepared, window, key)
+    end
+  end
+
+  defp clear_quiet_continuation(state, issue_id) do
+    continuations = Map.reject(state.quiet_continuations, fn {_key, prepared} -> prepared.issue_id == issue_id end)
+
+    if continuations == state.quiet_continuations do
+      state
+    else
+      :ok = Operations.save_quiet_continuations(state.operations, continuations)
+      %{state | quiet_continuations: continuations}
     end
   end
 

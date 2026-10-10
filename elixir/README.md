@@ -861,6 +861,8 @@ Changed, dirty or missing source/evidence cannot establish acceptance. The same 
 budget remain; unsuccessful acceptance still follows reduced-scope/retirement rules on a final attempt.
 `/api/v1/state` exposes retained identities in `deferred` and reasons in `upcoming.waiting`;
 private-project fields are redacted. Deferral is recorded separately from completed/failed runs.
+Terminal or no-longer-visible issues, failed attempts and retired deliveries clear their saved
+continuation without resetting the attempt budget; tracker read failures keep it for reconciliation.
 
 A service can keep three primary slots while adding up to five global read-only helpers.
 Set `helpers: {slots: 5, model: gpt-6-luna, effort: max, timeout_ms: 900000}` in `crescendo.yml`;

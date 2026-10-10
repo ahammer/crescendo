@@ -1598,6 +1598,9 @@ task/environment and repair product failures; deferral never passes a failed per
 Existing reduced-scope and retirement rules still govern unsuccessful acceptance. Read-only state
 exposes retained continuation identities in `deferred` and the scheduling reason in the waiting queue,
 with private-project redaction. No worker polls or sleeps on an unchanged unavailable window.
+Terminal or no-longer-visible issues, failed logical attempts and retired deliveries MUST clear
+their retained continuation durably, without resetting the canonical attempt budget. Tracker read
+failures MUST retain the continuation until its disposition can be observed.
 
 Crescendo routine deployments MUST bound a busy drain (default five minutes) and leave a dispatch
 pause (default thirty minutes) before another busy drain, including superseding candidates. An

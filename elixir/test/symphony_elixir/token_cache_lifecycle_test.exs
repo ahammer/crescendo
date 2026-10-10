@@ -1128,6 +1128,8 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | labels: ["symphony:blocked"]}])
     send(pid, :run_poll_cycle)
     assert :sys.get_state(pid).autopilot.item_attempts[issue.id] == 3
+    assert :sys.get_state(pid).quiet_continuations == %{}
+    assert Operations.quiet_continuations(:sys.get_state(pid).operations) == %{}
     assert Enum.count(Application.get_env(:symphony_elixir, :memory_tracker_writes), &match?({:retire, _, _}, &1)) == 1
   end
 

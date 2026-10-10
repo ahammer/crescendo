@@ -94,6 +94,8 @@ until the gates pass; final attempts still deliver reduced scope or retire under
 The read-only `deferred` state contains retained reason, source/evidence, PR and wake identities,
 and `upcoming.waiting` displays the reason. Private-project details are redacted. This adds no local
 configuration and does not change the existing quiet-label policy for whole runs.
+Closed or no-longer-visible issues, failed logical attempts and retired deliveries clear their
+saved continuation while retaining the canonical budget. Failed tracker reads preserve the record.
 
 The state API exposes `helpers`, `throttle.helpers`, `throttle.quiet_window`, `pacing`, and
 `usage.planning` (retained skip, promotion and startup events). Managed helper tokens have

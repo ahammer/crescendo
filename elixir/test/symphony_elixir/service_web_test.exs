@@ -8,6 +8,7 @@ defmodule SymphonyElixir.ServiceWebTest do
 
   defmodule PollTracker do
     def fetch_issues_by_states(_states), do: {:error, :offline_tracker}
+    def fetch_issues_by_ids(_ids), do: {:error, :offline_tracker}
   end
 
   @endpoint SymphonyElixirWeb.Endpoint
@@ -95,6 +96,9 @@ defmodule SymphonyElixir.ServiceWebTest do
     assert Orchestrator.snapshot(beta, 1_000).tracker_ready
     inventory = [%{number: 7, title: "Private persisted inventory", url: "https://github.test/pull/7", draft: true}]
     Operations.save_pull_inventory(before.operations, inventory, before.issues_observed_at)
+    prepared = %{"issue-held" => %{issue_id: "issue-held", item_attempt: 1, run_id: "prepared", reason: "quiet acceptance"}}
+    assert :ok = Operations.save_quiet_continuations(before.operations, prepared)
+    :sys.replace_state(beta, &%{&1 | quiet_continuations: prepared})
 
     previous = Application.get_env(:symphony_elixir, :linear_client_module)
     Application.put_env(:symphony_elixir, :linear_client_module, PollTracker)
@@ -111,6 +115,7 @@ defmodule SymphonyElixir.ServiceWebTest do
     send(beta, :run_poll_cycle)
     failed = Orchestrator.snapshot(beta, 1_000)
     refute failed.tracker_ready
+    assert :sys.get_state(beta).quiet_continuations == prepared
     assert failed.upcoming.observed_at == before.issues_observed_at
     assert failed.upcoming.error == "tracker fetch failed"
     state = SymphonyElixirWeb.Presenter.payload(timeout: 1_000)
@@ -125,6 +130,7 @@ defmodule SymphonyElixir.ServiceWebTest do
     assert unobserved.pull_requests.items == inventory
     assert unobserved.pull_requests.observed_at == before.issues_observed_at
     assert unobserved.upcoming.observed_at == nil
+    assert :sys.get_state(restarted).quiet_continuations == prepared
     refute unobserved.tracker_ready
     assert healthy(SymphonyElixirWeb.Presenter.payload(timeout: 1_000)) == 1
 
@@ -138,6 +144,7 @@ defmodule SymphonyElixir.ServiceWebTest do
     assert recovered.upcoming.observed_at
     assert recovered.upcoming.error == nil
     assert recovered.upcoming.ready == []
+    assert :sys.get_state(restarted).quiet_continuations == %{}
     state = SymphonyElixirWeb.Presenter.payload(timeout: 1_000)
     assert Enum.all?(state.projects, & &1.tracker_ready)
     assert healthy(state) == 0
@@ -214,6 +221,34 @@ defmodule SymphonyElixir.ServiceWebTest do
     assert Enum.any?(state["upcoming"]["waiting"], &(&1["reason"] =~ "quiet digest required"))
     assert get(build_conn(), "/api/v1/state").status == 200
     assert post(build_conn(), "/api/v1/state", %{}).status == 405
+  end
+
+  @tag quiet_startup: true
+  test "closed and missing quiet deliveries are forgotten across restart without resetting their budget", %{quiet_issue: issue} do
+    pid = GenServer.whereis(Project.via("alpha", :orchestrator))
+    state = :sys.get_state(pid)
+    autopilot = Map.put(state.autopilot, :item_attempts, %{issue.id => 2})
+    prepared = %{issue_id: issue.id, item_attempt: 3, run_id: "prepared", reason: "quiet acceptance pending"}
+    Operations.save_autopilot_state(state.operations, autopilot)
+
+    for items <- [[%{issue | state: "Closed"}], []] do
+      assert :ok = Operations.save_quiet_continuations(state.operations, %{issue.id => prepared})
+      :sys.replace_state(pid, &%{&1 | autopilot: autopilot, quiet_continuations: %{issue.id => prepared}})
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, items)
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).quiet_continuations == %{}
+      assert Operations.quiet_continuations(state.operations) == %{}
+      assert :sys.get_state(pid).autopilot.item_attempts[issue.id] == 2
+      assert Orchestrator.snapshot(pid, 1_000).deferred == []
+    end
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | labels: ["hold"]}])
+    runtime = Project.via("alpha", :agent_runtime)
+    :ok = Supervisor.terminate_child(runtime, Project.via("alpha", :orchestrator))
+    assert {:ok, restarted} = Supervisor.restart_child(runtime, Project.via("alpha", :orchestrator))
+    assert :sys.get_state(restarted).quiet_continuations == %{}
+    assert :sys.get_state(restarted).autopilot.item_attempts[issue.id] == 2
+    assert Orchestrator.snapshot(restarted, 1_000).deferred == []
   end
 
   test "operator Fast defaults appear in the dashboard and API without UI controls", %{service: service} do
