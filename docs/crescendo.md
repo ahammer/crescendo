@@ -214,14 +214,20 @@ and becomes false on poll failure until recovery. Unavailable or unselected snap
 readiness. Idle and quiet-held projects remain healthy after polling. This health requirement
 does not change drain slot/helper accounting or expose tracker errors, credentials or local paths.
 
-The current service admission holds appear in `throttle.draining` (deployment drain) and
+The current service admission holds appear in `throttle.draining` and
 `throttle.research_hold` (`null` or `{project, phase}`). A global research request waiting for
 idle reports `phase: reserved`; running global research reports `phase: running`. Reservations
 disappear at expiry, and project/none exclusivity does not create a global hold. The dashboard's
 Dispatch health detail explains these holds, including in project filters and partial snapshots.
 Only the already-public project ID is exposed, with no private work or task details. Admission
 policy stays unchanged; intentional holds are informational, and unknown counts remain unknown.
-These read-only current signals do not identify the cause of historical unused capacity.
+`draining` covers a present dispatch drain flag, quiet preparation, or a quiet run finishing
+outside its active window. `throttle.drain_reason` reports `dispatch drain flag is present`,
+`preparing for quiet acceptance`, or `waiting for a quiet acceptance run to finish`; otherwise
+it is `null`. A flag takes precedence over quiet holds. Manual flags have the same effect;
+the message does not establish that a deployment is running. Owner tokens, flag contents and
+paths stay private. Missing/legacy reasons remain unknown. These read-only current signals
+do not establish hold ownership, intended duration or the cause of historical unused capacity.
 
 ## Commands
 
@@ -514,10 +520,10 @@ This adds no configuration, control or write endpoint.
 There are no write routes.
 
 Five-minute capacity samples retain an `admission` observation from the Governor: `source: governor`,
-`scope: service`, ISO8601 `observed_at`, shared `slots`, Governor-held `busy` slots, `draining`, and
+`scope: service`, ISO8601 `observed_at`, shared `slots`, Governor-held `busy` slots, `draining`, `drain_reason`, and
 `research_hold` (public project ID and `reserved`/`running` phase, or null). Project-only and
 non-exclusive research are not global holds. Missing Governors and legacy samples have null
-admission evidence; nothing is backfilled or inferred from worker counts.
+admission evidence; nothing is backfilled or inferred from worker counts. Legacy reasons stay unknown.
 
 Service `usage.samples` carries one whole latest admission observation per bucket, with `observed_by`
 identifying its recording project. Shared slots never sum across projects. `project_samples` retains

@@ -86,7 +86,7 @@ defmodule SymphonyElixir.Governor do
   @spec observe() :: map() | nil
   def observe do
     snapshot()
-    |> Map.take([:observed_at, :slots, :busy, :draining, :research_hold, :helpers])
+    |> Map.take([:observed_at, :slots, :busy, :draining, :drain_reason, :research_hold, :helpers])
     |> Map.put(:source, "governor")
     |> Map.put(:scope, "service")
   catch
@@ -137,10 +137,11 @@ defmodule SymphonyElixir.Governor do
 
   def handle_call({:acquire, project, item, class, opts}, {pid, _tag}, state) do
     state = monitor(state, project, pid)
+    drain_reason = drain_reason(state)
 
     cond do
-      draining?(state) ->
-        {:reply, {:wait, "draining for a deploy"}, state}
+      drain_reason != nil ->
+        {:reply, {:wait, drain_reason}, state}
 
       warming_up?(state) ->
         {:reply, {:wait, "starting up: waiting for every project to check in"}, state}
@@ -177,6 +178,7 @@ defmodule SymphonyElixir.Governor do
 
   def handle_call(:snapshot, _from, state) do
     now = DateTime.utc_now()
+    drain_reason = drain_reason(state)
 
     projects =
       for {id, project} <- Enum.sort(state.schedule.projects) do
@@ -191,7 +193,8 @@ defmodule SymphonyElixir.Governor do
        projects: projects,
        reservation: state.schedule.reservation && state.schedule.reservation.project,
        research_hold: Scheduling.research_hold(state.schedule, System.monotonic_time(:millisecond)),
-       draining: draining?(state),
+       draining: drain_reason != nil,
+       drain_reason: drain_reason,
        spend_micro: total_spend(state),
        quota: state.quota,
        pacing: Quota.pacing(state.quota, state.quota_epoch, now),
@@ -479,7 +482,8 @@ defmodule SymphonyElixir.Governor do
   defp helper_outcome(_helper, reason), do: {"failed", Helpers.error_text(reason)}
 
   defp policy(state, project, now) do
-    draining = draining?(state)
+    drain_reason = drain_reason(state)
+    draining = drain_reason != nil
     free = Scheduling.free_for(state.schedule, project, System.monotonic_time(:millisecond))
 
     state
@@ -488,7 +492,8 @@ defmodule SymphonyElixir.Governor do
       slots: if(draining or warming_up?(state), do: 0, else: free),
       research_exclusive: state.schedule.projects[project].exclusive,
       quiet_window: quiet_window(state),
-      draining: draining
+      draining: draining,
+      drain_reason: drain_reason
     })
   end
 
@@ -546,11 +551,17 @@ defmodule SymphonyElixir.Governor do
     :ok
   end
 
-  defp draining?(state) do
+  defp draining?(state), do: drain_reason(state) != nil
+
+  defp drain_reason(state) do
     quiet = quiet_window(state)
 
-    File.exists?(Path.join(Service.state_root(state.service), "drain")) or quiet.phase == "preparing" or
-      (MapSet.size(state.quiet_runs) > 0 and quiet.phase != "active")
+    cond do
+      File.exists?(Path.join(Service.state_root(state.service), "drain")) -> "dispatch drain flag is present"
+      quiet.phase == "preparing" -> "preparing for quiet acceptance"
+      MapSet.size(state.quiet_runs) > 0 and quiet.phase != "active" -> "waiting for a quiet acceptance run to finish"
+      true -> nil
+    end
   end
 
   defp warming_up?(state) do

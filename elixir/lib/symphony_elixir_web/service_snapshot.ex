@@ -119,7 +119,7 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
 
   # The Governor's policy plus the service's slot use.
   defp throttle(%{throttle: throttle, slots: slots, busy: busy} = governor),
-    do: throttle |> Map.merge(%{service_slots: slots, busy: busy}) |> Map.merge(Map.take(governor, [:research_hold, :draining, :helpers, :quiet_window]))
+    do: throttle |> Map.merge(%{service_slots: slots, busy: busy}) |> Map.merge(Map.take(governor, [:research_hold, :draining, :drain_reason, :helpers, :quiet_window]))
 
   defp throttle(_governor), do: nil
 

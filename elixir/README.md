@@ -533,7 +533,7 @@ The observability UI now runs on a minimal Phoenix stack:
   timestamps before claiming a complete cycle; daily totals and 14-day task averages keep their
   existing windows. The default API and dashboard show 100 events and 12 hours of samples.
 - Five-minute samples also retain timestamped Governor capacity observations (`admission`), including
-  shared held slots, deployment drains and global research phases. Unavailable and legacy observations
+  shared held slots, drain reasons and global research phases. Unavailable and legacy observations
   stay null. Service history keeps one whole latest observation per bucket and independent
   `project_samples`; shared slots never sum. Partial buckets have unknown aggregate counts and are
   omitted from sparklines. Filtered counts describe selected projects only. The existing 48-hour
@@ -582,7 +582,12 @@ The observability UI now runs on a minimal Phoenix stack:
   to `null`, and show an incomplete warning and unknown counts instead of idle/free slots.
   Health warns on incompleteness; dispatch can still report Governor-held service slots without
   inventing running or queue counts. The next successful snapshot clears the warning.
-  Service `throttle.draining` reports the deployment drain flag; `throttle.research_hold` is
+  Service `throttle.draining` covers a dispatch drain flag, quiet preparation, or a quiet run
+  finishing outside its active window. `throttle.drain_reason` reports `dispatch drain flag is present`,
+  `preparing for quiet acceptance`, or `waiting for a quiet acceptance run to finish`; otherwise
+  it is `null`. Explicit/manual flags take precedence and do not establish a running deployment.
+  Flag contents, tokens and paths stay private; missing/legacy reasons remain unknown.
+  `throttle.research_hold` is
   `null` or `{project, phase}` for a current global research reservation (`reserved`) or running
   hold (`running`). Expired reservations and project/none research are excluded. Dispatch health
   details explain these holds in full, filtered and partial views without changing admission,

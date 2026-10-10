@@ -542,7 +542,8 @@ defmodule SymphonyElixirWeb.Presenter do
       research_hold: throttle[:research_hold],
       helpers: throttle[:helpers],
       quiet_window: throttle[:quiet_window],
-      draining: throttle[:draining]
+      draining: throttle[:draining],
+      drain_reason: throttle[:drain_reason]
     }
   end
 
@@ -661,7 +662,8 @@ defmodule SymphonyElixirWeb.Presenter do
   defp dispatch_detail(snapshot, detail),
     do: [detail, dispatch_hold(snapshot[:throttle])] |> Enum.reject(&is_nil/1) |> Enum.join(" · ")
 
-  defp dispatch_hold(%{draining: true}), do: "Deployment drain holds new runs"
+  defp dispatch_hold(%{draining: true, drain_reason: reason}) when is_binary(reason), do: "New runs held: #{reason}"
+  defp dispatch_hold(%{draining: true}), do: "Dispatch drain holds new runs"
   defp dispatch_hold(%{research_hold: %{project: project, phase: "reserved"}}), do: "Service reserved for #{project} research"
   defp dispatch_hold(%{research_hold: %{project: project, phase: "running"}}), do: "Service held by #{project} research"
   defp dispatch_hold(_throttle), do: nil
