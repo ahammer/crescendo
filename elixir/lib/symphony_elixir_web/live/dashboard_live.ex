@@ -68,6 +68,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 Revision unknown
               <% end %>
             </p>
+            <p :if={@payload[:priority_mode]} class="brand-sub" id="priority-mode" role="status">
+              <span class={["speed-badge", @payload.priority_mode.enabled && "is-fast"]}>
+                Fast mode: <%= if @payload.priority_mode.enabled, do: "On", else: "Off" %>
+              </span>
+              <span :if={@payload.priority_mode.expires_at}>until <%= @payload.priority_mode.expires_at %></span>
+              <span :if={@payload.priority_mode.error}>Policy unavailable; standard speed</span>
+            </p>
           </div>
           <.live_badge />
         </div>
@@ -251,6 +258,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       </div>
       <div class="card-foot">
         <span class="mono"><%= route_model(@entry) %></span>
+        <span :if={get_in(@entry, [:codex_provenance, :service_tier]) in ["fast", "priority"]} class="speed-badge is-fast" title="Fast tier reported by Codex at thread startup">Fast</span>
         <span><%= compact(@entry.tokens.total_tokens) %> tok</span>
         <span><%= format_money(@run.usd_micro) %></span>
         <span :if={@workspace.files != []}><span class="diff-add">+<%= @added %></span> <span class="diff-del">−<%= @removed %></span></span>

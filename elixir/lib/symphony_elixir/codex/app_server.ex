@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Codex.Usage, Config, PathSafety, SSH}
+  alias SymphonyElixir.{Codex.DynamicTool, Codex.Usage, Config, PathSafety, PriorityMode, SSH}
 
   @initialize_id 1
   @thread_start_id 2
@@ -451,7 +451,12 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp do_start_session(port, workspace, policies, binding, route, codex, opts) do
-    Process.put({port, :thread_config}, Keyword.get(opts, :thread_config))
+    tier = PriorityMode.current_tier()
+    config = Keyword.get(opts, :thread_config)
+    config = if tier, do: Map.put(config || %{}, "service_tier", tier), else: config
+    config = if tier == "fast", do: Map.update(config, "features", %{"fast_mode" => true}, &Map.put(&1, "fast_mode", true)), else: config
+    Process.put({port, :thread_config}, config)
+    Process.put({port, :service_tier}, tier)
 
     with {:ok, initialized} <- send_initialize(port),
          {:ok, additions} <- developer_instructions(port, workspace, codex.developer_instructions) do
@@ -603,6 +608,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     }
     |> maybe_put("model", settings.route && settings.route["model"])
     |> maybe_put("developerInstructions", additions)
+    |> maybe_put("serviceTier", settings.thread_config && settings.thread_config["service_tier"])
+    |> maybe_put("config", settings.thread_config)
   end
 
   defp restored_baseline(port, thread) do
@@ -739,6 +746,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           "dynamicTools" => dynamic_tool_binding.tool_specs
         }
         |> maybe_put("model", model_route && model_route["model"])
+        |> maybe_put("serviceTier", Process.get({port, :service_tier}))
         |> maybe_put("developerInstructions", developer_instructions)
         |> maybe_put("config", Process.get({port, :thread_config}))
     })
@@ -773,6 +781,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           "sandboxPolicy" => turn_sandbox_policy
         }
         |> maybe_put("effort", model_route && model_route["effort"])
+        |> maybe_put("serviceTier", PriorityMode.current_tier())
     })
 
     case await_response(port, @turn_start_id) do
@@ -1717,6 +1726,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           :request_method,
           :thread_id,
           :thread_config,
+          :service_tier,
           :work_item,
           :awaiting_response,
           :frame_deadline,

@@ -1,6 +1,71 @@
 defmodule SymphonyElixir.AppServerTest do
   use SymphonyElixir.TestSupport
 
+  test "service Fast defaults reach every agent kind and existing sessions return to standard on disable or expiry" do
+    root = Path.join(System.tmp_dir!(), "crescendo-tier-session-#{System.unique_integer([:positive])}")
+    workspace = Path.join(root, "workspaces/FAST-1")
+    binary = Path.join(root, "fake-codex.py")
+    observed = Path.join(root, "observed.jsonl")
+    File.mkdir_p!(workspace)
+    previous = SymphonyElixir.Service.current()
+    service = %SymphonyElixir.Service{state_root: root}
+
+    on_exit(fn ->
+      :persistent_term.put({SymphonyElixir.Service, :current}, previous)
+      File.rm_rf(root)
+    end)
+
+    File.write!(binary, """
+    import json, sys
+    with open(sys.argv[1], 'a') as log:
+        for line in sys.stdin:
+            m = json.loads(line)
+            log.write(json.dumps(m) + '\\n'); log.flush()
+            method = m.get('method')
+            if method == 'initialize':
+                result = {}
+            elif method == 'thread/start':
+                result = {'thread': {'id': 'tier-thread'}, 'model': m['params'].get('model'), 'serviceTier': 'priority' if m['params'].get('serviceTier') == 'fast' else 'default'}
+            elif method == 'turn/start':
+                result = {'turn': {'id': 'tier-turn'}}
+            else:
+                continue
+            print(json.dumps({'id': m['id'], 'result': result}), flush=True)
+            if method == 'turn/start':
+                print(json.dumps({'method': 'turn/completed', 'params': {'turn': {'status': 'completed'}}}), flush=True)
+    """)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: Path.join(root, "workspaces"), codex_command: "python3 #{binary} #{observed}")
+    SymphonyElixir.Service.put_current(service)
+    assert {:ok, _} = SymphonyElixir.PriorityMode.set(service, %{"enabled" => true})
+    issue = %Issue{id: "fast", identifier: "FAST-1", labels: []}
+    route = %{"model" => "gpt-6.1-sol", "effort" => "high"}
+    config = %{"features" => %{"shell_tool" => false}, "mcp_servers" => %{"read-only.server" => %{"enabled" => false}}}
+
+    for kind <- [:issue, :research, :pull_request, :helper] do
+      assert {:ok, session} = AppServer.start_session(workspace, model_route: route, kind: kind, thread_config: config)
+      assert session.metadata.service_tier == "priority"
+      assert {:ok, _} = AppServer.run_turn(session, "work", issue)
+      AppServer.stop_session(session)
+    end
+
+    assert {:ok, session} = AppServer.start_session(workspace, model_route: route)
+    assert {:ok, _} = AppServer.run_turn(session, "fast", issue)
+    assert {:ok, _} = SymphonyElixir.PriorityMode.set(service, %{"enabled" => false})
+    assert {:ok, _} = AppServer.run_turn(session, "standard", issue)
+    File.write!(Path.join(root, "priority-mode.json"), Jason.encode!(%{enabled: true, expires_at: "2000-01-01T00:00:00Z", updated_at: "2000-01-01T00:00:00Z"}))
+    assert {:ok, _} = AppServer.run_turn(session, "expired", issue)
+    AppServer.stop_session(session)
+
+    messages = File.read!(observed) |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    threads = Enum.filter(messages, &(&1["method"] == "thread/start"))
+    assert Enum.all?(threads, &(&1["params"]["serviceTier"] == "fast"))
+    assert hd(threads)["params"]["config"]["features"] == %{"shell_tool" => false, "fast_mode" => true}
+    assert hd(threads)["params"]["config"]["mcp_servers"] == config["mcp_servers"]
+    tiers = for m <- messages, m["method"] == "turn/start", do: m["params"]["serviceTier"]
+    assert tiers == ["fast", "fast", "fast", "fast", "fast", "default", "default"]
+  end
+
   test "app server sends the selected model and effort and exports the route label and work item" do
     root = Path.join(System.tmp_dir!(), "symphony-route-#{System.unique_integer([:positive])}")
     workspace = Path.join(root, "workspaces/ROUTE-1")

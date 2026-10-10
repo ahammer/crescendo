@@ -14,6 +14,17 @@ defmodule SymphonyElixir.CommandsTest do
 
   defp no_gh(_args), do: flunk("gh must not run")
 
+  test "the MCP command serves stdio without starting a service", %{service: service} do
+    File.write!(service, "paths: {state: state}\nprojects: {demo: {}}\n")
+    before = Process.whereis(SymphonyElixir.Projects)
+    input = Jason.encode!(%{jsonrpc: "2.0", id: 1, method: "initialize", params: %{protocolVersion: "2025-11-25"}}) <> "\n"
+
+    output = capture_io(input, fn -> assert :ok = Commands.run(["mcp", service], &no_gh/1) end)
+    assert Jason.decode!(output)["result"]["serverInfo"]["name"] == "crescendo"
+    assert Process.whereis(SymphonyElixir.Projects) == before
+    assert {:error, "Usage:" <> _} = Commands.run(["mcp"], &no_gh/1)
+  end
+
   test "project add writes a project from the templates that loads as a valid workflow", %{root: root, service: service} do
     output =
       capture_io(fn ->
