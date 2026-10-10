@@ -16,7 +16,7 @@ defmodule SymphonyElixirWeb.LiveRefresh do
   @doc "Loads the first payload with `load` and, once connected, subscribes and starts ticking."
   @spec start(LiveView.Socket.t(), (-> map())) :: LiveView.Socket.t()
   def start(socket, load) do
-    socket = socket |> assign(load: load, reload_timer: nil) |> reload()
+    socket = socket |> assign(load: load, reload_timer: nil, refresh_error: nil) |> reload()
 
     if LiveView.connected?(socket) do
       :ok = ObservabilityPubSub.subscribe()
@@ -28,7 +28,9 @@ defmodule SymphonyElixirWeb.LiveRefresh do
 
   @doc "Swaps the loader (for example when a filter changes) and reloads now."
   @spec replace(LiveView.Socket.t(), (-> map())) :: LiveView.Socket.t()
-  def replace(socket, load), do: socket |> assign(:load, load) |> reload()
+  def replace(socket, load) do
+    socket |> assign(load: load, payload: nil) |> reload()
+  end
 
   @doc "Handles the tick, update and deferred-reload messages `start/2` sets up."
   @spec handle_info(term(), LiveView.Socket.t()) :: LiveView.Socket.t()
@@ -43,11 +45,24 @@ defmodule SymphonyElixirWeb.LiveRefresh do
   end
 
   def handle_info(:observability_updated, socket), do: socket
-  def handle_info(:reload, socket), do: socket |> assign(:reload_timer, nil) |> reload()
+  def handle_info(:reload, socket), do: reload(socket)
   def handle_info(_message, socket), do: socket
 
   defp reload(socket) do
-    assign(socket, payload: socket.assigns.load.(), now: DateTime.utc_now(), loaded_at: System.monotonic_time(:millisecond))
+    if socket.assigns.reload_timer, do: Process.cancel_timer(socket.assigns.reload_timer)
+    payload = socket.assigns.load.()
+    error = payload[:error]
+    previous = socket.assigns[:payload]
+    retry? = error || payload[:snapshot_status] == "partial"
+    timer = if retry? && LiveView.connected?(socket), do: Process.send_after(self(), :reload, 2_000)
+
+    assign(socket,
+      payload: if(error && previous && !previous[:error], do: previous, else: payload),
+      refresh_error: error,
+      reload_timer: timer,
+      now: DateTime.utc_now(),
+      loaded_at: System.monotonic_time(:millisecond)
+    )
   end
 
   defp reload_ms, do: Endpoint.config(:dashboard_reload_ms) || 1_000

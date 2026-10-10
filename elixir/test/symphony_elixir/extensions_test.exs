@@ -1018,6 +1018,40 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert render(view) =~ "second update"
   end
 
+  test "dashboard keeps its last snapshot through a temporary failure and retries" do
+    orchestrator_name = Module.concat(__MODULE__, :RecoveringOrchestrator)
+    snapshot = static_snapshot()
+    {:ok, orchestrator_pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50, dashboard_reload_ms: 0)
+
+    {:ok, view, html} = live(build_conn(), "/")
+    assert html =~ "MT-HTTP"
+
+    :sys.replace_state(orchestrator_pid, &Keyword.put(&1, :snapshot, :unavailable))
+    send(view.pid, :observability_updated)
+    assert_eventually(fn -> render(view) =~ "Showing the last snapshot" end)
+    assert render(view) =~ "MT-HTTP"
+    assert render(view) =~ "Retrying automatically"
+
+    :sys.replace_state(orchestrator_pid, &Keyword.put(&1, :snapshot, snapshot))
+    assert_eventually(fn -> not (render(view) =~ "Showing the last snapshot") end, 150)
+    assert render(view) =~ "MT-HTTP"
+  end
+
+  test "dashboard recovers from an initial snapshot failure without an update notification" do
+    orchestrator_name = Module.concat(__MODULE__, :InitiallyUnavailableOrchestrator)
+    {:ok, orchestrator_pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: :unavailable)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50, dashboard_reload_ms: 0)
+
+    {:ok, view, html} = live(build_conn(), "/")
+    assert html =~ "Snapshot unavailable"
+    refute html =~ "Showing the last snapshot"
+
+    :sys.replace_state(orchestrator_pid, &Keyword.put(&1, :snapshot, static_snapshot()))
+    assert_eventually(fn -> render(view) =~ "MT-HTTP" end, 150)
+    refute render(view) =~ "Snapshot unavailable"
+  end
+
   test "dashboard header, queue estimates and health follow the snapshot and settings" do
     write_workflow_file!(Workflow.workflow_file_path(), observability_daily_budget_usd: 10, max_concurrent_agents: 2)
     orchestrator_name = Module.concat(__MODULE__, :QueueOrchestrator)

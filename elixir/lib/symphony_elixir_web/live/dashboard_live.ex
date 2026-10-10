@@ -51,7 +51,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   @impl true
   def render(assigns) do
-    assigns = assign(assigns, sections: @sections, shows: @shows)
+    assigns = assign(assigns, sections: @sections, shows: @shows, refresh_error: assigns[:refresh_error])
 
     ~H"""
     <section class={["dash", @payload[:error] && "dash-error"]}>
@@ -71,6 +71,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </div>
           <.live_badge />
         </div>
+        <section :if={@refresh_error || @payload[:error]} class="error-card" role="status">
+          <h2 class="error-title">Snapshot unavailable</h2>
+          <p class="error-copy"><strong><%= (@refresh_error || @payload.error).code %>:</strong> <%= (@refresh_error || @payload.error).message %>. Retrying automatically.</p>
+          <p :if={!@payload[:error]} class="error-copy">Showing the last snapshot from <%= @payload.generated_at %>.</p>
+        </section>
         <div :if={!@payload[:error]} class="filters">
           <nav :if={length(@payload[:projects] || []) > 1} class="project-filter" aria-label="Project">
             <span class="filter-label">Project</span>
@@ -131,12 +136,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         </div>
       </header>
 
-      <%= if @payload[:error] do %>
-        <section class="error-card">
-          <h2 class="error-title">Snapshot unavailable</h2>
-          <p class="error-copy"><strong><%= @payload.error.code %>:</strong> <%= @payload.error.message %></p>
-        </section>
-      <% else %>
+      <%= if !@payload[:error] do %>
         <section :if={@payload[:snapshot_status] == "partial"} class="error-card" role="status">
           <h2 class="error-title">Snapshot incomplete</h2>
           <p class="error-copy">Counts are unknown. Showing only observed project data.</p>

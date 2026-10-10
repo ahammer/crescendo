@@ -2419,7 +2419,7 @@ p {
 
   .dock .agent-card,
   .dock .free-slot {
-    height: 176px;
+    min-height: 176px;
     overflow: hidden;
   }
 
@@ -2606,6 +2606,15 @@ p {
 
   .dash > .dock {
     position: static;
+  }
+
+  .dock .agent-card,
+  .dock .free-slot {
+    min-height: clamp(220px, 26vh, 300px);
+  }
+
+  .dock .card-said {
+    -webkit-line-clamp: 3;
   }
 }
 
