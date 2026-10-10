@@ -30,6 +30,8 @@ implements its [specification](SPEC.md). On top of the Symphony reference implem
 
 All configuration is local: [docs/crescendo.md](docs/crescendo.md) covers the service file, and
 [elixir/README.md](elixir/README.md) covers setup and the per-project `WORKFLOW.md`.
+Operators can set a shared [OpenAI Fast-mode default](docs/crescendo.md#openai-fast-mode)
+through local MCP; the dashboard shows its status without exposing configuration controls.
 
 > [!WARNING]
 > Crescendo is an engineering preview for trusted environments. Its agents run without the usual

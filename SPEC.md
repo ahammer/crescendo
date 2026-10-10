@@ -2812,3 +2812,26 @@ they are never encoded as quoted segments of a dotted override path. CLI map ove
 inline tables, while thread configuration carries the same nested map through JSON. Existing
 transport definitions are preserved with `enabled=false`. Unknown or invalid configuration fails
 closed. Helpers expose only the curated source/evidence reads; lead MCP configuration is unchanged.
+
+## Operator Fast-mode default (Crescendo extension)
+
+A local stdio MCP server owns service-wide operator controls `crescendo_priority_mode_get`
+and `crescendo_priority_mode_set`. It does not start an orchestrator or expose a web mutation.
+The setting is one atomic JSON record under the configured service state root. It contains
+`enabled`, an optional ISO 8601 `expires_at` with timezone, and `updated_at`; it survives restart.
+The default is standard speed. Disabling or setting a new default clears the previous expiry.
+Invalid writes preserve the old record; invalid or unreadable records select standard speed
+and report the policy error. Without an expiry, the operator default persists until changed.
+
+Issue, PR-review, research and managed-helper threads share that default. Creation and resumption
+supply the native service tier, and every turn start rereads the policy to avoid cached Fast
+settings after disable or expiry. Fast requests use `serviceTier: fast`, normally acknowledged
+as provider tier `priority`; standard requests explicitly use `default`. Existing turns are not
+cancelled by preference changes. Single-workflow runtimes keep their existing native defaults.
+Model/effort routing, trust, helper isolation, quota and admission limits remain unchanged.
+Worker MCP sessions identified by their run environment cannot change the operator's setting.
+
+The dashboard and state API remain read-only. `priority_mode` reports the current default and
+expiry; the dashboard shows On/Off, and agent badges reflect the native tier reported at thread
+startup. Requested speed and observed native acknowledgement remain distinct from measured
+latency or subscription debits. Nominal model-price USD estimates do not include tier surcharges.

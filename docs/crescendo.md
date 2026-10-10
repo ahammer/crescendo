@@ -8,6 +8,39 @@ multi-project control plane as out of scope; this document describes Crescendo's
 Everything is configured in local files on the machine that runs the service. The dashboard and
 the JSON API are read-only: nothing reachable over HTTP changes state.
 
+## OpenAI Fast mode
+
+The local operator MCP server runs with `crescendo mcp <crescendo.yml>` and exposes
+`crescendo_priority_mode_get` and `crescendo_priority_mode_set`. The repository's
+`.codex/config.toml` registers the installed CLI with the local service configuration.
+The server uses newline-delimited JSON-RPC over stdio and never starts another orchestrator.
+
+Set `{ "enabled": true }` to make Fast mode the service-wide default until disabled;
+set `{ "enabled": false }` to restore standard speed. An optional `expires_at` uses an
+ISO 8601 timestamp with a timezone. Without it the setting has no deadline. Changing the
+default clears any previous deadline, and a deadline restores standard speed exactly when
+reached for subsequent turns. Invalid changes leave the previous setting intact.
+
+`paths.state/priority-mode.json` holds the atomic, persistent operator setting. Issues,
+PR reviews, research and managed helpers use it when creating or resuming a native thread
+and at every new turn. Codex receives `serviceTier: fast` when enabled and `default` when
+disabled or expired; its acknowledged provider tier is normally `priority`. Single-workflow
+runtimes retain their existing native defaults. Running turns finish with their existing tier;
+they are not cancelled by a preference change. Workers identified by `CRESCENDO_WORK_ITEM`
+can read the MCP status but cannot call its mutation tool. Model/effort routing, helper
+isolation, scheduling, quota limits and admission remain independent.
+
+The dashboard shows **Fast mode: On/Off**, with an optional deadline. Agent cards show **Fast**
+when Codex reported that tier at thread startup. The read-only state API exposes `priority_mode`;
+thread provenance retains the native acknowledgement. No HTTP mutation or dashboard toggle exists.
+Unreadable or corrupt policies select standard speed and expose a policy error.
+
+[Official OpenAI speed documentation](https://learn.chatgpt.com/docs/agent-configuration/speed#fast-mode)
+lists supported Sol, Astra and Luna models. Included subscription allowance is consumed at 2.5x
+the Standard rate, while purchased credits use 2x; these are not guaranteed speed multipliers.
+Dashboard API-equivalent USD estimates continue to use configured model rates and do not measure
+subscription debits or include a service-tier surcharge.
+
 ## Additional read-only capacity and quiet windows
 
 Primary capacity remains `pool.slots`. Optional `helpers` adds a separate global pool (0–5,

@@ -216,6 +216,27 @@ defmodule SymphonyElixir.ServiceWebTest do
     assert post(build_conn(), "/api/v1/state", %{}).status == 405
   end
 
+  test "operator Fast defaults appear in the dashboard and API without UI controls", %{service: service} do
+    {:ok, view, _html} = live(build_conn(), "/")
+    assert has_element?(view, "#priority-mode", "Fast mode: Off")
+
+    set = fn enabled ->
+      message = %{"jsonrpc" => "2.0", "id" => 1, "method" => "tools/call", "params" => %{"name" => "crescendo_priority_mode_set", "arguments" => %{"enabled" => enabled}}}
+      assert {%{result: %{isError: false}}, true} = SymphonyElixir.MCP.handle(message, service, true)
+      send(view.pid, :observability_updated)
+    end
+
+    set.(true)
+    assert has_element?(view, "#priority-mode", "Fast mode: On")
+    state = json_response(get(build_conn(), "/api/v1/state"), 200)
+    assert %{"enabled" => true, "service_tier" => "fast", "expires_at" => nil} = state["priority_mode"]
+    refute has_element?(view, "#priority-mode button")
+    refute has_element?(view, "#priority-mode input")
+
+    set.(false)
+    assert has_element?(view, "#priority-mode", "Fast mode: Off")
+  end
+
   test "the state API merges every project and filters to one" do
     state = json_response(get(build_conn(), "/api/v1/state"), 200)
 

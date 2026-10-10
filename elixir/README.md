@@ -821,6 +821,26 @@ Legacy replacement headings prevent an issue from declaring itself a canonical r
 when its record would otherwise authorize another successor.
 
 
+### Service-wide OpenAI Fast mode
+
+`crescendo mcp <crescendo.yml>` exposes local stdio MCP tools `crescendo_priority_mode_get`
+and `crescendo_priority_mode_set`. Set `{ "enabled": true }` for an indefinite service-wide
+Fast default, or `{ "enabled": false }` for standard speed. Optional `expires_at` is a future
+ISO 8601 timestamp with a timezone; omitting it clears any prior deadline. The setting is
+atomically persisted as `priority-mode.json` under the service's state root and survives restarts.
+Worker MCP sessions may read but cannot change the operator's preference.
+
+Issues, reviews, research and managed helpers read it at thread creation/resume and every turn
+start, so disable or expiry cannot leave a cached Fast default on later turns. Current turns
+finish normally. Native `serviceTier: fast` requests are acknowledged as `priority` on the
+pinned Codex 0.160.0 binary. Model/effort routes and helper isolation remain unchanged. Legacy
+single-workflow runs keep their existing defaults. Invalid/unreadable policy selects standard speed.
+
+The dashboard has a read-only Fast-mode indicator and per-agent native Fast-tier badges;
+`/api/v1/state` includes `priority_mode`. The public web interface provides no mutation control.
+See [service operation and usage accounting](../docs/crescendo.md#openai-fast-mode) for MCP setup
+and the distinction between account consumption and the dashboard's nominal API estimates.
+
 ### Shared helper and quiet acceptance policy
 
 Local issue workers with a configured service quiet window receive `defer_quiet_acceptance`.

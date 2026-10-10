@@ -7,6 +7,7 @@ defmodule SymphonyElixir.Commands do
       crescendo labels sync <crescendo.yml> [<project>]
       crescendo labels migrate <crescendo.yml> <project> --from <old-prefix>
       crescendo drain on|off <crescendo.yml>
+      crescendo mcp <crescendo.yml>
       crescendo autopilot check <.crescendo/autopilot> [--workflow <WORKFLOW.md>]
 
   `project add` writes `projects/<id>/` from the built-in templates (never
@@ -38,11 +39,13 @@ defmodule SymphonyElixir.Commands do
   def run(["labels", "sync", path | projects], gh), do: labels_sync(path, projects, gh)
   def run(["labels", "migrate", path, project, "--from", old], gh), do: labels_migrate(path, project, old, gh)
   def run(["drain", mode, path], _gh) when mode in ["on", "off"], do: drain(mode, path)
+  def run(["mcp", path], _gh), do: SymphonyElixir.MCP.run(path)
   def run(["autopilot", "check", dir | rest], _gh), do: autopilot_check(dir, rest)
   def run(["autopilot" | _rest], _gh), do: {:error, usage()}
   def run(["project" | _rest], _gh), do: {:error, usage()}
   def run(["labels" | _rest], _gh), do: {:error, usage()}
   def run(["drain" | _rest], _gh), do: {:error, usage()}
+  def run(["mcp" | _rest], _gh), do: {:error, usage()}
   def run(_args, _gh), do: :not_a_command
 
   @spec usage() :: String.t()
@@ -53,6 +56,7 @@ defmodule SymphonyElixir.Commands do
       crescendo labels sync <crescendo.yml> [<project>...]
       crescendo labels migrate <crescendo.yml> <project> --from <old-prefix>
       crescendo drain on|off <crescendo.yml>
+      crescendo mcp <crescendo.yml>
       crescendo autopilot check <.crescendo/autopilot> [--workflow <WORKFLOW.md>]
     """
   end
