@@ -516,6 +516,8 @@ This adds no configuration, control or write endpoint.
 The observability UI now runs on a minimal Phoenix stack:
 
 - LiveView for the dashboard at `/`
+- A temporary snapshot failure leaves the last good dashboard view visible with its timestamp and a retry notice; the view retries automatically.
+  Incomplete service snapshots keep project failures and unknown counts visible while the view retries.
 - JSON API for operational debugging under `/api/v1/*`
 - Bandit as the HTTP server
 - Phoenix dependency static assets for the LiveView client bootstrap

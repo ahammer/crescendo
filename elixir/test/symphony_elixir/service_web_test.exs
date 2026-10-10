@@ -516,6 +516,27 @@ defmodule SymphonyElixir.ServiceWebTest do
     assert html =~ "MT-7"
   end
 
+  test "changing to an unavailable project clears the previous view and retries" do
+    {:ok, view, html} = live(build_conn(), "/?project=alpha")
+    assert html =~ "Held work"
+    beta = GenServer.whereis(Project.via("beta", :orchestrator))
+    :ok = :sys.suspend(beta)
+
+    try do
+      html = render_patch(view, "/?project=beta")
+      assert html =~ "Snapshot incomplete"
+      assert html =~ "beta: timeout"
+      refute html =~ "Showing the last snapshot"
+      refute html =~ "Held work"
+    after
+      :ok = :sys.resume(beta)
+    end
+
+    wait_for(fn -> not (render(view) =~ "Snapshot incomplete") end, 150)
+    assert render(view) =~ "Private work"
+    refute render(view) =~ "Held work"
+  end
+
   test "a project that fails to start is flagged in the filter" do
     :persistent_term.put({Projects, :failures}, %{"beta" => "missing workflow"})
     on_exit(fn -> :persistent_term.put({Projects, :failures}, %{}) end)
