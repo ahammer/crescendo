@@ -142,7 +142,8 @@ GitHub source ownership accepts a closing directive or an exact standalone `Symp
 line with the matching same-repository worker branch. Incidental mentions provide no ownership.
 Closing directives can start a line, an unordered Markdown bullet, or a plain prose sentence after `.`, `!` or `?`;
 sentence prefixes containing straight or Unicode quotation marks, backticks or `>` do not establish ownership.
-Backtick and tilde fenced code blocks, including unclosed blocks, do not establish source ownership.
+Backtick and tilde fenced code blocks, including those in Markdown lists or left unclosed,
+do not establish source ownership.
 The issue-number, repository, branch and unique worker-attempt requirements still apply.
 Malformed handoff evidence retained from closure keeps acceptance unknown after marker removal.
 

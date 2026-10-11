@@ -538,8 +538,8 @@ defmodule SymphonyElixir.GitHub.Client do
 
   defp owned_delivery_source?(source, id, repo) do
     number = Regex.escape(id)
-    # Examples are not ownership declarations, even when a fence is left open.
-    fences = ~r/^[\t ]*(([`~])\2{2,}+)[^\r\n]*(?:\r?\n|\z).*?(?:^[\t ]*\1\2*[\t ]*\r?$|\z)/ms
+    # Examples are not ownership declarations, even in lists or when a fence is left open.
+    fences = ~r/^[\t ]*(?:(?:[-*+]|\d{1,9}[.)])[\t ]+)*(([`~])\2{2,}+)[^\r\n]*(?:\r?\n|\z).*?(?:^[\t ]*\1\2*[\t ]*\r?$|\z)/ms
     body = Regex.replace(fences, source[:body] || "", "\n")
     closes = ~r/^\s*(?:[-*+][\t ]+|[^>\r\n`\p{Quotation_Mark}]*[.!?][\t ]+)?(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+##{number}\b/imu
     declares = ~r/^[\t ]*Symphony issue: ##{number}[\t ]*\r?$/m
