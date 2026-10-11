@@ -1331,6 +1331,20 @@ Adapter output MUST satisfy Section 4.1.1. In addition:
 - The GitHub Issues adapter checks native `blocked_by` relationships for otherwise routable open
   issues at polling and ID refresh. Open blockers and `not_planned` closures make them
   `dispatchable=false`; failed or malformed dependency reads fail closed.
+- GitHub worker/intake instructions MUST register an actually required existing delivery producer
+  as a native dependency before another unchanged blocked attempt. Attachment MUST use explicit
+  repository/issue identity and the global issue ID, with complete paginated read-back; uncertain
+  or duplicate mutations MUST be read back before retrying. Prose mentions are not edges or task
+  authority. Native admission/reconciliation owns waiting and resumption of the same canonical
+  owner, preparation and original budget; no additional continuation owner or manual hold is added.
+  Source/evidence and unmet acceptance MUST be retained before attachment can stop a live worker.
+  Once an open native prerequisite is verified, worker instructions MUST end the turn without a
+  blocked marker or review handoff label, including on a final attempt, and keep the consumer open.
+  Ordinary failure and final-attempt disposition rules apply only when there is no verified open
+  native prerequisite.
+  Intake MUST withhold the configured admission label from newly filed dependent consumers until
+  attachment is verified; an already authorized consumer keeps its existing admission label.
+  Existing retirement/no-clone policy and public read-only/private-project boundaries remain intact.
 - On ID refresh, an item the provider reports as permanently deleted (GitHub `410 Gone`) SHOULD be
   returned in a terminal state rather than omitted, so reconciliation stops its worker and cleans
   its workspace. An item that is merely hidden or moved (`404`) is omitted, which stops the worker
@@ -2674,6 +2688,25 @@ Extension config (`autopilot` object):
   - A running task MUST NOT dispatch again. A task requiring at least one pull request MUST wait
     while an open pull request carries its channel label, including drafts, so overdue schedules
     and retries do not create duplicate report PRs. Closing or merging that PR releases the hold.
+  - `skip_unchanged: true` MAY skip workspace/model creation only against a verified task input
+    baseline younger than 24 hours. Cheap checks MUST NOT claim full evaluation coverage.
+    Failed, short, interrupted or unverified completions MUST invalidate skip eligibility without
+    changing their existing attempt/backoff semantics. Baselines MUST survive restart/reload.
+    Admission MUST invalidate the old baseline durably before worker creation. The persisted
+    contract version MUST invalidate baselines when preflight semantics change.
+    One orchestrator owns component identity: source, complete tracker/PR inventory, evidence,
+    delivery protection/capacity and configuration. Unknown/unreadable inputs and failures to
+    persist or sync baseline invalidation MUST defer safely before worker creation.
+    Evidence producers MAY opt in as a complete cohort using `preflight_schema: 1` and the bounded
+    `preflight_observation` bookkeeping contract in `elixir/docs/planning_preflight.md`. Legacy
+    cohorts MUST retain strict identity. Resolved report pointers MAY compare substantive content
+    at the same role; pending publication, findings, acceptance, dependencies, holds and protected
+    delivery MUST remain identity inputs. Unknown versions/observation fields MUST defer.
+    Retained events MUST expose bounded admission component reasons, skips and unknown-input
+    deferrals without private paths/content. Normal-traffic canaries MUST report bounded counts,
+    worker time and estimated cost with coverage limits, not hypothetical historical savings.
+    Execution drain MUST remain separate from pending evaluation coverage; neither a skip nor
+    an empty execution queue authorizes heavy checks or satisfies quiet-performance acceptance.
   - `when` is `idle` (default) or `anytime`.
   - `effort` names a rung of `codex.routing.ladder` for the `research_route` model.
   - `expectations` is a list of text the prompt must meet.

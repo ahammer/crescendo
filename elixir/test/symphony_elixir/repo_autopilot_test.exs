@@ -294,6 +294,31 @@ defmodule SymphonyElixir.RepoAutopilotTest do
   end
 
   describe "prompts" do
+    test "repository task intake verifies prerequisites before admission" do
+      assert {:ok, folder} = Workflow.read_autopilot_folder(Path.expand("../.crescendo/autopilot"))
+      dir = Path.dirname(Workflow.workflow_file_path())
+      File.write!(Path.join(dir, "research.md"), "Shared research admission instructions")
+      File.write!(Path.join(dir, "pr.md"), "Review")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        extra_config: %{"labels" => %{"prefix" => "crescendo"}},
+        autopilot: %{
+          enabled: true,
+          guidelines: folder.guidelines,
+          channels: folder.channels,
+          prompts: %{pull_request: "pr.md", research: "research.md"}
+        }
+      )
+
+      task = Enum.find(Autopilot.research_items(Config.settings!().autopilot), &(&1.research.channel == "retrospective"))
+      prompt = PromptBuilder.build_prompt(task) |> String.replace(~r/\s+/, " ")
+      assert prompt =~ "retrospective lead"
+      refute prompt =~ "Shared research admission instructions"
+      assert prompt =~ "file a new dependent consumer without `crescendo:ready`"
+      assert prompt =~ "add it only after native attachment has been read back and verified"
+    end
+
     test "guidelines, deliverables and a task's PR scope are appended" do
       dir = Path.dirname(Workflow.workflow_file_path())
       File.write!(Path.join(dir, "rules.md"), "Keep it green.")

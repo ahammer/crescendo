@@ -377,7 +377,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "observations" => []
                },
                "helpers" => %{"recorded" => 0, "terminal_observed" => 0, "incomplete" => 0, "external_coverage" => "unknown"},
-               "planning" => %{"unchanged_skips" => 0, "ready_promotions" => 0, "startup_failures" => 0, "scope" => "retained_events"},
+               "planning" => %{"unchanged_skips" => 0, "admitted" => 0, "deferred" => 0, "ready_promotions" => 0, "startup_failures" => 0, "scope" => "retained_events"},
                "accounting" => %{"terminal_observed" => 0, "incomplete" => 0, "helper_usage_coverage" => "unknown"},
                "account_usage" => %{
                  "coverage" => "incomplete",

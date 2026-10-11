@@ -37,6 +37,27 @@ defmodule SymphonyElixir.AutopilotTest do
     assert hd(statuses).preflight_checked_at == checked
   end
 
+  test "unsuccessful research clears skip coverage and retains attempts and retry semantics" do
+    time = ~U[2026-10-11 04:02:00Z]
+    baseline = Autopilot.record_preflight(@empty, "maintenance", %{evidence: "digest"}, time, true)
+    admitted = Autopilot.invalidate_preflight(baseline, "maintenance")
+    refute Autopilot.unchanged?(admitted, "maintenance", %{evidence: "digest"}, time)
+    assert admitted.tasks["maintenance"].preflight_at == time
+    assert Autopilot.invalidate_preflight(@empty, "new-channel").tasks["new-channel"] == %{}
+
+    for {outcome, attempts, delay} <- [{:failed, 1, 1_800}, {:short, 1, 1_800}, {:interrupted, 0, 30}] do
+      state = Autopilot.record_research_finished(baseline, "maintenance", outcome, time, @settings)
+      refute Autopilot.unchanged?(state, "maintenance", %{evidence: "digest"}, time)
+      assert state.tasks["maintenance"].attempts == attempts
+      assert DateTime.compare(state.tasks["maintenance"].retry_at, DateTime.add(time, delay, :second)) == :eq
+    end
+
+    state = Autopilot.record_research_finished(baseline, "maintenance", :unverified, time, @settings)
+    assert state.tasks["maintenance"].last == :unverified
+    refute Autopilot.unchanged?(state, "maintenance", %{evidence: "digest"}, time)
+    refute Autopilot.unchanged?(baseline, "maintenance", %{evidence: "digest"}, DateTime.add(time, -1))
+  end
+
   defmodule CiClient do
     def fetch_commit_ci_state(sha) do
       send(Application.get_env(:symphony_elixir, :autopilot_test_pid), {:ci_lookup, sha})
@@ -540,6 +561,35 @@ defmodule SymphonyElixir.AutopilotTest do
   end
 
   describe "persistence" do
+    test "baseline invalidation reaches disk before a worker and exposes write failures" do
+      root = Path.dirname(Workflow.workflow_file_path())
+      path = Path.join(root, "preflight.dets")
+      copy = Path.join(root, "persisted-preflight.dets")
+      table = :preflight_sync_test
+      snapshot = :preflight_snapshot_test
+
+      on_exit(fn ->
+        Operations.close(table)
+        Operations.close(snapshot)
+      end)
+
+      {:ok, ^table} = :dets.open_file(table, file: String.to_charlist(path), ram_file: true)
+      key = %{contract: 1, evidence: "verified"}
+      baseline = Autopilot.record_preflight(@empty, "maintenance", key, DateTime.utc_now(), true)
+      :ok = :dets.insert(table, {:autopilot, baseline})
+      :ok = :dets.sync(table)
+      invalidated = Autopilot.invalidate_preflight(baseline, "maintenance")
+      assert :ok = Operations.save_autopilot_state(table, invalidated)
+      File.cp!(path, copy)
+      {:ok, ^snapshot} = Operations.open(copy, snapshot)
+      assert Operations.autopilot_state(snapshot) == invalidated
+      :ok = Operations.close(table)
+      assert {:error, _reason} = Operations.save_autopilot_state(table, baseline)
+      {:ok, ^table} = :dets.open_file(table, file: String.to_charlist(path), access: :read)
+      assert {:error, _reason} = Operations.save_autopilot_state(table, baseline)
+      assert Operations.autopilot_state(table) == invalidated
+    end
+
     test "autopilot state survives reopening the operations table" do
       path = Path.join(System.tmp_dir!(), "autopilot-ops-#{System.unique_integer([:positive])}.dets")
       table = :"autopilot_ops_#{System.unique_integer([:positive])}"
@@ -604,6 +654,8 @@ defmodule SymphonyElixir.AutopilotTest do
       send(pid, :run_poll_cycle)
       assert :sys.get_state(pid).running == %{}
       refute File.exists?(marker)
+      File.mkdir_p!(Path.join(root, "autopilot/maintenance"))
+      for file <- ["latest.json", "cost-state.json"], do: File.write!(Path.join(root, "autopilot/maintenance/" <> file), "{}")
       at = DateTime.utc_now()
       :persistent_term.put({RepoAutopilot, nil}, %{state: :absent, checked_at: at})
       :persistent_term.put({RepoAutopilot, :revision, nil}, {:ok, "source"})
@@ -613,7 +665,7 @@ defmodule SymphonyElixir.AutopilotTest do
       send(pid, :run_poll_cycle)
       state = :sys.get_state(pid)
       assert %{issue: %{research: %{input_key: key}}} = state.running["research:grooming"]
-      assert is_binary(key)
+      assert is_map(key)
       entry = state.running["research:grooming"]
       Process.exit(entry.pid, :kill)
       # Preserve the successful input baseline without claiming any audit coverage.
@@ -637,6 +689,283 @@ defmodule SymphonyElixir.AutopilotTest do
 
       send(pid, :run_poll_cycle)
       assert Map.has_key?(:sys.get_state(pid).running, "research:grooming")
+    end
+
+    for channel <- ["grooming", "maintenance"] do
+      test "#{channel} replays observation handoffs without workers and admits substantive changes" do
+        alias SymphonyElixir.RepoAutopilot
+        channel = unquote(channel)
+        root = Path.join(Path.dirname(Workflow.workflow_file_path()), "planning-evidence-" <> channel)
+        marker = Path.join(root, "workspace-created")
+        prior_root = System.get_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT")
+        prior_repo = :persistent_term.get({RepoAutopilot, nil}, %{state: :pending})
+        prior_revision = :persistent_term.get({RepoAutopilot, :revision, nil}, {:error, :unknown})
+        System.put_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT", root)
+
+        Application.put_env(:symphony_elixir, :task_deliveries_fun, fn _, _ ->
+          {:ok, %{issues: 0, pull_requests: 0}}
+        end)
+
+        on_exit(fn ->
+          restore_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT", prior_root)
+          :persistent_term.put({RepoAutopilot, nil}, prior_repo)
+          :persistent_term.put({RepoAutopilot, :revision, nil}, prior_revision)
+          Application.delete_env(:symphony_elixir, :task_deliveries_fun)
+        end)
+
+        write_autopilot_workflow!(
+          after_create_hook: "touch '#{marker}'",
+          autopilot: %{
+            channels: %{channel => planning_channel("Plan")}
+          }
+        )
+
+        fixture = "test/fixtures/planning/cycle.json" |> File.read!() |> Jason.decode!()
+        write_planning_cycle(root, fixture, "0402")
+        at = DateTime.utc_now()
+        :persistent_term.put({RepoAutopilot, nil}, %{state: :absent, checked_at: at})
+        :persistent_term.put({RepoAutopilot, :revision, nil}, {:ok, "source"})
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+        {pid, _name} = start_orchestrator!()
+        wait_for_startup_poll(pid)
+
+        :sys.replace_state(pid, fn state ->
+          due = System.monotonic_time(:millisecond) + 600_000
+          %{state | pulls_error: nil, pulls_observed_at: at, next_pulls_due_at_ms: due}
+        end)
+
+        send(pid, :run_poll_cycle)
+        id = "research:" <> channel
+        entry = :sys.get_state(pid).running[id]
+        assert is_map(entry.issue.research.input_key)
+        refute :sys.get_state(pid).autopilot.tasks[channel][:preflight_run_at]
+        finish_running_research(pid, id)
+        baseline = :sys.get_state(pid).autopilot
+        assert baseline.tasks[channel].last == :delivered
+        # DETS reopening and workflow reload preserve the component baseline.
+        path = Path.join(root, "preflight.dets")
+        table = :"planning_#{channel}"
+        {:ok, ^table} = Operations.open(path, table)
+        :ok = Operations.save_autopilot_state(table, baseline)
+        :ok = Operations.close(table)
+        {:ok, ^table} = Operations.open(path, table)
+        assert Operations.autopilot_state(table) == baseline
+        :ok = Operations.close(table)
+        supervisor = :sys.get_state(pid).task_supervisor
+        stop_supervised!(Orchestrator)
+        name = Module.concat(__MODULE__, "Restart#{channel}")
+        opts = [name: name, task_supervisor: supervisor, operations_path: path, operations_table: table]
+        pid = start_supervised!({Orchestrator, opts})
+        assert wait_for_startup_poll(pid).autopilot == baseline
+
+        :sys.replace_state(pid, fn state ->
+          due = System.monotonic_time(:millisecond) + 600_000
+          %{state | pulls_error: nil, pulls_observed_at: at, next_pulls_due_at_ms: due}
+        end)
+
+        assert :ok = WorkflowStore.force_reload()
+
+        for round <- ["0440", "0521", "0601"] do
+          write_planning_cycle(root, fixture, round)
+          planning_due(pid, channel, baseline)
+          File.rm(marker)
+          send(pid, :run_poll_cycle)
+          state = :sys.get_state(pid)
+          assert state.running == %{}
+          refute File.exists?(marker)
+          assert DateTime.diff(DateTime.utc_now(), state.autopilot.tasks[channel].finished_at, :second) >= 1_860
+          assert state.autopilot.tasks[channel].preflight_run_at == baseline.tasks[channel].preflight_run_at
+        end
+
+        usage = Operations.snapshot(:sys.get_state(pid).operations)
+        assert usage.planning.unchanged_skips == 3
+        assert usage.by_task == []
+        assert Enum.all?(usage.activity, &(not Map.has_key?(&1, :source_sha)))
+
+        planning_due(pid, channel, baseline)
+        :sys.replace_state(pid, &%{&1 | operations_error: "ledger unavailable"})
+        send(pid, :run_poll_cycle)
+        assert :sys.get_state(pid).running == %{}
+        assert :sys.get_state(pid).autopilot.tasks[channel].preflight_run_at == baseline.tasks[channel].preflight_run_at
+        assert Operations.snapshot(table).planning.deferred == usage.planning.deferred + 1
+        :sys.replace_state(pid, &%{&1 | operations_error: nil})
+
+        # A failed durable invalidation must leave both the worker and verified baseline untouched.
+        changed = put_in(fixture["latest"]["publication_status"], "pending")
+        write_planning_cycle(root, changed, "write-failed")
+        planning_due(pid, channel, baseline)
+
+        :sys.replace_state(pid, fn state ->
+          :ok = Operations.close(table)
+          {:ok, ^table} = :dets.open_file(table, file: String.to_charlist(path), access: :read)
+          state
+        end)
+
+        File.rm(marker)
+        send(pid, :run_poll_cycle)
+        state = :sys.get_state(pid)
+        assert state.running == %{}
+        refute File.exists?(marker)
+        assert state.autopilot.tasks[channel].preflight_key == baseline.tasks[channel].preflight_key
+        assert Operations.autopilot_state(table).tasks[channel].preflight_key == baseline.tasks[channel].preflight_key
+
+        :sys.replace_state(pid, fn state ->
+          :ok = Operations.close(table)
+          {:ok, ^table} = Operations.open(path, table)
+          state
+        end)
+
+        send(pid, :run_poll_cycle)
+        assert :sys.get_state(pid).running[id]
+        refute Operations.autopilot_state(table).tasks[channel][:preflight_run_at]
+        finish_running_research(pid, id)
+        :sys.get_state(pid)
+
+        mutations = [
+          put_in(fixture["findings"]["findings"], [%{"id" => "new-finding"}]),
+          put_in(fixture["latest"]["publication_status"], "pending"),
+          put_in(fixture["costs"]["pending_broad_coverage"], false),
+          put_in(fixture["findings"]["findings"], [%{"id" => "retained-finding", "dependencies" => [15]}]),
+          put_in(fixture["costs"]["acceptance_comparison_status"], "accepted"),
+          put_in(fixture["disposition"]["capacity_blocked"], false),
+          put_in(fixture["findings"]["future_unknown_field"], "changed"),
+          put_in(fixture["latest"]["completed_report_key"], "unknown-substantive-pointer"),
+          put_in(fixture["ci_cost"]["checks_authorized"], true)
+        ]
+
+        for changed <- mutations do
+          write_planning_cycle(root, changed, "changed")
+          planning_due(pid, channel, baseline)
+          send(pid, :run_poll_cycle)
+          assert :sys.get_state(pid).running[id]
+          finish_running_research(pid, id)
+          :sys.get_state(pid)
+        end
+
+        write_planning_cycle(root, fixture, "0402")
+        base = Path.join(root, "autopilot/maintenance")
+        File.mkdir_p!(Path.join(base, "pending"))
+        pending = put_in(fixture["findings"]["findings"], [%{"id" => "pending-publication-finding"}])
+        File.write!(Path.join(base, "pending/findings.json"), Jason.encode!(pending["findings"]))
+        File.write!(Path.join(base, "pending/ci-cost.json"), Jason.encode!(pending["ci_cost"]))
+        latest_path = Path.join(base, "latest.json")
+        latest = latest_path |> File.read!() |> Jason.decode!() |> Map.put("pending_report_key", "pending/findings.json")
+        File.write!(latest_path, Jason.encode!(latest))
+        planning_due(pid, channel, baseline)
+        send(pid, :run_poll_cycle)
+        key = :sys.get_state(pid).running[id].issue.research.input_key
+        refute key.evidence == baseline.tasks[channel].preflight_key.evidence
+        finish_running_research(pid, id)
+        pending_baseline = :sys.get_state(pid).autopilot
+        swapped = Map.merge(latest, %{"report_key" => latest["pending_report_key"], "pending_report_key" => latest["report_key"]})
+        File.write!(latest_path, Jason.encode!(swapped))
+        planning_due(pid, channel, pending_baseline)
+        send(pid, :run_poll_cycle)
+        swapped_key = :sys.get_state(pid).running[id].issue.research.input_key
+        refute swapped_key.evidence == key.evidence
+        finish_running_research(pid, id)
+        :sys.get_state(pid)
+        write_planning_cycle(root, fixture, "0402")
+
+        for {component, mutate} <- [
+              {:contract, fn state -> put_in(state.autopilot.tasks[channel].preflight_key.contract, 0) end},
+              {:source,
+               fn state ->
+                 :persistent_term.put({RepoAutopilot, :revision, nil}, {:ok, "changed-source"})
+                 state
+               end},
+              {:protection,
+               fn state ->
+                 issue = %Issue{id: "held-delivery", identifier: "GH-99", state: "open", labels: [], dispatchable: true}
+                 Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+                 %{state | blocked: %{"held-delivery" => %{issue: issue, reason: "hold", attempt: 2}}}
+               end},
+              {:tracker, fn state -> %{state | pull_requests: [%{number: 42, head: "new-head"}]} end},
+              {:configuration,
+               fn state ->
+                 write_autopilot_workflow!(
+                   max_concurrent_agents: 9,
+                   autopilot: %{
+                     channels: %{channel => planning_channel("Changed policy")}
+                   }
+                 )
+
+                 state
+               end}
+            ] do
+          planning_due(pid, channel, baseline)
+          :sys.replace_state(pid, mutate)
+          send(pid, :run_poll_cycle)
+          state = :sys.get_state(pid)
+          assert state.running[id], "expected admission for #{component}"
+
+          assert Enum.any?(Operations.snapshot(state.operations).activity, fn event ->
+                   event.kind == "task_preflight_admitted" and String.contains?(event.summary, Atom.to_string(component))
+                 end)
+
+          if component == :protection, do: assert(state.blocked["held-delivery"].attempt == 2)
+          finish_running_research(pid, id)
+          :sys.replace_state(pid, &%{&1 | blocked: %{}, pull_requests: []})
+          Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+          :persistent_term.put({RepoAutopilot, :revision, nil}, {:ok, "source"})
+        end
+
+        daily_baseline = :sys.get_state(pid).autopilot
+        planning_due(pid, channel, daily_baseline)
+
+        :sys.replace_state(pid, fn state ->
+          put_in(state.autopilot.tasks[channel].preflight_run_at, DateTime.add(at, -24, :hour))
+        end)
+
+        send(pid, :run_poll_cycle)
+        assert :sys.get_state(pid).running[id]
+
+        assert Enum.any?(
+                 Operations.snapshot(:sys.get_state(pid).operations).activity,
+                 &(&1.kind == "task_preflight_admitted" and &1.summary == "Planning inputs changed: daily_revisit")
+               )
+
+        finish_running_research(pid, id)
+        :sys.get_state(pid)
+
+        invalid_documents = [
+          put_in(fixture["latest"]["preflight_schema"], 2),
+          put_in(fixture["costs"]["preflight_observation"], %{"pending" => true}),
+          put_in(fixture["findings"]["preflight_observation"], %{"updated_at" => %{"pending" => true}})
+        ]
+
+        for invalid <- invalid_documents do
+          write_planning_cycle(root, invalid, "unknown")
+          planning_due(pid, channel, baseline)
+          send(pid, :run_poll_cycle)
+          assert :sys.get_state(pid).running == %{}
+        end
+
+        for invalid_key <- ["absent/findings.json", "../../outside/findings.json", 3] do
+          write_planning_cycle(root, fixture, "missing")
+          latest_path = Path.join(root, "autopilot/maintenance/latest.json")
+          latest = latest_path |> File.read!() |> Jason.decode!() |> Map.put("report_key", invalid_key)
+          File.write!(latest_path, Jason.encode!(latest))
+          planning_due(pid, channel, baseline)
+          send(pid, :run_poll_cycle)
+          assert :sys.get_state(pid).running == %{}
+        end
+
+        # Mixed schema cohorts stay strict; observation churn cannot acquire skip coverage.
+        legacy = put_in(fixture["findings"], Map.delete(fixture["findings"], "preflight_schema"))
+        write_planning_cycle(root, legacy, "legacy")
+        planning_due(pid, channel, baseline)
+        send(pid, :run_poll_cycle)
+        assert :sys.get_state(pid).running[id]
+        finish_running_research(pid, id)
+        :sys.get_state(pid)
+
+        File.write!(Path.join(root, "autopilot/maintenance/latest.json"), "unreadable json")
+        planning_due(pid, channel, baseline)
+        send(pid, :run_poll_cycle)
+        assert :sys.get_state(pid).running == %{}
+        assert Orchestrator.snapshot(name, 5_000).autopilot.tasks |> hd() |> Map.get(:last) == :delivered
+      end
     end
 
     test "a ready pull request takes the only slot ahead of an issue" do
@@ -1235,6 +1564,54 @@ defmodule SymphonyElixir.AutopilotTest do
     state
   end
 
+  defp planning_channel(focus) do
+    %{"focus" => focus, "min_issues" => 0, "every" => "30m", "skip_unchanged" => true, "exclusive" => "none"}
+  end
+
+  defp wait_for_startup_poll(pid, attempts \\ 100)
+  defp wait_for_startup_poll(_pid, 0), do: flunk("startup poll did not finish")
+
+  defp wait_for_startup_poll(pid, attempts) do
+    state = :sys.get_state(pid)
+
+    if state.issues_observed_at && not state.poll_check_in_progress do
+      state
+    else
+      Process.sleep(10)
+      wait_for_startup_poll(pid, attempts - 1)
+    end
+  end
+
+  defp planning_due(pid, channel, baseline) do
+    :sys.replace_state(pid, fn state ->
+      task = baseline.tasks[channel]
+      old = DateTime.add(DateTime.utc_now(), -31, :minute)
+      task = %{task | preflight_at: old, finished_at: old}
+      %{state | autopilot: put_in(baseline.tasks[channel], task)}
+    end)
+  end
+
+  defp write_planning_cycle(root, fixture, round) do
+    base = Path.join(root, "autopilot/maintenance")
+    report = round <> "/findings.json"
+    disposition = round <> "/disposition.json"
+    fixture = put_in(fixture["latest"]["report_key"], report)
+    fixture = put_in(fixture["latest"]["pending_report_key"], report)
+    fixture = put_in(fixture["latest"]["grooming_disposition_key"], disposition)
+    fixture = put_in(fixture["costs"]["last_completed"]["report_key"], report)
+    fixture = put_in(fixture["costs"]["pending"]["report_key"], report)
+    fixture = put_in(fixture["costs"]["last_resume_grooming_disposition_key"], disposition)
+
+    for {name, relative} <- [{"latest", "latest.json"}, {"costs", "cost-state.json"}, {"findings", report}, {"ci_cost", round <> "/ci-cost.json"}, {"disposition", disposition}] do
+      document = fixture[name]
+      document = put_in(document["preflight_observation"]["observation_key"], round)
+      document = put_in(document["preflight_observation"]["observed_at"], round)
+      path = Path.join(base, relative)
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, Jason.encode!(document))
+    end
+  end
+
   defp finish_running_research(pid, id) do
     %{ref: ref, pid: worker} = :sys.get_state(pid).running[id]
     Process.exit(worker, :kill)
@@ -1288,6 +1665,7 @@ defmodule SymphonyElixir.AutopilotTest do
       workspace_root: Path.join(Path.dirname(Workflow.workflow_file_path()), "workspaces"),
       # Workers park in the hook so no Codex session starts; the tests observe dispatch state.
       hook_before_run: "sleep 30",
+      hook_after_create: Keyword.get(overrides, :after_create_hook),
       max_concurrent_agents: Keyword.get(overrides, :max_concurrent_agents, 10),
       max_attempts: Keyword.get(overrides, :max_attempts),
       autopilot: autopilot
@@ -1300,7 +1678,7 @@ defmodule SymphonyElixir.AutopilotTest do
     name = Module.concat(__MODULE__, "Orchestrator#{suffix}")
     start_supervised!({Task.Supervisor, name: supervisor})
     pid = start_supervised!({Orchestrator, Keyword.merge(opts, name: name, task_supervisor: supervisor)})
-    # Let the startup tick settle so the test drives poll cycles itself.
+    # Synchronize with initialization; the scheduled startup poll may still be pending.
     :sys.get_state(pid)
     {pid, name}
   end

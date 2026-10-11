@@ -1,0 +1,60 @@
+{
+  "latest": {
+    "preflight_schema": 1,
+    "preflight_observation": {"updated_at": "2026-10-11T04:02:00Z", "observation_key": "observation-0402"},
+    "source_sha": "unchanged-source",
+    "completion_status": "incomplete",
+    "publication_status": "published-existing",
+    "broad_coverage_pending": true,
+    "pending_findings": false,
+    "pending_batch_admission": true,
+    "capacity_blocked": true,
+    "pending_selection_issue_numbers": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+  },
+  "costs": {
+    "preflight_schema": 1,
+    "preflight_observation": {"observed_at": "2026-10-11T04:02:00Z", "observation_key": "resume-0402"},
+    "last_decision": {"broad_due": true, "checks_authorized": false, "action": "defer-until-drained"},
+    "pending_broad_coverage": true,
+    "normal_window_comparison_pending": true,
+    "acceptance_comparison_status": "unaccepted",
+    "pending": {"completion_status": "incomplete", "source_sha": "unchanged-source"},
+    "last_completed": {"finished_at": "2026-10-10T22:00:00Z", "source_sha": "unchanged-source"}
+  },
+  "findings": {
+    "preflight_schema": 1,
+    "preflight_observation": {"updated_at": "2026-10-11T04:02:00Z", "run_key": "resume-0402"},
+    "source_sha": "unchanged-source",
+    "completion_status": "incomplete",
+    "publication_status": "published-existing",
+    "broad_coverage_pending": true,
+    "checks_all_passed": false,
+    "findings": [{"id": "retained-finding", "problem": "Quiet comparison remains unaccepted", "dependencies": [14], "focused_acceptance": ["Pass quiet p99 gate"], "publication": {"status": "published-existing", "issue_number": 1}}],
+    "cost_decision": {"broad_due": true, "checks_authorized": false, "action": "defer-until-drained"},
+    "blocked_evaluations": [{"name": "quiet-performance", "outcome": "blocked", "attempted": false, "unblocking_change": "Native prerequisite and confirmed quiet window"}]
+  },
+  "ci_cost": {
+    "preflight_schema": 1,
+    "preflight_observation": {"observed_at": "2026-10-11T04:02:00Z"},
+    "complete": false,
+    "checks_authorized": false,
+    "normal_window_comparison_pending": true
+  },
+  "disposition": {
+    "preflight_schema": 1,
+    "preflight_observation": {"observed_at": "2026-10-11T04:02:00Z", "disposition_key": "grooming-0402"},
+    "source_sha": "unchanged-source",
+    "initial_open_count": 16,
+    "final_open_count": 16,
+    "github_mutations": [],
+    "observed_effects": [],
+    "findings": [{"finding_id": "retained-finding", "issue_number": 1, "disposition": "published-existing", "pending_acceptance": true, "publication_observed": true}],
+    "pending_findings": false,
+    "pending_batch_admission": true,
+    "broad_coverage_pending": true,
+    "normal_window_comparison_pending": true,
+    "pending_selection_issue_numbers": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+    "remaining_blockers": ["native-prerequisite", "confirmed-quiet-window"],
+    "capacity_blocked": true
+  }
+}

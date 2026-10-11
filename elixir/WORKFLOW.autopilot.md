@@ -115,6 +115,38 @@ No description provided.
 6. Push, then mark the pull request ready for review and add the `symphony` label to it.
 7. As your very last action, add the `symphony:in-review` label to the issue. This hands the work to a separate reviewer run, which merges the pull request and thereby closes the issue.
 
+## Required native prerequisites
+
+When delivery actually requires an existing producer issue, register it before ending the turn so
+unchanged evidence cannot admit another consumer attempt. Optional improvements, diagnostics and
+arbitrary issue mentions are not prerequisites. Within this task's authority, read the producer at
+`GET /repos/OWNER/REPO/issues/NUMBER`; verify its repository, issue number and global numeric `id`
+(not `node_id` or the repository issue number). Read every page of the consumer's
+`GET /repos/CONSUMER_OWNER/CONSUMER_REPO/issues/CONSUMER_NUMBER/dependencies/blocked_by`.
+If the exact producer is absent, attach it with `POST` to that same path and JSON
+`{"issue_id": PRODUCER_GLOBAL_ID}`, then read every page back and verify the producer's `id`,
+`repository_url` and `number`. A prose link or a successful POST alone is not confirmation.
+
+If the POST times out, disconnects or reports a duplicate, read back before retrying; an exact edge
+means success. Retry only after a complete valid read proves it absent. Unavailable, malformed or
+incomplete reads leave attachment uncertain: preserve that fact and the next recovery read in the
+workpad and use the existing bounded failure policy, never claim the prerequisite is satisfied.
+Retain preparation, the branch/PR, source SHAs, unique evidence and unmet acceptance on this owner
+before attachment; reconciliation can stop a running worker as soon as it observes the edge.
+Keep `symphony` and native edges intact. Do not add holds, create prerequisite work in another project,
+promote a replacement, renew a budget or weaken acceptance. The existing admission/reconciliation
+owns the wait and resume; independent authorized work may proceed. Fresh accepted completion of
+the exact native producer allows the same owner and remaining attempt budget to resume;
+`not_planned`, unreadable evidence or a completed same-number issue in another repository does not.
+
+After verifying an open native prerequisite, update the workpad and end the turn without a blocked
+label, including on the final attempt. Keep the consumer open and its PR draft; do not split or close
+it solely because that producer is pending.
+Do not add `symphony:in-review` or hand the draft to a reviewer while waiting.
+The blocked/final-attempt rules below apply only when there is no verified open native prerequisite.
+Resumption uses the same logical attempt and remaining budget; the consumer still has to meet every
+acceptance gate.
+
 ## When you are blocked
 
 This is attempt {{ item_attempt }}. Nothing is parked: never wait for a human.
