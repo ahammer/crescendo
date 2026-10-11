@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.RunEnvTest do
-  use ExUnit.Case
+  use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.{Project, RunEnv}
 
