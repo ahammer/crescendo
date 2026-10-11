@@ -6,10 +6,13 @@ defmodule SymphonyElixir.QuietContinuation do
   @name "defer_quiet_acceptance"
   @fields ~w(reason source_sha pull_request evidence unmet_acceptance)
 
+  @spec configured?() :: boolean()
+  def configured?, do: match?(%{quiet_window: %Service.QuietWindow{}}, Service.current())
+
   @spec available?(map()) :: boolean()
   def available?(context) do
     context[:kind] == :issue and is_pid(context[:recipient]) and is_binary(context[:run_id]) and
-      is_nil(context[:worker_host]) and match?(%{quiet_window: %Service.QuietWindow{}}, Service.current())
+      is_nil(context[:worker_host]) and configured?()
   end
 
   @spec tool_spec() :: map()

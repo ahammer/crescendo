@@ -876,6 +876,10 @@ budget remain; unsuccessful acceptance still follows reduced-scope/retirement ru
 private-project fields are redacted. Deferral is recorded separately from completed/failed runs.
 Terminal or no-longer-visible issues, failed attempts and retired deliveries clear their saved
 continuation without resetting the attempt budget; tracker read failures keep it for reconciliation.
+If a restart removes the configured quiet window, the next successful observation of an active,
+routable canonical issue ends its deferral through the existing failure policy. Autopilot counts
+the original attempt once and uses its existing retry/retirement limit, preserving the canonical
+owner. Removing the wake condition does not pass quiet acceptance or failed product gates.
 
 A service can keep three primary slots while adding up to five global read-only helpers.
 Set `helpers: {slots: 5, model: gpt-6-luna, effort: max, timeout_ms: 900000}` in `crescendo.yml`;

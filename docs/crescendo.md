@@ -96,6 +96,10 @@ and `upcoming.waiting` displays the reason. Private-project details are redacted
 configuration and does not change the existing quiet-label policy for whole runs.
 Closed or no-longer-visible issues, failed logical attempts and retired deliveries clear their
 saved continuation while retaining the canonical budget. Failed tracker reads preserve the record.
+Removing the configured quiet window on restart ends an active, routable canonical delivery's deferral on
+its next successful tracker observation through the existing failure policy. Autopilot counts that
+original attempt once, then retries or retires its original owner at the configured limit. Missing
+quiet acceptance and product failures remain unmet; removing the window cannot pass them.
 
 The state API exposes `helpers`, `throttle.helpers`, `throttle.quiet_window`, `pacing`, and
 `usage.planning` (retained skip, promotion and startup events). Managed helper tokens have

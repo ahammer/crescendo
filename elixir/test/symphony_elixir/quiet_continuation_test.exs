@@ -95,6 +95,9 @@ defmodule SymphonyElixir.QuietContinuationTest do
     ref = Process.monitor(dead)
     assert_receive {:DOWN, ^ref, :process, ^dead, _}
     assert QuietContinuation.execute(args, %{context | recipient: dead})["success"] == false
+    Service.put_current(%{service | quiet_window: nil})
+    refute QuietContinuation.available?(context)
+    refute Enum.any?(DynamicTool.bind(helper_context: context).tool_specs, &(&1["name"] == "defer_quiet_acceptance"))
   end
 
   test "missing git cannot establish prepared source or evidence applicability", %{root: root, args: args} do

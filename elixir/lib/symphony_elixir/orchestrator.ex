@@ -882,6 +882,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_issue_state(%Issue{} = issue, state, active_states, terminal_states) do
+    prepared = quiet_continuation(state, issue)
+
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
@@ -896,6 +898,17 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
 
         terminate_running_issue(state, issue.id, false)
+
+      prepared && active_issue_state?(issue.state, active_states) && not QuietContinuation.configured?() ->
+        state
+        |> terminate_running_issue(issue.id, false)
+        |> fail_attempt_or_block(
+          issue.id,
+          Map.put(prepared, :issue, issue),
+          "configured quiet acceptance window removed",
+          "Prepared quiet acceptance cannot resume without its configured window"
+        )
+        |> clear_quiet_continuation(issue.id)
 
       active_issue_state?(issue.state, active_states) ->
         refresh_running_issue_state(state, issue)

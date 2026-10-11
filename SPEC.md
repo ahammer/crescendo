@@ -1603,6 +1603,11 @@ with private-project redaction. No worker polls or sleeps on an unchanged unavai
 Terminal or no-longer-visible issues, failed logical attempts and retired deliveries MUST clear
 their retained continuation durably, without resetting the canonical attempt budget. Tracker read
 failures MUST retain the continuation until its disposition can be observed.
+If a restart removes the configured quiet window, the first successful observation of an active,
+routable canonical issue MUST end its saved deferral through the existing failure policy. Autopilot
+counts the original logical attempt once and uses its existing retry/retirement limits; required
+quiet acceptance and failed product gates remain unmet. The removed wake condition MUST NOT
+park the delivery indefinitely.
 
 Crescendo routine deployments MUST bound a busy drain (default five minutes) and leave a dispatch
 pause (default thirty minutes) before another busy drain, including superseding candidates. An
