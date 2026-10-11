@@ -538,18 +538,69 @@ defmodule SymphonyElixir.GitHub.Client do
 
   defp owned_delivery_source?(source, id, repo) do
     number = Regex.escape(id)
-    # Examples are not ownership declarations, even in lists or when a fence is left open.
-    fences = ~r/^[\t ]*(?:(?:[-*+]|\d{1,9}[.)])[\t ]+)*(([`~])\2{2,}+)[^\r\n]*(?:\r?\n|\z).*?(?:^[\t ]*\1\2*[\t ]*\r?$|\z)/ms
-    body = Regex.replace(fences, source[:body] || "", "\n")
-    code_spans = ~r/(?<!`)(`+)(?!`)(?:(?!\r?\n[\t ]*\r?\n).)*?(?<!`)\1(?!`)/s
-    # Keep a backtick barrier so removing code cannot manufacture a declaration from the rest of its line.
-    body = Regex.replace(code_spans, body, "`")
-    closes = ~r/^\s*(?:[-*+][\t ]+|[^>\r\n`\p{Quotation_Mark}]*[.!?][\t ]+)?(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+##{number}\b/imu
-    declares = ~r/^[\t ]*Symphony issue: ##{number}[\t ]*\r?$/m
+    body = delivery_prose(source[:body] || "")
+    closes = ~r/^ {0,3}(?:[-*+][\t ]+|(?![\t ])[^>\r\n`\p{Quotation_Mark}]*[.!?][\t ]+)?(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)[\t ]+##{number}\b/imu
+    declares = ~r/^ {0,3}Symphony issue: ##{number}[\t ]*\r?$/m
     branch = ~r/^(?:(?:crescendo|symphony)\/#{number}-|(?:.*\/)?issue-#{number}(?:-|$))/
 
     source[:head_repo] == repo and (Regex.match?(closes, body) or Regex.match?(declares, body)) and
       Regex.match?(branch, source[:head_ref] || "")
+  end
+
+  defp delivery_prose(body) do
+    {lines, _fence} = body |> String.split("\n") |> Enum.map_reduce(nil, &delivery_fence_line/2)
+    body = Enum.join(lines, "\n")
+    # Block boundaries stop unmatched backticks from hiding declarations in a later paragraph or list.
+    blocks = ~r/^ {0,3}(?:[\#]{1,6}(?:[\t ][^\r\n]*)?|=+[\t ]*|-+[\t ]*|([*_-])(?:[\t ]*\1){2,}[\t ]*)\r?$/m
+    body = Regex.replace(blocks, body, "\n`\n")
+    body = Regex.replace(~r/^ {0,3}(?:[-*+]|1[.)])[\t ]+(?=\S)/m, body, "\n\\0")
+    # A blockquote can continue on lines without another > marker.
+    quotes = ~r/^ {0,3}>[^\r\n]*(?:\r?\n(?![\t ]*\r?$)[^\r\n]*)*/m
+    body = Regex.replace(quotes, body, "\n`\n")
+    code_spans = ~r/(?<!`)(`+)(?!`)(?:(?!\r?\n[\t ]*\r?\n).)*?(?<!`)\1(?!`)/s
+    # Barriers prevent removed examples from manufacturing declarations.
+    Regex.replace(code_spans, body, "`")
+  end
+
+  defp delivery_fence_line(line, nil) do
+    opener = ~r/^( {0,3}(?:(?:[-*+]|\d{1,9}[.)])[\t ]+)*)(([`~])\3{2,}+)([^\r\n]*)\r?$/
+
+    case Regex.run(opener, line) do
+      [_, prefix, marker, char, info] ->
+        indent = if String.trim(prefix) == "", do: 0, else: markdown_column(prefix)
+
+        if char == "`" and String.contains?(info, "`") do
+          {line, nil}
+        else
+          {"\n`\n", {char, byte_size(marker), indent}}
+        end
+
+      _ ->
+        {line, nil}
+    end
+  end
+
+  defp delivery_fence_line(line, {char, length, indent} = fence) do
+    case Regex.run(~r/^([\t ]*)([`~]+)[\t ]*\r?$/, line) do
+      [_, prefix, marker] ->
+        closes =
+          markdown_column(prefix) in indent..(indent + 3) and
+            byte_size(marker) >= length and String.trim(marker, char) == ""
+
+        {"\n`\n", if(closes, do: nil, else: fence)}
+
+      _ ->
+        {"", fence}
+    end
+  end
+
+  defp markdown_column(prefix) do
+    prefix
+    |> String.to_charlist()
+    |> Enum.reduce(0, fn
+      ?\t, column -> column + 4 - rem(column, 4)
+      _, column -> column + 1
+    end)
   end
 
   @doc false

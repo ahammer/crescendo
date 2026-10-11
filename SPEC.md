@@ -1429,10 +1429,16 @@ and PR observations. Ownership requires an explicit closing directive or an exac
 `symphony/<number>-...` or optionally namespaced `issue-<number>` with an optional suffix) and PR creation
 during a unique retained worker attempt. Titles and incidental references provide no ownership proof.
 Closing directives may start a line, an unordered Markdown bullet, or a plain prose sentence after `.`, `!` or `?`.
+Declarations must fit one line with at most three leading spaces; tab or deeper indentation is unsupported.
+Use a standalone unindented declaration for deeply nested prose.
 Sentence prefixes containing straight or Unicode quotation marks, backticks or `>` are not ownership declarations.
+Blockquotes, including continuation lines without another `>` marker, do not establish ownership.
 Matched backtick code spans, including multiline spans, do not establish source ownership.
+Heading, list and paragraph boundaries prevent unmatched backticks from hiding later prose.
 Backtick and tilde fenced code blocks, including those in Markdown lists or left unclosed,
 do not establish source ownership.
+Fence closers must use the opening character and at least its length, with at most three extra indentation
+columns beyond their container; deeper fence lines remain code. Removing examples cannot manufacture declarations.
 These body formats retain the same repository, issue-number, branch and worker-attempt checks.
 The original source/run association stays fixed across later review, merge, reopen and redispatch.
 Canonical handoffs and split scope are captured at worker dispatch and terminal reconciliation.

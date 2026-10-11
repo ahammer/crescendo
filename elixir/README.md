@@ -140,11 +140,17 @@ or terminal reconciliation survive tracker edits before the first delivery obser
 removal of the record or label.
 GitHub source ownership accepts a closing directive or an exact standalone `Symphony issue: #N`
 line with the matching same-repository worker branch. Incidental mentions provide no ownership.
-Closing directives can start a line, an unordered Markdown bullet, or a plain prose sentence after `.`, `!` or `?`;
-sentence prefixes containing straight or Unicode quotation marks, backticks or `>` do not establish ownership.
+Closing directives can start a line, an unordered Markdown bullet, or a plain prose sentence after `.`, `!` or `?`.
+Declarations must fit one line with at most three leading spaces. Tab or deeper indentation is unsupported;
+use a standalone unindented declaration for deeply nested prose.
+Sentence prefixes containing straight or Unicode quotation marks, backticks or `>` do not establish ownership.
+Blockquotes, including continuation lines without another `>` marker, do not establish ownership.
 Matched backtick code spans, including multiline spans, do not establish source ownership.
+Heading, list and paragraph boundaries prevent unmatched backticks from hiding later prose.
 Backtick and tilde fenced code blocks, including those in Markdown lists or left unclosed,
 do not establish source ownership.
+Fence closers must use the opening character and at least its length, with at most three extra indentation
+columns beyond their container; deeper fence lines remain code. Removing examples cannot manufacture declarations.
 The issue-number, repository, branch and unique worker-attempt requirements still apply.
 Malformed handoff evidence retained from closure keeps acceptance unknown after marker removal.
 
