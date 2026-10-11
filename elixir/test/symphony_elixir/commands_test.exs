@@ -221,6 +221,50 @@ defmodule SymphonyElixir.CommandsTest do
     assert {:error, "cannot read " <> _} = Commands.run(["drain", "on", Path.join(root, "absent.yml")], &no_gh/1)
   end
 
+  test "manual drain commands journal their lifecycle without changing a managed hold", %{root: root, service: service} do
+    File.write!(service, "paths: {state: state}\nprojects: {a: {}}")
+    managed = Path.join([root, "state", "deploy-drain.json"])
+    File.mkdir_p!(Path.dirname(managed))
+    File.write!(managed, "private-managed-transaction")
+    journal_path = Path.join(Path.dirname(managed), "deploys.jsonl")
+    File.write!(journal_path, "{\"outcome\":\"deployed\"}\n{\"interrupted\":")
+    assert capture_io(fn -> assert :ok = Commands.run(["drain", "on", service], &no_gh/1) end) =~ "Draining"
+    flag = managed |> Path.dirname() |> Path.join("drain") |> File.read!() |> Jason.decode!()
+    assert flag["kind"] == "manual"
+    assert capture_io(fn -> assert :ok = Commands.run(["drain", "off", service], &no_gh/1) end) =~ "Drain off"
+    assert File.read!(managed) == "private-managed-transaction"
+    journal = File.read!(journal_path)
+
+    events =
+      journal
+      |> String.split("\n", trim: true)
+      |> Enum.flat_map(fn line ->
+        case Jason.decode(line) do
+          {:ok, event} -> [event]
+          _partial -> []
+        end
+      end)
+
+    assert Enum.map(events, & &1["outcome"]) == ["deployed", "manual_drain_started", "manual_drain_finished"]
+    assert Enum.all?(tl(events), &(&1["owner_kind"] == "manual"))
+    refute journal =~ "private-managed"
+  end
+
+  test "manual drain commands report journal failures and preserve independent managed state", %{root: root, service: service} do
+    File.write!(service, "paths: {state: state}\nprojects: {a: {}}")
+    state = Path.join(root, "state")
+    File.mkdir_p!(Path.join(state, "deploys.jsonl"))
+    managed = Path.join(state, "deploy-drain.json")
+    File.write!(managed, "private-managed-transaction")
+    error = {:error, "could not append manual drain lifecycle to deployment journal"}
+
+    assert capture_io(fn -> assert Commands.run(["drain", "on", service], &no_gh/1) == error end) =~ "Draining"
+    assert File.exists?(Path.join(state, "drain"))
+    assert capture_io(fn -> assert Commands.run(["drain", "off", service], &no_gh/1) == error end) =~ "manual hold removed"
+    refute File.exists?(Path.join(state, "drain"))
+    assert File.read!(managed) == "private-managed-transaction"
+  end
+
   test "drain off reports when the drain flag cannot be removed", %{root: root, service: service} do
     File.write!(service, "paths: {state: state}\nprojects: {a: {}}")
     drain = Path.join([root, "state", "drain"])

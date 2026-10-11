@@ -588,9 +588,10 @@ The observability UI now runs on a minimal Phoenix stack:
   Health warns on incompleteness; dispatch can still report Governor-held service slots without
   inventing running or queue counts. The next successful snapshot clears the warning.
   Service `throttle.draining` covers a dispatch drain flag, quiet preparation, or a quiet run
-  finishing outside its active window. `throttle.drain_reason` reports `dispatch drain flag is present`,
+  finishing outside its active window. `throttle.drain_reason` reports `managed deployment drain is present`,
+  `interrupted deployment swap awaits verified rollback`, `dispatch drain flag is present`,
   `preparing for quiet acceptance`, or `waiting for a quiet acceptance run to finish`; otherwise
-  it is `null`. Explicit/manual flags take precedence and do not establish a running deployment.
+  it is `null`. Explicit holds take precedence; a legacy flag does not establish a running deployment.
   Policy and snapshot reasons reuse their captured quiet phase so fields agree at window boundaries.
   Flag contents, tokens and paths stay private; missing/legacy reasons remain unknown.
   `throttle.research_hold` is
@@ -611,6 +612,18 @@ The observability UI now runs on a minimal Phoenix stack:
   within one five-minute window. Unavailable observations still wait.
   Fully idle services deploy immediately after rechecking under the hold. The deployment journal
   records hold start/end, elapsed and sampled idle time, ready work and quota/budget restrictions.
+  `throttle.drain_owner` and retained admission samples distinguish managed, manual, legacy-unknown
+  and quiet holds without owner tokens, commands or paths. Managed drains use an atomic transaction
+  and an inherited kernel lock, separate from the manual flag. Governor admission checks reconcile
+  only an abandoned pre-swap hold, preserving live worker slots, spend and logical attempt budgets;
+  no live lock expires based on age. Dashboard reads only observe. Interrupted swaps stay held until
+  the deploy path restores the prior release and verifies health before its unchanged-target check.
+  Failed rollback, invalid state or failed lifecycle append keeps admission held for later recovery.
+  Manual `drain off` cannot remove managed state; legacy flags stay unattributed and never expire.
+  Manual lifecycle events use the shared locked journal appender, preserving events after truncated records;
+  the CLI reports append errors. The release embeds the shared Python deployment policy from
+  `ops/bin/deploy-state.py`; managed drains and manual lifecycle journalling need `python3` and kernel `flock` support.
+  No new public mutation endpoint exists.
   See [deployment policy](../docs/crescendo.md#install-and-deploy) for overrides and recovery.
   Deployment health also requires every enabled project's `tracker_ready` to be `true`: its
   Orchestrator has successfully polled active issues in this process generation with no subsequent
