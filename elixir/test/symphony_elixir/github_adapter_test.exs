@@ -884,7 +884,7 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
     pull =
       raw_pull(12, "OWNER", "octo/repo", %{
         "head" => %{"sha" => "owned-head", "ref" => "symphony/issue-42", "repo" => %{"full_name" => "octo/repo"}},
-        "body" => "Summary of the delivered scope.\n\nSymphony issue: #42\n",
+        "body" => "#### Summary\n\n- Closes #42. The retained evidence describes the delivered scope.\n",
         "created_at" => created_at,
         "updated_at" => at,
         "merged_at" => at,
@@ -944,8 +944,18 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
     assert association.closed_at == at
   end
 
-  test "non-closing ownership requires the exact issue line, worker branch and source repository" do
+  test "source ownership accepts closing sentences and bullets with the matching worker branch and repository" do
     for {body, branch, repo, count} <- [
+          {"- Closes #42. The historical hold remains unattributed.", "crescendo/42-drain-ownership", "octo/repo", 1},
+          {"Prepared deliveries spend another attempt on an unavailable window. Closes #42.", "crescendo/42-quiet", "octo/repo", 1},
+          {"* Fixes #42", "symphony/issue-42", "octo/repo", 1},
+          {"Summary!\tResolves #42.", "symphony/42-water", "octo/repo", 1},
+          {"- Closes #420.", "crescendo/42-drain-ownership", "octo/repo", 0},
+          {"Summary. Closes #42.", "crescendo/420-water", "octo/repo", 0},
+          {"- Closes #42.", "crescendo/42-water", "other/repo", 0},
+          {"The proposal closes #42 after future work.", "crescendo/42-water", "octo/repo", 0},
+          {"Do not close #42.", "crescendo/42-water", "octo/repo", 0},
+          {"> Closes #42", "crescendo/42-water", "octo/repo", 0},
           {"Symphony issue: #42", "symphony/issue-42", "octo/repo", 1},
           {"Summary.\r\n\r\nSymphony issue: #42\r\n", "symphony/issue-42", "octo/repo", 1},
           {"Symphony issue: #420", "symphony/issue-42", "octo/repo", 0},

@@ -765,6 +765,8 @@ and PR observations. Ownership requires an explicit closing directive or an exac
 `Symphony issue: #<number>` line, a same-repository worker branch (`crescendo/<number>-...`,
 `symphony/<number>-...` or optionally namespaced `issue-<number>` with an optional suffix) and PR creation
 during a unique retained worker attempt. Titles and incidental references provide no ownership proof.
+Closing directives may start a line, an unordered Markdown bullet, or a sentence after `.`, `!` or `?`.
+These body formats retain the same repository, issue-number, branch and worker-attempt checks.
 The original source/run association stays fixed across later review, merge, reopen and redispatch.
 Canonical handoffs and split scope are captured at worker dispatch and terminal reconciliation.
 Scope observed while a worker was active survives tracker edits before the first delivery

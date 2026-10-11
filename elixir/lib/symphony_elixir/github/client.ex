@@ -538,7 +538,7 @@ defmodule SymphonyElixir.GitHub.Client do
 
   defp owned_delivery_source?(source, id, repo) do
     number = Regex.escape(id)
-    closes = ~r/^\s*(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+##{number}\b/im
+    closes = ~r/(?:^\s*(?:[-*+][\t ]+)?|[.!?][\t ]+)(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+##{number}\b/im
     declares = ~r/^[\t ]*Symphony issue: ##{number}[\t ]*\r?$/m
     branch = ~r/^(?:(?:crescendo|symphony)\/#{number}-|(?:.*\/)?issue-#{number}(?:-|$))/
 
