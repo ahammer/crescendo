@@ -766,7 +766,8 @@ and PR observations. Ownership requires an explicit closing directive or an exac
 `symphony/<number>-...` or optionally namespaced `issue-<number>` with an optional suffix) and PR creation
 during a unique retained worker attempt. Titles and incidental references provide no ownership proof.
 Closing directives may start a line, an unordered Markdown bullet, or a plain prose sentence after `.`, `!` or `?`.
-Sentence prefixes containing quote characters, backticks or `>` are not ownership declarations.
+Sentence prefixes containing straight or Unicode quotation marks, backticks or `>` are not ownership declarations.
+Backtick and tilde fenced code blocks, including unclosed blocks, do not establish source ownership.
 These body formats retain the same repository, issue-number, branch and worker-attempt checks.
 The original source/run association stays fixed across later review, merge, reopen and redispatch.
 Canonical handoffs and split scope are captured at worker dispatch and terminal reconciliation.

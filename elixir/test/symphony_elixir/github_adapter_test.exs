@@ -950,6 +950,7 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
           {"Prepared deliveries spend another attempt on an unavailable window. Closes #42.", "crescendo/42-quiet", "octo/repo", 1},
           {"* Fixes #42", "symphony/issue-42", "octo/repo", 1},
           {"Summary!\tResolves #42.", "symphony/42-water", "octo/repo", 1},
+          {"Résumé. Closes #42.", "crescendo/42-water", "octo/repo", 1},
           {"- Closes #420.", "crescendo/42-drain-ownership", "octo/repo", 0},
           {"Summary. Closes #42.", "crescendo/420-water", "octo/repo", 0},
           {"- Closes #42.", "crescendo/42-water", "other/repo", 0},
@@ -959,6 +960,19 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
           {"> Historical proposal. Closes #42.", "crescendo/42-water", "octo/repo", 0},
           {"Example: `Summary. Closes #42.`", "crescendo/42-water", "octo/repo", 0},
           {"Example: \"Summary. Closes #42.\"", "crescendo/42-water", "octo/repo", 0},
+          {"Example: “Summary. Closes #42.”", "crescendo/42-water", "octo/repo", 0},
+          {"Example: ‘Summary. Closes #42.’", "crescendo/42-water", "octo/repo", 0},
+          {"Example: «Summary. Closes #42.»", "crescendo/42-water", "octo/repo", 0},
+          {"Example: „Summary. Closes #42.“", "crescendo/42-water", "octo/repo", 0},
+          {"Example: ‚Summary. Closes #42.‘", "crescendo/42-water", "octo/repo", 0},
+          {"Examples:\n```markdown\n- Closes #42.\n```", "crescendo/42-water", "octo/repo", 0},
+          {"Examples:\n~~~text\nSummary. Closes #42.\n~~~", "crescendo/42-water", "octo/repo", 0},
+          {"Examples:\n```\n- Closes #42.", "crescendo/42-water", "octo/repo", 0},
+          {"~~~ Summary. Closes #42.", "crescendo/42-water", "octo/repo", 0},
+          {"Examples:\r\n  ~~~text\r\n  - Closes #42.\r\n  ~~~", "crescendo/42-water", "octo/repo", 0},
+          {"Examples:\n````\n- Closes #42.\n```\nSummary. Closes #42.", "crescendo/42-water", "octo/repo", 0},
+          {"Examples:\n```\nSymphony issue: #42\n```", "crescendo/42-water", "octo/repo", 0},
+          {"Examples:\n```\n- Closes #420.\n````\nCloses #42.", "crescendo/42-water", "octo/repo", 1},
           {"Symphony issue: #42", "symphony/issue-42", "octo/repo", 1},
           {"Summary.\r\n\r\nSymphony issue: #42\r\n", "symphony/issue-42", "octo/repo", 1},
           {"Symphony issue: #420", "symphony/issue-42", "octo/repo", 0},
@@ -984,7 +998,7 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
       assert {:ok, %{sources: sources}} =
                GitHubClient.fetch_delivery_observation("42", tracker_settings: tracker_settings(), request_fun: request)
 
-      assert length(sources) == count
+      assert length(sources) == count, "unexpected ownership for #{inspect(body)}"
     end
   end
 

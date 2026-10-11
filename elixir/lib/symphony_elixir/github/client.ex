@@ -538,11 +538,14 @@ defmodule SymphonyElixir.GitHub.Client do
 
   defp owned_delivery_source?(source, id, repo) do
     number = Regex.escape(id)
-    closes = ~r/^\s*(?:[-*+][\t ]+|[^>\r\n"'`]*[.!?][\t ]+)?(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+##{number}\b/im
+    # Examples are not ownership declarations, even when a fence is left open.
+    fences = ~r/^[\t ]*(([`~])\2{2,}+)[^\r\n]*(?:\r?\n|\z).*?(?:^[\t ]*\1\2*[\t ]*\r?$|\z)/ms
+    body = Regex.replace(fences, source[:body] || "", "\n")
+    closes = ~r/^\s*(?:[-*+][\t ]+|[^>\r\n`\p{Quotation_Mark}]*[.!?][\t ]+)?(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+##{number}\b/imu
     declares = ~r/^[\t ]*Symphony issue: ##{number}[\t ]*\r?$/m
     branch = ~r/^(?:(?:crescendo|symphony)\/#{number}-|(?:.*\/)?issue-#{number}(?:-|$))/
 
-    source[:head_repo] == repo and (Regex.match?(closes, source[:body] || "") or Regex.match?(declares, source[:body] || "")) and
+    source[:head_repo] == repo and (Regex.match?(closes, body) or Regex.match?(declares, body)) and
       Regex.match?(branch, source[:head_ref] || "")
   end
 
