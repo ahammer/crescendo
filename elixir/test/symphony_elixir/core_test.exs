@@ -1386,15 +1386,10 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "stale retry timer messages do not consume newer retry entries" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     issue_id = "issue-stale-retry"
     orchestrator_name = Module.concat(__MODULE__, :StaleRetryOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
-
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
+    pid = start_supervised!({Orchestrator, name: orchestrator_name})
 
     initial_state = :sys.get_state(pid)
     current_retry_token = make_ref()
@@ -1415,7 +1410,6 @@ defmodule SymphonyElixir.CoreTest do
     end)
 
     send(pid, {:retry_issue, issue_id, stale_retry_token})
-    Process.sleep(50)
 
     assert %{
              attempt: 2,

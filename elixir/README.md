@@ -856,6 +856,36 @@ and the distinction between account consumption and the dashboard's nominal API 
 
 ### Shared helper and quiet acceptance policy
 
+Local issue workers with a configured service quiet window receive `defer_quiet_acceptance`.
+After daytime preparation, commit the source and evidence, keep the existing PR draft and pass
+`reason`, exact `source_sha`, the existing `pull_request` URL, 1–12 committed `evidence` paths and
+1–12 `unmet_acceptance` descriptions. Include failed product gates (for example a p99 over its
+unchanged threshold). Operations synchronously saves the canonical issue, logical/final attempt,
+PR, commit, evidence digests and recurring active-window wake condition before success is returned.
+Then update the workpad and end the turn without a blocked label; the worker yields at that boundary.
+Untracked nonignored files make source dirty; ignored generated artifacts remain usable.
+Evidence must be committed regular files, not symlinks.
+
+One deferral is allowed per canonical logical attempt. Unknown/active/unconfigured windows, stale
+workers and missing evidence/persistence reject it. Independent work uses the released slot; no
+worker waits or polls the clock. Normal tracker polling restores the same issue after restart and
+admits it only in the configured active quiet window with dependencies, throttle, deployment drain
+and quiet exclusivity enforced. The resumed worker gets a fresh prompt, compares current commit
+and committed evidence digests, and must recheck task/environment applicability before reuse.
+Changed, dirty or missing source/evidence cannot establish acceptance. The same PR and logical
+budget remain; unsuccessful acceptance still follows reduced-scope/retirement rules on a final attempt.
+`/api/v1/state` exposes retained identities in `deferred` and reasons in `upcoming.waiting`;
+private-project fields are redacted. Deferral is recorded separately from completed/failed runs.
+Terminal or no-longer-visible issues, failed attempts and retired deliveries clear their saved
+continuation without resetting the attempt budget; tracker read failures keep it for reconciliation.
+If a restart removes the configured quiet window, the next successful observation of an active,
+routable canonical issue ends its deferral through the existing failure policy. Autopilot counts
+the original attempt once and uses its existing retry/retirement limit, preserving the canonical
+owner. Removing the wake condition does not pass quiet acceptance or failed product gates.
+A replacement project check-in releases the dead orchestrator's service slots and quiet reservation,
+even if its exit notification is still pending. Saved continuation identities and budgets remain intact,
+and the interrupted run cannot leave service admission held after its window.
+
 A service can keep three primary slots while adding up to five global read-only helpers.
 Set `helpers: {slots: 5, model: gpt-6-luna, effort: max, timeout_ms: 900000}` in `crescendo.yml`;
 helpers default to disabled. Leads receive `helper_start`, `helper_status` and `helper_cancel`.

@@ -34,10 +34,44 @@ defmodule SymphonyElixir.PromptBuilder do
   # rules reach every prompt without template edits. Guidelines are plain
   # text, never rendered as a template.
   defp append_sections(prompt, issue, {:ok, workflow}, opts) do
-    [prompt, deliverables(issue), task_scope(issue), guidelines(workflow), handoff(issue, opts)]
+    sections = [deliverables(issue), task_scope(issue), guidelines(workflow), handoff(issue, opts)]
+
+    ([prompt | sections] ++ [quiet_continuation(issue, opts)])
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n\n")
   end
+
+  defp quiet_continuation(%{kind: :issue}, opts) do
+    case Keyword.get(opts, :quiet_continuation) do
+      nil ->
+        if Keyword.get(opts, :quiet_continuation_available, false) do
+          """
+          ## Prepared quiet acceptance
+
+          A prepared delivery can yield once per logical attempt with `defer_quiet_acceptance`
+          until the configured quiet window. Commit preparation and evidence, keep the existing PR draft,
+          and pass its URL, exact HEAD, committed evidence paths, durable reason and all unmet acceptance.
+          Include failed product gates explicitly. Deferral does not pass them. After tool success update
+          the workpad and end the turn without a blocked label; do not wait or poll the window.
+          """
+        end
+
+      prepared ->
+        """
+        ## Resume prepared quiet acceptance
+
+        Continue the same canonical issue and logical attempt. Reuse exactly this PR: #{prepared.pull_request}.
+        Retained preparation (including source and evidence digest revalidation): #{Jason.encode!(prepared)}
+        Recheck evidence applicability against the current source, task and environment before reuse.
+        If evidence_applicable is false, repair or regenerate stale evidence; retained evidence proves no current gate.
+        Complete every unmet acceptance gate, including product failures. Deferral is never accepted delivery.
+        No second quiet deferral is available in this attempt. If acceptance cannot be achieved, follow
+        the existing blocked/final-attempt reduced-scope or retirement rules; do not clone the issue or PR.
+        """
+    end
+  end
+
+  defp quiet_continuation(_issue, _opts), do: nil
 
   defp handoff(%{kind: :issue}, opts) do
     if Keyword.get(opts, :final_attempt, false), do: SymphonyElixir.Handoff.instructions()

@@ -17,6 +17,7 @@ defmodule SymphonyElixir.Orchestrator do
     ModelRouting,
     Operations,
     Project,
+    QuietContinuation,
     Quota,
     RepoAutopilot,
     Startup,
@@ -70,6 +71,7 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       blocked: %{},
       startup_failures: %{},
+      quiet_continuations: %{},
       retry_attempts: %{},
       polled_issues: [],
       issues_observed_at: nil,
@@ -128,6 +130,7 @@ defmodule SymphonyElixir.Orchestrator do
           codex_quota: Operations.quota(operations),
           artifacts_root: artifacts_root(opts),
           startup_failures: Operations.startup_state(operations),
+          quiet_continuations: Operations.quiet_continuations(operations),
           autopilot: Operations.autopilot_state(operations)
         }
 
@@ -492,7 +495,7 @@ defmodule SymphonyElixir.Orchestrator do
         {outcome, summary, interruption} =
           if running_entry[:startup_failure],
             do: {"startup_failed", "Startup admission failed", nil},
-            else: worker_outcome(reason)
+            else: quiet_worker_outcome(state, running_entry, reason)
 
         Operations.finish_run(
           state.operations,
@@ -510,7 +513,10 @@ defmodule SymphonyElixir.Orchestrator do
           }
         )
 
-        state = handle_agent_down(reason, state, issue_id, running_entry, session_id)
+        state =
+          if deferred_run?(state, running_entry),
+            do: release_issue_claim(state, issue_id),
+            else: handle_agent_down(reason, state, issue_id, running_entry, session_id)
 
         Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
 
@@ -526,6 +532,19 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp startup_exit_evidence(entry, _reason), do: entry
+
+  defp quiet_worker_outcome(state, entry, reason) do
+    if deferred_run?(state, entry),
+      do: {"deferred", "Prepared delivery yielded for quiet acceptance", "quiet_acceptance"},
+      else: worker_outcome(reason)
+  end
+
+  defp deferred_run?(state, entry) do
+    case quiet_continuation(state, entry.issue) do
+      %{run_id: run_id} -> run_id == entry[:run_id]
+      _ -> false
+    end
+  end
 
   defp worker_outcome(:normal), do: {"completed", "Worker finished", nil}
 
@@ -752,12 +771,13 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp reconcile_running_issues(%State{} = state) do
     state = reconcile_stalled_running_issues(state)
-    running_ids = tracker_backed_ids(state.running)
+    quiet_ids = Enum.map(state.quiet_continuations, fn {_key, prepared} -> prepared.issue_id end)
+    tracked_ids = Enum.uniq(tracker_backed_ids(state.running) ++ quiet_ids)
 
-    if running_ids == [] do
+    if tracked_ids == [] do
       state
     else
-      case Tracker.fetch_issues_by_ids(running_ids) do
+      case Tracker.fetch_issues_by_ids(tracked_ids) do
         {:ok, issues} ->
           issues
           |> reconcile_running_issue_states(
@@ -765,7 +785,7 @@ defmodule SymphonyElixir.Orchestrator do
             active_state_set(),
             terminal_state_set()
           )
-          |> reconcile_missing_running_issue_ids(running_ids, issues)
+          |> reconcile_missing_running_issue_ids(tracked_ids, issues)
 
         {:error, reason} ->
           Logger.debug("Failed to refresh running issue states: #{inspect(reason)}; keeping active workers")
@@ -862,18 +882,33 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_issue_state(%Issue{} = issue, state, active_states, terminal_states) do
+    prepared = quiet_continuation(state, issue)
+
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
         Operations.disposition(state.operations, Map.from_struct(issue), Config.settings!().labels.prefix)
 
-        terminate_running_issue(state, issue.id, true)
+        state
+        |> terminate_running_issue(issue.id, true)
+        |> clear_quiet_continuation(issue.id)
 
       !issue_routable?(issue) or not handoff_owner?(issue, state.autopilot) ->
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
 
         terminate_running_issue(state, issue.id, false)
+
+      prepared && active_issue_state?(issue.state, active_states) && not QuietContinuation.configured?() ->
+        state
+        |> terminate_running_issue(issue.id, false)
+        |> fail_attempt_or_block(
+          issue.id,
+          Map.put(prepared, :issue, issue),
+          "configured quiet acceptance window removed",
+          "Prepared quiet acceptance cannot resume without its configured window"
+        )
+        |> clear_quiet_continuation(issue.id)
 
       active_issue_state?(issue.state, active_states) ->
         refresh_running_issue_state(state, issue)
@@ -939,7 +974,10 @@ defmodule SymphonyElixir.Orchestrator do
         state_acc
       else
         log_missing_running_issue(state_acc, issue_id)
-        terminate_running_issue(state_acc, issue_id, false)
+
+        state_acc
+        |> terminate_running_issue(issue_id, false)
+        |> clear_quiet_continuation(issue_id)
       end
     end)
   end
@@ -1254,7 +1292,7 @@ defmodule SymphonyElixir.Orchestrator do
       summary: "Attempt #{attempts}/#{settings.max_item_attempts}: #{reason}"
     })
 
-    state = state |> put_autopilot(autopilot) |> release_issue_claim(issue.id)
+    state = state |> put_autopilot(autopilot) |> release_issue_claim(issue.id) |> clear_quiet_continuation(issue.id)
     if attempts >= settings.max_item_attempts, do: retire_item(state, issue, reason), else: state
   end
 
@@ -1275,7 +1313,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         state = put_autopilot(state, Map.update(state.autopilot, :retired_items, %{issue.id => true}, &Map.put(&1, issue.id, true)))
         cleanup_issue_workspace(issue)
-        state
+        clear_quiet_continuation(state, issue.id)
 
       {:error, error} ->
         Logger.warning("Autopilot could not retire #{issue_context(issue)}: #{inspect(error)}; retrying next poll")
@@ -1347,7 +1385,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp settle_autopilot_item(state, %Issue{} = issue, settings) do
     case autopilot_item_status(state, issue, settings) do
       :blocked -> consume_blocked_marker(state, issue, settings)
-      :retired -> {[], state}
+      :retired -> {[], clear_quiet_continuation(state, issue.id)}
       :exhausted -> {[], retire_item(state, issue, "attempts exhausted")}
       :review_capped -> {[], retire_item(state, issue, "review run cap reached without merging")}
       :active -> {[issue], state}
@@ -1548,7 +1586,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
     startup = state.startup_failures[issue.id]
-    attempt = if startup, do: startup.delivery_attempt, else: attempt
+    prepared = quiet_continuation(state, issue)
+    attempt = if startup, do: startup.delivery_attempt, else: (prepared && prepared.retry_attempt) || attempt
 
     case refresh_issue_for_dispatch(issue) do
       {:ok, %Issue{} = refreshed_issue} ->
@@ -1638,12 +1677,21 @@ defmodule SymphonyElixir.Orchestrator do
   # swap the model or hold the item; a route error still fails in the runner.
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, {worker_host, route}) do
     settings = Config.settings!().autopilot
+    prepared = quiet_continuation(state, issue)
     item_attempt = Autopilot.failed_attempts(state.autopilot, Autopilot.delivery_key(issue)) + 1
-    final_attempt = settings.enabled and Autopilot.final_run?(state.autopilot, issue, settings)
+
+    final_attempt =
+      if prepared do
+        prepared.final_attempt
+      else
+        settings.enabled and Autopilot.final_run?(state.autopilot, issue, settings)
+      end
+
     selected = selected_route(route)
     run_id = Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
     codex = Config.settings!().codex
     {candidate, claim} = claim_checkpoint(state.operations, issue, item_attempt, worker_host, codex)
+    candidate = if prepared, do: nil, else: candidate
 
     spawn_result =
       with :ok <- claim do
@@ -1656,7 +1704,8 @@ defmodule SymphonyElixir.Orchestrator do
             model_route: route,
             run_id: run_id,
             codex_settings: codex,
-            checkpoint: candidate
+            checkpoint: candidate,
+            quiet_continuation: prepared
           )
         end)
       end
@@ -2020,7 +2069,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         Operations.disposition(state.operations, Map.from_struct(issue), Config.settings!().labels.prefix)
         cleanup_issue_workspace(issue, metadata)
-        {:noreply, release_issue_claim(state, issue_id)}
+        {:noreply, state |> release_issue_claim(issue_id) |> clear_quiet_continuation(issue_id)}
 
       retry_candidate_issue?(issue, terminal_states) ->
         handle_active_retry(state, issue, attempt, metadata)
@@ -2424,7 +2473,7 @@ defmodule SymphonyElixir.Orchestrator do
         Enum.map(state.polled_issues, &Map.take(&1, [:id, :title, :description, :state, :state_reason, :labels, :blocked_by, :updated_at, :delivery_key, :dispatchable, :pull_request]))
         |> Enum.sort_by(& &1.id)
 
-      protection = {Map.keys(state.running), state.retry_attempts, state.claimed, state.blocked, state.startup_failures, state.autopilot[:handoff_owners]}
+      protection = {Map.keys(state.running), state.retry_attempts, state.claimed, state.blocked, state.startup_failures, state.autopilot[:handoff_owners], state.quiet_continuations}
       key = :crypto.hash(:sha256, :erlang.term_to_binary({sha, issues, state.pull_requests, findings, protection, config})) |> Base.encode16(case: :lower)
       {:ok, key}
     else
@@ -2495,7 +2544,19 @@ defmodule SymphonyElixir.Orchestrator do
     work_eligible?(issue, state) and quiet_admission(state, issue) == :ok
   end
 
-  defp quiet_item?(issue), do: Issue.has_required_labels?(issue, [Config.settings!().labels.prefix <> ":quiet"])
+  defp quiet_item?(state, issue),
+    do: not is_nil(quiet_continuation(state, issue)) or Issue.has_required_labels?(issue, [Config.settings!().labels.prefix <> ":quiet"])
+
+  defp quiet_continuation(state, issue) do
+    case state.quiet_continuations[Autopilot.delivery_key(issue)] do
+      %{issue_id: owner, item_attempt: attempt} = prepared ->
+        if owner == issue.id and attempt == Autopilot.failed_attempts(state.autopilot, Autopilot.delivery_key(issue)) + 1,
+          do: prepared
+
+      _ ->
+        nil
+    end
+  end
 
   defp work_eligible?(%Issue{} = issue, %State{} = state) do
     candidate_issue?(issue, active_state_set(), terminal_state_set()) and
@@ -2569,6 +2630,26 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
+  def handle_call({:quiet_deferred?, issue_id, run_id}, {worker, _}, state) do
+    result =
+      case state.running[issue_id] do
+        %{pid: ^worker, run_id: ^run_id} = entry -> deferred_run?(state, entry)
+        _ -> false
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:defer_quiet, issue_id, run_id, prepared}, {worker, _}, state) do
+    case state.running[issue_id] do
+      %{pid: ^worker, run_id: ^run_id, issue: %Issue{kind: :issue} = issue} = entry ->
+        register_quiet_continuation(state, entry, issue, prepared)
+
+      _ ->
+        {:reply, {:error, :stale_worker}, state}
+    end
+  end
+
   def handle_call({:thread_checkpoint, issue_id, run_id, checkpoint}, {worker, _}, state) do
     result =
       case state.running[issue_id] do
@@ -2693,6 +2774,7 @@ defmodule SymphonyElixir.Orchestrator do
            do: Map.take(entry, [:run_id, :parent_run_id, :parent_issue_id, :source_sha, :model, :effort, :status]) |> Map.put(:usage, Operations.run_usage(state.operations, entry.run_id))
          ),
        retrying: retrying,
+       deferred: Map.values(state.quiet_continuations),
        blocked: blocked ++ startup_blocked,
        codex_totals: state.codex_totals,
        operations: Operations.snapshot(state.operations, opts),
@@ -2736,6 +2818,65 @@ defmodule SymphonyElixir.Orchestrator do
 
     state.poll_check_in_progress == true or
       (is_integer(due_at) and due_at <= System.monotonic_time(:millisecond))
+  end
+
+  defp register_quiet_continuation(state, entry, issue, prepared) do
+    window = QuietContinuation.window()
+    key = Autopilot.delivery_key(issue)
+
+    cond do
+      quiet_continuation(state, issue) ->
+        {:reply, {:error, :quiet_continuation_already_used}, state}
+
+      not handoff_owner?(issue, state.autopilot) ->
+        {:reply, {:error, :canonical_owner_changed}, state}
+
+      window[:phase] not in ["idle", "preparing"] or not is_integer(window[:starts_at]) ->
+        {:reply, {:error, :quiet_window_unavailable_or_active}, state}
+
+      true ->
+        persist_quiet_continuation(state, entry, issue, prepared, window, key)
+    end
+  end
+
+  defp clear_quiet_continuation(state, issue_id) do
+    continuations = Map.reject(state.quiet_continuations, fn {_key, prepared} -> prepared.issue_id == issue_id end)
+
+    if continuations == state.quiet_continuations do
+      state
+    else
+      :ok = Operations.save_quiet_continuations(state.operations, continuations)
+      %{state | quiet_continuations: continuations}
+    end
+  end
+
+  defp persist_quiet_continuation(state, entry, issue, prepared, window, key) do
+    prepared =
+      Map.merge(prepared, %{
+        issue_id: issue.id,
+        identifier: issue.identifier,
+        issue_url: issue.url,
+        delivery_key: key,
+        item_attempt: entry.item_attempt,
+        final_attempt: entry.final_attempt,
+        retry_attempt: entry.retry_attempt,
+        run_id: entry.run_id,
+        window: window,
+        wake_condition: "configured_quiet_window_active",
+        workspace_path: entry[:workspace_path],
+        worker_host: entry[:worker_host]
+      })
+
+    continuations = Map.put(state.quiet_continuations, key, prepared)
+
+    case Operations.save_quiet_continuations(state.operations, continuations) do
+      :ok ->
+        Operations.event(state.operations, "quiet_deferred", %{issue_identifier: issue.identifier, run_id: entry.run_id, item_attempt: entry.item_attempt, summary: prepared.reason})
+        {:reply, {:ok, prepared}, %{state | quiet_continuations: continuations}}
+
+      error ->
+        {:reply, error, state}
+    end
   end
 
   defp autopilot_snapshot(state) do
@@ -3071,7 +3212,7 @@ defmodule SymphonyElixir.Orchestrator do
     terminal_states = terminal_state_set()
 
     Enum.count(state.polled_issues, fn issue ->
-      quiet_item?(issue) and
+      quiet_item?(state, issue) and
         (ready_for_dispatch?(issue, candidate, active_states, terminal_states) or
            (candidate_issue?(issue, active_states, terminal_states) and retry_waiting?(candidate, issue, now_ms)))
     end)
@@ -3129,7 +3270,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   # The route and a service slot are settled before a run starts; either can make it wait.
   defp admit_run(%State{} = state, %Issue{} = issue, class) do
-    with :ok <- delivery_admission(state, issue),
+    with :ok <- dispatch_admission(state, issue, class),
+         :ok <- delivery_admission(state, issue),
          {:ok, route} <- routed(select_route(state, issue)),
          {:ok, state} <- acquire_slot(state, issue, class) do
       {:ok, state, route}
@@ -3152,7 +3294,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp acquire_slot(%State{} = state, %Issue{} = issue, class) do
     if governed?() do
       opts = if class == :research, do: [exclusive: research_exclusive(issue, state)], else: []
-      opts = Keyword.put(opts, :quiet, quiet_item?(issue))
+      opts = Keyword.put(opts, :quiet, quiet_item?(state, issue))
       with :ok <- Governor.acquire(Project.current(), issue.id, class, opts), do: {:ok, consume_slot(state)}
     else
       {:ok, state}
@@ -3190,7 +3332,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp quiet_admission(state, issue) do
-    if quiet_item?(issue) and get_in(state.throttle || %{}, [:quiet_window, :phase]) != "active",
+    if quiet_item?(state, issue) and get_in(state.throttle || %{}, [:quiet_window, :phase]) != "active",
       do: {:wait, "waiting for the owner-confirmed quiet acceptance window"},
       else: :ok
   end
@@ -3199,6 +3341,10 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_class(_state, %Issue{kind: :pull_request}), do: :pull_request
 
   defp dispatch_class(state, %Issue{} = issue) do
+    if quiet_continuation(state, issue), do: :continuation, else: issue_dispatch_class(state, issue)
+  end
+
+  defp issue_dispatch_class(state, %Issue{} = issue) do
     settings = Config.settings!().autopilot
 
     if settings.enabled and Autopilot.final_attempt?(state.autopilot, Autopilot.delivery_key(issue), settings),
@@ -3619,14 +3765,40 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp upcoming_reason(state, issue, active_states, terminal_states) do
+    scheduled_quiet_reason(state, issue) || ordinary_upcoming_reason(state, issue, active_states, terminal_states)
+  end
+
+  defp ordinary_upcoming_reason(state, issue, active_states, terminal_states) do
     cond do
-      reason = startup_blocking_reason(state, issue) -> reason
-      Map.has_key?(state.retry_attempts, issue.id) -> "retry scheduled"
-      reason = item_waiting_reason(issue, state) -> reason
-      issue.blocked_by != [] and not issue.dispatchable -> "dependency blocked"
-      MapSet.member?(state.claimed, issue.id) -> "continuation pending"
-      not candidate_issue?(issue, active_states, terminal_states) -> "not queued"
-      true -> admission_reason(state, issue)
+      reason = startup_blocking_reason(state, issue) ->
+        reason
+
+      Map.has_key?(state.retry_attempts, issue.id) ->
+        "retry scheduled"
+
+      reason = item_waiting_reason(issue, state) ->
+        reason
+
+      issue.blocked_by != [] and not issue.dispatchable ->
+        "dependency blocked"
+
+      MapSet.member?(state.claimed, issue.id) ->
+        "continuation pending"
+
+      not candidate_issue?(issue, active_states, terminal_states) ->
+        "not queued"
+
+      true ->
+        admission_reason(state, issue)
+    end
+  end
+
+  defp scheduled_quiet_reason(state, issue) do
+    if quiet_admission(state, issue) != :ok do
+      case quiet_continuation(state, issue) do
+        nil -> nil
+        prepared -> "Scheduled quiet acceptance: #{prepared.reason}"
+      end
     end
   end
 
