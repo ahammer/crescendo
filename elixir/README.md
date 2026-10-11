@@ -880,6 +880,9 @@ If a restart removes the configured quiet window, the next successful observatio
 routable canonical issue ends its deferral through the existing failure policy. Autopilot counts
 the original attempt once and uses its existing retry/retirement limit, preserving the canonical
 owner. Removing the wake condition does not pass quiet acceptance or failed product gates.
+A replacement project check-in releases the dead orchestrator's service slots and quiet reservation,
+even if its exit notification is still pending. Saved continuation identities and budgets remain intact,
+and the interrupted run cannot leave service admission held after its window.
 
 A service can keep three primary slots while adding up to five global read-only helpers.
 Set `helpers: {slots: 5, model: gpt-6-luna, effort: max, timeout_ms: 900000}` in `crescendo.yml`;

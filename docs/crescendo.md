@@ -100,6 +100,9 @@ Removing the configured quiet window on restart ends an active, routable canonic
 its next successful tracker observation through the existing failure policy. Autopilot counts that
 original attempt once, then retries or retires its original owner at the configured limit. Missing
 quiet acceptance and product failures remain unmet; removing the window cannot pass them.
+A replacement project check-in also reclaims the stopped orchestrator's service slots and quiet
+reservation before returning dispatch policy. A pending exit notification cannot leave quiet
+admission held after the window; saved continuations retain their canonical identities and budgets.
 
 The state API exposes `helpers`, `throttle.helpers`, `throttle.quiet_window`, `pacing`, and
 `usage.planning` (retained skip, promotion and startup events). Managed helper tokens have

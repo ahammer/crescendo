@@ -554,8 +554,19 @@ defmodule SymphonyElixir.Governor do
       %{^project => {^pid, _ref}} ->
         state
 
+      %{^project => {old, ref}} ->
+        state =
+          if Process.alive?(old) do
+            %{state | monitors: Map.delete(state.monitors, project)}
+          else
+            {:noreply, state} = orchestrator_down(ref, state)
+            state
+          end
+
+        Process.demonitor(ref, [:flush])
+        monitor(state, project, pid)
+
       monitors ->
-        with {_old, ref} <- monitors[project], do: Process.demonitor(ref, [:flush])
         %{state | monitors: Map.put(monitors, project, {pid, Process.monitor(pid)})}
     end
   end

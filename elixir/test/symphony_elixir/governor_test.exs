@@ -488,6 +488,38 @@ defmodule SymphonyElixir.GovernorTest do
     end) =~ "Could not save the Codex quota"
   end
 
+  @tag capture_log: true
+  test "a replacement check-in reclaims a dead quiet owner's lease before its DOWN is handled", %{service: service} do
+    service = %{service | quiet_window: %Service.QuietWindow{}}
+    Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2026-10-08 10:00:00Z] end)
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :governor_now) end)
+    governor = start_supervised!({Governor, service})
+    tasks = start_supervised!(Task.Supervisor)
+    Governor.checkin("b", 0, 0)
+    parent = self()
+
+    {:ok, owner} =
+      Task.Supervisor.start_child(tasks, fn ->
+        Governor.checkin("a", 0, 0, 1)
+        send(parent, {:acquired, Governor.acquire("a", "acceptance", :issue, quiet: true)})
+        receive do: (:stop -> :ok)
+      end)
+
+    ref = Process.monitor(owner)
+    assert_receive {:acquired, :ok}
+    assert Governor.snapshot().busy == 1
+    :ok = :sys.suspend(governor)
+    request = :gen_server.send_request(governor, {:checkin, "a", 0, 0, 0})
+    send(owner, :stop)
+    assert_receive {:DOWN, ^ref, :process, ^owner, :normal}
+    Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2026-10-08 11:00:00Z] end)
+    :ok = :sys.resume(governor)
+    assert {:reply, policy} = :gen_server.receive_response(request, 1_000)
+    refute policy.draining
+    assert Governor.snapshot().busy == 0
+    assert :ok = Governor.acquire("b", "independent", :issue)
+  end
+
   test "a stopped orchestrator's slots are freed", %{service: service} do
     start_supervised!({Governor, service})
     parent = self()

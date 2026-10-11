@@ -1608,6 +1608,9 @@ routable canonical issue MUST end its saved deferral through the existing failur
 counts the original logical attempt once and uses its existing retry/retirement limits; required
 quiet acceptance and failed product gates remain unmet. The removed wake condition MUST NOT
 park the delivery indefinitely.
+Replacing a dead project orchestrator MUST release its held service slots and quiet-run
+reservation before returning the replacement's dispatch policy, even when its exit notification
+has not been handled. Saved continuations and the canonical attempt budget remain intact.
 
 Crescendo routine deployments MUST bound a busy drain (default five minutes) and leave a dispatch
 pause (default thirty minutes) before another busy drain, including superseding candidates. An
