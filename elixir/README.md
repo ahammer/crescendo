@@ -140,8 +140,9 @@ or terminal reconciliation survive tracker edits before the first delivery obser
 removal of the record or label.
 GitHub source ownership accepts a closing directive or an exact standalone `Symphony issue: #N`
 line with the matching same-repository worker branch. Incidental mentions provide no ownership.
-Closing directives can start a line, an unordered Markdown bullet, or a sentence after `.`, `!` or `?`;
-the issue-number, repository, branch and unique worker-attempt requirements still apply.
+Closing directives can start a line, an unordered Markdown bullet, or a plain prose sentence after `.`, `!` or `?`;
+sentence prefixes containing quote characters, backticks or `>` do not establish ownership.
+The issue-number, repository, branch and unique worker-attempt requirements still apply.
 Malformed handoff evidence retained from closure keeps acceptance unknown after marker removal.
 
 Canonical report-only `--verify-existing` closures use `repository_reported_verification`, with
