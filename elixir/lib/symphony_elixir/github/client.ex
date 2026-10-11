@@ -548,18 +548,46 @@ defmodule SymphonyElixir.GitHub.Client do
   end
 
   defp delivery_prose(body) do
-    {lines, _fence} = body |> String.split("\n") |> Enum.map_reduce(nil, &delivery_fence_line/2)
-    body = Enum.join(lines, "\n")
     # Block boundaries stop unmatched backticks from hiding declarations in a later paragraph or list.
     blocks = ~r/^ {0,3}(?:[\#]{1,6}(?:[\t ][^\r\n]*)?|=+[\t ]*|-+[\t ]*|([*_-])(?:[\t ]*\1){2,}[\t ]*)\r?$/m
+    {lines, _quote} = body |> String.split("\n") |> Enum.map_reduce({false, nil}, &delivery_quote_line(&1, &2, blocks))
+    {lines, _fence} = Enum.map_reduce(lines, nil, &delivery_fence_line/2)
+    body = Enum.join(lines, "\n")
     body = Regex.replace(blocks, body, "\n`\n")
     body = Regex.replace(~r/^ {0,3}(?:[-*+]|1[.)])[\t ]+(?=\S)/m, body, "\n\\0")
-    # A blockquote can continue on lines without another > marker.
-    quotes = ~r/^ {0,3}>[^\r\n]*(?:\r?\n(?![\t ]*\r?$)[^\r\n]*)*/m
-    body = Regex.replace(quotes, body, "\n`\n")
     code_spans = ~r/(?<!`)(`+)(?!`)(?:(?!\r?\n[\t ]*\r?\n).)*?(?<!`)\1(?!`)/s
     # Barriers prevent removed examples from manufacturing declarations.
     Regex.replace(code_spans, body, "`")
+  end
+
+  defp delivery_quote_line(line, {paragraph, fence}, blocks) do
+    case Regex.run(~r/^(?: {0,3}>[\t ]?)+([^\r\n]*)\r?$/, line) do
+      [_, content] ->
+        {"\n`\n", delivery_quote_state(content, {paragraph, fence}, blocks)}
+
+      _ ->
+        {_, opener} = delivery_fence_line(line, nil)
+        blank = String.trim(line) == ""
+        list = Regex.match?(~r/^ {0,3}(?:[-*+]|\d{1,9}[.)])[\t ]+\S/, line)
+        # Only paragraph text can continue a quote without another > marker.
+        continues = paragraph and not blank and not list and opener == nil and not Regex.match?(blocks, line)
+        {if(continues, do: "\n`\n", else: line), {continues, if(blank, do: fence)}}
+    end
+  end
+
+  defp delivery_quote_state(content, {paragraph, fence}, blocks) do
+    {prose, fence} = delivery_fence_line(content, fence)
+    {prose == content and fence == nil and delivery_quote_paragraph?(content, paragraph, blocks), fence}
+  end
+
+  defp delivery_quote_paragraph?(content, paragraph, blocks) do
+    cond do
+      String.trim(content) == "" -> false
+      not paragraph and Regex.match?(~r/^ {0,3}(?:[-*+]|\d{1,9}[.)])[\t ]*$/, content) -> false
+      not paragraph and Regex.match?(~r/^ {0,3}(?:=+|--)[\t ]*$/, content) -> true
+      Regex.match?(blocks, content) -> false
+      true -> paragraph or not Regex.match?(~r/^(?: {4}|\t)/, content)
+    end
   end
 
   defp delivery_fence_line(line, nil) do
