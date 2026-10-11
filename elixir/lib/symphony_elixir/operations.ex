@@ -587,6 +587,7 @@ defmodule SymphonyElixir.Operations do
           handoff: scope.handoff,
           prefix: prefix,
           evidence_source: observation.evidence_source,
+          report_rejection: observation[:report_rejection],
           scope_digest: observed_scope_digest(previous, updated_at, observation[:scope_digest]),
           observed_at: DateTime.to_iso8601(DateTime.utc_now())
         }
@@ -602,6 +603,7 @@ defmodule SymphonyElixir.Operations do
         :ok = :dets.insert(table, {key, Map.put(previous, :scope_digest, :ambiguous)})
       end
 
+      refresh_report_rejection(table, key, observation, updated_at)
       Enum.each(observation.sources, &retain_delivery_source(table, issue.id, &1))
       Enum.each(Map.get(observation, :report_verifications, []), &retain_report_verification(table, issue, &1))
       :ok = :dets.sync(table)
@@ -623,6 +625,16 @@ defmodule SymphonyElixir.Operations do
             (is_binary(previous[:scope_digest]) and previous[:scope_digest] != scope_digest)),
        do: :ambiguous,
        else: scope_digest
+  end
+
+  defp refresh_report_rejection(table, key, observation, updated_at) do
+    current = lookup(table, key, %{})
+
+    # Receipt availability can change without a tracker edit.
+    if updated_at == current[:updated_at] and observation[:lifecycle_id] == current[:lifecycle_id] and
+         observation[:report_rejection] != current[:report_rejection] do
+      :ok = :dets.insert(table, {key, Map.put(current, :report_rejection, observation[:report_rejection])})
+    end
   end
 
   defp delivery_runs(table, issue_id) do
@@ -677,24 +689,44 @@ defmodule SymphonyElixir.Operations do
   end
 
   defp retain_report_verification(table, issue, report) do
-    with %{run_id: id, reviewed_s: reviewed, issue_url: url, closed_at: closed_at} <- report,
-         true <- is_number(reviewed) and url == issue.url,
+    with %{
+           run_id: id,
+           reviewed_s: reviewed,
+           native_started_s: started,
+           native_accepted_s: accepted,
+           ordering_s: ordered,
+           completion_id: completion,
+           reviewer_run_id: reviewer,
+           issue_url: url,
+           closed_at: closed_at
+         } <- report,
+         true <- is_number(reviewed) and is_number(started) and is_number(accepted) and is_number(ordered) and url == issue.url,
+         true <- started <= reviewed and reviewed <= accepted,
          [{{:lineage_run, ^id}, run}] <-
            Enum.filter(delivery_runs(table, issue.id), fn {_, run} ->
              source_created_during_run?(run, issue.id, reviewed)
            end),
          true <- run[:issue_url] == url and is_integer(run[:item_attempt]),
+         true <- source_created_during_run?(run, issue.id, started) and source_created_during_run?(run, issue.id, accepted),
+         true <- unique_report_reviewer?(table, reviewer, completion),
          {:ok, closed, _} <- DateTime.from_iso8601(to_string(closed_at)),
-         true <- report_before_closure?(reviewed, closed) do
-      key = {:lineage_evidence, "issue_report", {issue.id, report.verification_id}}
-      value = Map.take(report, [:verification_id, :source_sha, :scope_digest, :run_id, :reviewed_s, :lifecycle_id, :evidence_source])
+         true <- report_before_closure?(ordered, closed) do
+      key = {:lineage_evidence, "issue_report", {issue.id, completion}}
+      value = Map.take(report, [:verification_id, :completion_id, :reviewer_run_id, :source_sha, :scope_digest, :run_id, :reviewed_s, :ordering_s, :lifecycle_id, :evidence_source])
       :dets.insert_new(table, {key, Map.merge(value, %{issue_id: issue.id, item_attempt: run.item_attempt, closed_at: closed_at})})
     end
   end
 
   defp report_before_closure?(reviewed, closed) do
     at = DateTime.to_unix(closed, :microsecond) / 1_000_000
-    if closed.microsecond == {0, 0}, do: reviewed < at, else: reviewed <= at
+    reviewed < at
+  end
+
+  defp unique_report_reviewer?(table, reviewer, completion) do
+    is_binary(reviewer) and reviewer != "" and is_binary(completion) and
+      Enum.all?(:dets.match_object(table, {{:lineage_evidence, "issue_report", :_}, :_}), fn {_, report} ->
+        report[:reviewer_run_id] != reviewer or report[:completion_id] == completion
+      end)
   end
 
   defp delivery_source_run(table, issue_id, created_at) do
@@ -784,7 +816,8 @@ defmodule SymphonyElixir.Operations do
   end
 
   defp current_report_proof?(table, issue, report) do
-    report.closed_at == issue.closed_at and is_binary(report[:scope_digest]) and
+    is_binary(report[:completion_id]) and is_number(report[:ordering_s]) and
+      report.closed_at == issue.closed_at and is_binary(report[:scope_digest]) and
       report.scope_digest == issue[:scope_digest] and is_integer(report[:lifecycle_id]) and
       report.lifecycle_id == issue[:lifecycle_id] and :dets.member(table, {:lineage_run, report.run_id})
   end

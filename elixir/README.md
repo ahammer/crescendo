@@ -141,30 +141,39 @@ removal of the record or label.
 GitHub source ownership accepts a closing directive or an exact standalone `Symphony issue: #N`
 line with the matching same-repository worker branch. Incidental mentions provide no ownership.
 Malformed handoff evidence retained from closure keeps acceptance unknown after marker removal.
+
 Canonical report-only `--verify-existing` closures use `repository_reported_verification`, with
 `delivery_kind: report_only` and separate `report_verifications`, without a fabricated PR source.
-A matching GitHub closure event and one exact-source canonical reference must agree with bounded
-private closure/input/acceptance/review/validation receipts under the existing
-`METALRAIN_SYMPHONY_EVIDENCE_ROOT`. An approved review and reviewer run/time must join one unique
-retained issue worker. Hosted commit status and check-run SHAs must match the reviewed source.
-Headings and successful turns alone cannot establish acceptance. Captured scope must match the observed
-issue; a fingerprint prevents later criteria edits inheriting old proof.
-Conflicting scopes at one GitHub timestamp stay unknown across replay/restart until a newer observation,
-even when lifecycle ordering rejects the conflicting observation; the latest retained lifecycle stays intact.
-Wrong-source, wrong-issue, foreign, ambiguous or incomplete evidence remains unknown. The immutable association
-survives closure/restart, preserves original attempt budgets and unmet parent scope, and expires
-with the original worker. GitHub time precision is preserved; native times use one-second buckets.
-Reopen retains evidence; a later closure needs its own proof. GitHub lifecycle event IDs identify
-closures and order observations with the same issue update timestamp. Lifecycle IDs are retained
-only when the separately read issue state and closure timestamp match the timeline event, so
-corrected reads after a race remain eligible for refresh. This prevents reused closure
-timestamps from inheriting old proof even when the reopen is missed between polls. Missing event
-identity supplies no report proof. Canonical review timestamps exclude demonstrably pre-reopen
-references; reviews within a second-precision reopen's or closure's second stay ambiguous. Receipt polling
-adds no usage, and existing auxiliary review run-ID deduplication stays separate from native workers.
-Raw receipts and paths stay private. Historical runs without prospective tracking remain unknown;
-independent acceptance and helper coverage remain unknown, so verified cost and latency stay null. See
-[retained delivery evidence](../docs/crescendo.md#retained-issue-delivery-evidence) for the contract.
+A matching GitHub closure event and unique exact-source reference must agree with bounded private
+closure/input/acceptance/review/validation receipts under `METALRAIN_SYMPHONY_EVIDENCE_ROOT`.
+Exact source/scope, clean source, unchanged input, hosted-check SHA and all adjudication remain required.
+
+Supported producer v1 `review-completion.json` commits approved review/validation bytes, original
+repository/issue/source/base/scope, receipt/delivery attempt, reviewer identity and parent worker.
+`closure-ordering.json` binds that event to a fresh digest-only GitHub comment and the authenticated
+lifecycle captured before review. The observer authenticates the exact unchanged comment, its issue
+and unique identity, then requires the captured prefix plus one matching completed closure.
+The anchor must precede closure in GitHub seconds; a prior reopen must precede the anchor.
+Missing, edited, foreign, duplicate, late, same-second, equal or fractional v1 timing remains unknown.
+Accounting observation, mtime, duration and local clock offsets cannot prove earlier approval.
+Legacy receipts and retained observation-only proof remain unknown without a supported completion.
+
+Operations joins the entire native start/completion/accepted window to one prospectively tracked
+original worker/attempt, separately from GitHub ordering. A reviewer run owns only one completion.
+Immutable associations survive replay/restart, preserve original budgets and unmet parent scope,
+and expire with their original worker. Reopen retains history; a later closure needs its own proof.
+Only authenticated pre-reopen anchors exclude old references. Captured scope must match the issue;
+a fingerprint prevents criteria edits from inheriting earlier acceptance. Conflicting scopes at one
+GitHub timestamp remain unknown until a newer observation resolves scope. Matching lifecycle IDs
+order same-timestamp observations and allow correction of separate-read races; a reused closure
+timestamp cannot inherit old proof even when the reopen is missed between polls.
+
+Receipt polling adds no usage; auxiliary review accounting keeps separate run-ID deduplication.
+Verified cost, latency and helper coverage stay unknown. Ordinary files are bounded to 128 KiB;
+committed review logs to 16 MiB. Raw receipts, paths and review content stay private; only bounded
+rejection codes are projected and refresh on repeated reads of the current tracker observation
+even when its timestamp and lifecycle stay unchanged. See [the GH-72 investigation](../docs/report-verification-timing.md)
+and [retained delivery evidence](../docs/crescendo.md#retained-issue-delivery-evidence).
 
 `developer_instructions` appends explicitly reviewed service-owned rules to existing configured
 developer instructions. It preserves native base instructions. Do not move repository guidelines
