@@ -120,7 +120,9 @@ until that cohort exists; do not run duplicate benchmarks to consume spare quota
 ~/.local/state/crescendo/              # state (paths.state)
   projects/<id>/operations.dets        # each project's run, spend and activity history
   quota.term                           # the last Codex quota snapshot
-  drain                                # present while new dispatch is held for a deploy
+  drain                                # manual or legacy admission hold
+  deploy-drain.json                     # private managed owner/lifecycle transaction
+  deploy-drain.lock                     # kernel lock retained by deploy and swap children
 ```
 
 ## First service
@@ -213,7 +215,9 @@ It never enables a unit or overwrites local configuration.
   optionally pins codex.
 - `bin/crescendo` runs a command (below) with the deployed release, from any directory.
 - `bin/deploy`, run by `crescendo-deploy.timer` every 10 minutes, deploys the newest `main`:
-  1. It builds `releases/<sha>` and passes the full `make all` gate under the machine lease.
+  1. Under the owner lock, it recovers any interrupted swap by restoring and health-checking the
+     previous release before checking whether the target is already selected. It builds
+     `releases/<sha>` and passes the full `make all` gate under the machine lease.
   2. It drains, so no new runs start and active issue workers yield after a successful native turn
      (it waits up to five minutes, then postpones). A postponement leaves at least thirty minutes
      for dispatch before another busy
@@ -245,8 +249,33 @@ It never enables a unit or overwrites local configuration.
   they never count as idle. These observations measure deployment holds separately from quota,
   budget and no ready work; they do not claim that every unused slot could have dispatched eligible
   work. Idle durations are sampled estimates, not historical attribution. Cleanup releases only
-  this invocation's hold after postponement, cancellation, failed swap, rollback or success.
+  this invocation's pre-swap hold after postponement or cancellation, and a swapped hold only
+  after deployment or rollback is healthy. An interrupted or unhealthy swap stays held for recovery.
   Gate failures occur before the hold. Dispatch resumes before release cleanup and script install.
+
+Managed deploys use `<state>/deploy-drain.json` separately from the manual `<state>/drain` flag.
+The transaction is atomically published before journal appends; the deploy and its swap children
+retain an inherited kernel lock. No live owner expires from age. Governor admission checks acquire
+that same lock to reconcile an abandoned pre-swap hold and record `drain_finished` with result
+`abandoned`. New dispatch then resumes with worker slots, spend, workspaces and logical attempt
+budgets intact. Failed lifecycle appends keep the hold until journalling can recover.
+
+The swap phase is published before changing the release selection. A dead owner in that phase
+reports `recovery_required`; admission stays held until the next deploy restores the saved previous
+configuration, restarts and passes the existing health check. Cancellation during a swap follows
+this recovery path. A failed restart, unhealthy rollback, missing backup or malformed ownership
+state stays held. Recovery happens before the unchanged-target early exit. Manual on/off cannot
+release managed state; legacy flags stay intentional-or-unknown and are never automatically removed.
+Manual CLI transitions record credential-free lifecycle events through the same locked journal
+appender, preserving events after a truncated record. The CLI reports lifecycle append errors.
+
+`throttle.drain_owner` and admission history distinguish `managed`, `manual`, `legacy_unknown` and
+`quiet` holds. Managed evidence includes phase, start time, commit and owner status (`live`,
+`abandoned`, `recovery_required`, `unknown`); quiet phases are `preparing` and `finishing`. Private
+owner tokens, commands and host paths are excluded. Dashboard/API reads only observe; normal
+Governor admission checks perform reconciliation. Historical unknown holds are not backfilled.
+The October 9–10 retained samples and fully finished managed journal operations cannot determine
+whether that cycle's long hold was manual, quiet or an unjournalled abandoned deployment.
 
 The service's read-only state API and dashboard mark each project's snapshot as `ok`, `timeout`,
 `unavailable`, or `not_selected` (outside the filter). Unknown running/ready counts are `null`.
@@ -256,7 +285,10 @@ aggregate `counts` are `null`, health warns and the dashboard shows unknown coun
 service slots can still be shown; they do not imply a queue count. A successful read clears the
 warning. `ops/bin/deploy-state.py` validates deployment observations independently of the deploy
 script. Its validation modes read JSON from stdin; its drain mode reads the state API and owns
-only the temporary drain flag and journal. It never restarts the service.
+only managed ownership state and the journal. The deployed Elixir release embeds the same Python
+policy from `ops/bin/deploy-state.py`; managed observations and manual lifecycle journalling require
+`python3` and kernel `flock` support.
+The policy never restarts the service.
 
 `projects[].tracker_ready` comes from each Orchestrator's in-memory successful active-issue poll
 observation and latest poll/configuration error. It starts false in each process generation,
@@ -274,7 +306,8 @@ Dispatch health detail explains these holds, including in project filters and pa
 Only the already-public project ID is exposed, with no private work or task details. Admission
 policy stays unchanged; intentional holds are informational, and unknown counts remain unknown.
 `draining` covers a present dispatch drain flag, quiet preparation, or a quiet run finishing
-outside its active window. `throttle.drain_reason` reports `dispatch drain flag is present`,
+outside its active window. `throttle.drain_reason` reports `managed deployment drain is present`,
+`interrupted deployment swap awaits verified rollback`, `dispatch drain flag is present`,
 `preparing for quiet acceptance`, or `waiting for a quiet acceptance run to finish`; otherwise
 it is `null`. A flag takes precedence over quiet holds. Manual flags have the same effect;
 the message does not establish that a deployment is running. Each policy/snapshot captures the
@@ -309,7 +342,7 @@ crescendo autopilot check .crescendo/autopilot [--workflow ~/.config/crescendo/p
   the prefix as `CRESCENDO_LABEL_PREFIX`, so repository tooling can follow the switch. It exits with
   an error if GitHub cannot list items or add/remove a label.
 - `drain on` stops new runs; active issue workers yield at successful completed-turn boundaries.
-  `drain off` releases it and reports an error if its flag cannot be removed.
+  `drain off` removes only the manual/legacy flag; managed and quiet holds remain independent.
 - `autopilot check` validates a repository's `.crescendo/autopilot/` folder: task front matter,
   schedules, deliveries and prompt templates. It prints one line per task. With `--workflow` it
   loads the folder exactly as the service would load it for that project, including task efforts

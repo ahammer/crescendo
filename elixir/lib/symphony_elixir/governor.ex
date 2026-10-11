@@ -11,7 +11,7 @@ defmodule SymphonyElixir.Governor do
   no call cycle can form. It monitors each orchestrator and frees the slots
   of one that stops.
 
-  `<state>/drain` holds all new dispatch while it exists, for deploys.
+  `<state>/drain` holds manual/legacy admission; managed deploys own a separate locked transaction.
 
   After a start no slot is granted until every project has checked in (or
   two minutes pass), so the first slots go by weight to the projects with
@@ -26,7 +26,7 @@ defmodule SymphonyElixir.Governor do
   use GenServer
   require Logger
 
-  alias SymphonyElixir.{Helpers, Project, Quota, QuotaProbe, Scheduling, Service, Throttle}
+  alias SymphonyElixir.{DeployDrain, Helpers, Project, Quota, QuotaProbe, Scheduling, Service, Throttle}
 
   @type policy :: %{
           required(:avoid) => map(),
@@ -90,7 +90,7 @@ defmodule SymphonyElixir.Governor do
   @spec observe() :: map() | nil
   def observe do
     snapshot()
-    |> Map.take([:observed_at, :slots, :busy, :draining, :drain_reason, :research_hold, :helpers])
+    |> Map.take([:observed_at, :slots, :busy, :draining, :drain_reason, :drain_owner, :research_hold, :helpers])
     |> Map.put(:source, "governor")
     |> Map.put(:scope, "service")
   catch
@@ -141,7 +141,7 @@ defmodule SymphonyElixir.Governor do
 
   def handle_call({:acquire, project, item, class, opts}, {pid, _tag}, state) do
     state = monitor(state, project, pid)
-    drain_reason = drain_reason(state, quiet_window(state))
+    drain_reason = state |> drain_owner(quiet_window(state), true) |> drain_reason()
 
     cond do
       drain_reason != nil ->
@@ -188,8 +188,8 @@ defmodule SymphonyElixir.Governor do
 
   def handle_call(:snapshot, _from, state) do
     now = DateTime.utc_now()
-    quiet_window = quiet_window(state)
-    drain_reason = drain_reason(state, quiet_window)
+    quiet = quiet_window(state)
+    owner = drain_owner(state, quiet)
 
     projects =
       for {id, project} <- Enum.sort(state.schedule.projects) do
@@ -204,12 +204,13 @@ defmodule SymphonyElixir.Governor do
        projects: projects,
        reservation: state.schedule.reservation && state.schedule.reservation.project,
        research_hold: Scheduling.research_hold(state.schedule, System.monotonic_time(:millisecond)),
-       draining: drain_reason != nil,
-       drain_reason: drain_reason,
+       draining: owner != nil,
+       drain_owner: owner,
+       drain_reason: drain_reason(owner),
        spend_micro: total_spend(state),
        quota: state.quota,
        pacing: Quota.pacing(state.quota, state.quota_epoch, now),
-       quiet_window: quiet_window,
+       quiet_window: quiet,
        throttle: throttle(state, now),
        helpers: %{slots: state.service.helpers.slots, busy: helper_busy(state), model: state.service.helpers.model, effort: state.service.helpers.effort}
      }, state}
@@ -493,9 +494,9 @@ defmodule SymphonyElixir.Governor do
   defp helper_outcome(_helper, reason), do: {"failed", Helpers.error_text(reason)}
 
   defp policy(state, project, now) do
-    quiet_window = quiet_window(state)
-    drain_reason = drain_reason(state, quiet_window)
-    draining = drain_reason != nil
+    quiet = quiet_window(state)
+    owner = drain_owner(state, quiet, true)
+    draining = owner != nil
     free = Scheduling.free_for(state.schedule, project, System.monotonic_time(:millisecond))
 
     state
@@ -503,9 +504,10 @@ defmodule SymphonyElixir.Governor do
     |> Map.merge(%{
       slots: if(draining or warming_up?(state), do: 0, else: free),
       research_exclusive: state.schedule.projects[project].exclusive,
-      quiet_window: quiet_window,
-      draining: draining,
-      drain_reason: drain_reason
+      quiet_window: quiet,
+      drain_owner: owner,
+      drain_reason: drain_reason(owner),
+      draining: draining
     })
   end
 
@@ -563,16 +565,27 @@ defmodule SymphonyElixir.Governor do
     :ok
   end
 
-  defp draining?(state), do: drain_reason(state, quiet_window(state)) != nil
+  defp draining?(state), do: drain_owner(state, quiet_window(state), true) != nil
 
-  defp drain_reason(state, quiet) do
+  defp drain_owner(state, quiet, reconcile \\ false) do
+    root = Service.state_root(state.service)
+    managed = DeployDrain.observe(root, reconcile)
+
     cond do
-      File.exists?(Path.join(Service.state_root(state.service), "drain")) -> "dispatch drain flag is present"
-      quiet.phase == "preparing" -> "preparing for quiet acceptance"
-      MapSet.size(state.quiet_runs) > 0 and quiet.phase != "active" -> "waiting for a quiet acceptance run to finish"
+      managed != nil -> managed
+      File.exists?(Path.join(root, "drain")) -> DeployDrain.manual(root)
+      quiet.phase == "preparing" -> %{"kind" => "quiet", "phase" => "preparing"}
+      MapSet.size(state.quiet_runs) > 0 and quiet.phase != "active" -> %{"kind" => "quiet", "phase" => "finishing"}
       true -> nil
     end
   end
+
+  defp drain_reason(nil), do: nil
+  defp drain_reason(%{"kind" => "quiet", "phase" => "preparing"}), do: "preparing for quiet acceptance"
+  defp drain_reason(%{"kind" => "quiet", "phase" => "finishing"}), do: "waiting for a quiet acceptance run to finish"
+  defp drain_reason(%{"kind" => "managed", "owner_status" => "recovery_required"}), do: "interrupted deployment swap awaits verified rollback"
+  defp drain_reason(%{"kind" => "managed"}), do: "managed deployment drain is present"
+  defp drain_reason(_owner), do: "dispatch drain flag is present"
 
   defp warming_up?(state) do
     MapSet.size(state.checked_in) < map_size(state.schedule.projects) and

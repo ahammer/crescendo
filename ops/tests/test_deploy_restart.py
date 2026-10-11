@@ -2,6 +2,7 @@
 import json
 import os
 import subprocess
+import shutil
 import tempfile
 import threading
 import unittest
@@ -61,7 +62,8 @@ with probes.open('a') as output:
     output.write('poll\\n')
 attempt = len(probes.read_text().splitlines())
 ready_after = int(os.environ['TEST_READY_AFTER'])
-print(Path(os.environ['TEST_READY' if 0 < ready_after <= attempt else 'TEST_PENDING']).read_text())
+rolled_back = len(Path(os.environ['TEST_RESTART_LOG']).read_text().splitlines()) > 1
+print(Path(os.environ['TEST_READY' if rolled_back or 0 < ready_after <= attempt else 'TEST_PENDING']).read_text())
 """,
                     "systemctl": """#!/usr/bin/env python3
 import os
@@ -84,7 +86,12 @@ raise SystemExit(1 if os.environ['TEST_RESTART_FAIL'] == '1' and len(log.read_te
                                    TEST_PROBES=str(probes), TEST_PENDING=str(pending), TEST_READY=str(ready),
                                    TEST_READY_AFTER=str(ready_after or 0),
                                    TEST_RESTART_FAIL="1" if restart_fails else "0")
-                result = subprocess.run(["sh", str(Path(__file__).parents[1] / "bin/deploy")],
+                # Execute only the isolated copy, with every service command replaced.
+                isolated = root / "scripts"
+                isolated.mkdir()
+                for name in ("deploy", "deploy-state.py"):
+                    shutil.copyfile(Path(__file__).parents[1] / "bin" / name, isolated / name)
+                result = subprocess.run(["sh", str(isolated / "deploy")],
                                         env=environment, capture_output=True, text=True, timeout=15)
                 success = not restart_fails and ready_after is not None
                 self.assertEqual(result.returncode, 0 if success else 1, result.stderr)
@@ -93,14 +100,14 @@ raise SystemExit(1 if os.environ['TEST_RESTART_FAIL'] == '1' and len(log.read_te
                 expected_restarts = [swapped.strip()] if success else [swapped.strip(), original.strip()]
                 self.assertEqual(log.read_text().splitlines(), expected_restarts)
                 self.assertEqual((new / ".failed").exists(), not success)
-                self.assertFalse((journal / "drain").exists())
+                self.assertFalse((journal / "deploy-drain.json").exists())
                 events = [json.loads(line) for line in (journal / "deploys.jsonl").read_text().splitlines()]
                 outcome = "deployed" if success else "rolled_back"
                 self.assertTrue(any(event["outcome"] == outcome for event in events))
                 # Success cleans up before the fake install; EXIT cleanup is idempotent.
                 self.assertEqual(events[-1]["result"], outcome)
                 attempts = len(probes.read_text().splitlines()) if probes.exists() else 0
-                self.assertEqual(attempts, 0 if restart_fails else ready_after if success else 24)
+                self.assertEqual(attempts, 1 if restart_fails else ready_after if success else 25)
             finally:
                 server.shutdown()
                 worker.join()

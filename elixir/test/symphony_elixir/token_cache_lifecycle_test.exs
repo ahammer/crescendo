@@ -943,9 +943,7 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     File.write!(Path.join(fixture.workspace, "WORKPAD.md"), "progress")
     assert Governor.snapshot().busy == 1
     busy = deployment_observation(pid)
-    drain = Path.join(Service.state_root(service), "drain")
-    File.mkdir_p!(Path.dirname(drain))
-    File.write!(drain, "test")
+    owner = start_drain_owner(Service.state_root(service))
     assert Governor.draining?()
     assert map_size(:sys.get_state(pid).running) == 1
     File.write!(Path.join(fixture.root, "finish-turn"), "")
@@ -973,7 +971,8 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     assert :sys.get_state(pid).retry_attempts[issue.id].attempt == 2
     assert Governor.snapshot().busy == 0
 
-    File.rm!(drain)
+    Port.command(owner, "exit\n")
+    assert_receive {^owner, {:exit_status, 0}}, 5_000
     assert Governor.draining?() == false
     File.rm!(Path.join(fixture.root, "turn-started"))
     File.rm!(Path.join(fixture.root, "finish-turn"))
@@ -1168,7 +1167,7 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     history = policy.events(root)
     assert [event['running'] for event in history if event['outcome'] == 'drain_sample'] == [1, 0]
     policy.finish(root, 'candidate', 'test', 'deployed')
-    assert not (root / 'drain').exists()
+    assert not (root / 'deploy-drain.json').exists()
     """
 
     assert {_, 0} = System.cmd("python3", ["-B", "-c", code])

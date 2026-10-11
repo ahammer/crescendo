@@ -19,7 +19,7 @@ implements its [specification](SPEC.md). On top of the Symphony reference implem
   configurable channel. Startup failures preserve the item and dependencies for controlled recovery.
 - **A read-only dashboard** across projects, with a filter per project and a
   [bounded history API](docs/crescendo.md#dashboard-and-api) for retrospectives.
-  Dispatch details show global research reservations, helper capacity, quota pacing, quiet acceptance windows and deployment drains.
+  Dispatch details show global research reservations, helper capacity, quota pacing, quiet acceptance windows and deployment drain ownership. Managed abandonment recovery preserves manual holds and live swaps.
   Prepared issue deliveries can yield once per logical attempt for their configured quiet window,
   retaining the same issue, PR, source/evidence identity and unmet acceptance across restart.
 - **Thread usage accounting** that reconciles late terminal events and survives worker restarts,

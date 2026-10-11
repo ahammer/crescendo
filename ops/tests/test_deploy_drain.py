@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 
@@ -51,6 +52,7 @@ class DrainTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        (self.root / "deploy-drain.lock").touch()
         self.now = 10000
 
     def sleep(self, seconds):
@@ -75,7 +77,7 @@ class DrainTest(unittest.TestCase):
                 self.finish()
             else:
                 self.assertEqual(result, 3)
-            self.assertFalse((self.root / "drain").exists())
+            self.assertFalse((self.root / "deploy-drain.json").exists())
             dispatched += 1  # Governor can acquire: the shared hold is absent.
         self.assertGreater(dispatched, 20)
         self.assertLess(holds * 300, 16200 / 4)
@@ -92,7 +94,7 @@ class DrainTest(unittest.TestCase):
         event = policy.events(self.root)[-1]
         self.assertEqual(event["idle_seconds"], 15)
         self.assertEqual(event["elapsed_seconds"], 15)
-        self.assertFalse((self.root / "drain").exists())
+        self.assertFalse((self.root / "deploy-drain.json").exists())
 
     def test_preflight_empty_is_rechecked_after_dispatch_is_held(self):
         observations = iter([state(0)] + [state()] * 20)
@@ -105,12 +107,26 @@ class DrainTest(unittest.TestCase):
         observations = iter([state(0), state()])
         self.assertEqual(self.drain(lambda: next(observations)), 3)
         self.finish("cancelled")
-        self.assertFalse((self.root / "drain").exists())
+        self.assertFalse((self.root / "deploy-drain.json").exists())
 
-    def test_release_even_if_journal_start_append_failed(self):
-        (self.root / "drain").write_text("owner")
-        self.finish("cancelled")
-        self.assertFalse((self.root / "drain").exists())
+    def test_journal_failure_retains_owner_until_reconciliation_can_record(self):
+        save = policy.save_managed
+
+        def unavailable_journal(root, owner):
+            save(root, owner)
+            (root / "deploys.jsonl").mkdir()
+
+        with patch.object(policy, "save_managed", side_effect=unavailable_journal):
+            with self.assertRaises(OSError):
+                self.drain(lambda: state(0))
+        with self.assertRaises(OSError):
+            self.finish("cancelled")
+        self.assertIsNotNone(policy.managed(self.root))
+        (self.root / "deploys.jsonl").rmdir()
+        self.assertIsNone(policy.observe(self.root, reconcile=True))
+        self.assertEqual(policy.events(self.root)[-1]["result"], "abandoned")
+        self.assertEqual(self.drain(), 3)
+        self.assertFalse((self.root / "deploy-drain.json").exists())
 
     def test_unknown_snapshots_and_network_timeouts_fail_closed(self):
         for index, observation in enumerate((lambda: {}, lambda: (_ for _ in ()).throw(TimeoutError()))):
@@ -135,20 +151,20 @@ class DrainTest(unittest.TestCase):
                 self.drain(cancelled)
         finally:
             self.finish("cancelled")
-        self.assertFalse((self.root / "drain").exists())
+        self.assertFalse((self.root / "deploy-drain.json").exists())
         self.assertEqual(self.drain(), 3)
 
     def test_cancellation_swap_failure_rollback_and_success_release_owned_hold(self):
         for outcome in ("cancelled", "swap_failed", "rolled_back", "deployed"):
             self.assertEqual(self.drain(lambda: state(0)), 0)
-            self.assertTrue((self.root / "drain").exists())
+            self.assertTrue((self.root / "deploy-drain.json").exists())
             self.finish(outcome)
             self.finish(outcome)  # EXIT after early cleanup is harmless.
-            self.assertFalse((self.root / "drain").exists())
+            self.assertFalse((self.root / "deploy-drain.json").exists())
             self.assertEqual(policy.events(self.root)[-1]["result"], outcome)
         # Gate failure occurs before acquiring any hold.
         policy.record(self.root, "gate_failed", "bad")
-        self.assertFalse((self.root / "drain").exists())
+        self.assertFalse((self.root / "deploy-drain.json").exists())
 
     def test_manual_hold_and_other_owner_are_preserved(self):
         (self.root / "drain").write_text("manual")
@@ -180,7 +196,7 @@ class DrainTest(unittest.TestCase):
     def test_interrupted_append_and_missing_finish_keep_retry_pause(self):
         self.assertEqual(self.drain(), 2)
         # Simulate an uncatchable kill: start record still protects the retry interval.
-        (self.root / "drain").unlink()
+        (self.root / "deploy-drain.json").unlink()
         with (self.root / "deploys.jsonl").open("a") as journal:
             journal.write('{"interrupted":\n')
         self.assertEqual(self.drain(target="new"), 3)
@@ -191,14 +207,27 @@ class DrainTest(unittest.TestCase):
         self.finish()
         self.assertEqual(policy.retry_until(self.root), self.now + 1800)
         self.assertEqual(self.drain(target="new"), 3)
-        self.assertFalse((self.root / "drain").exists())
+        self.assertFalse((self.root / "deploy-drain.json").exists())
+
+    def test_manual_lifecycle_uses_the_shared_partial_tail_safe_appender(self):
+        (self.root / "deploys.jsonl").write_text('{"outcome":"deployed","retry_until":12000}\n{"interrupted":')
+        for outcome in ("manual_drain_started", "manual_drain_finished"):
+            self.assertEqual(policy.main(["manual", str(self.root), outcome]), 0)
+        events = policy.events(self.root)
+        self.assertEqual([event["outcome"] for event in events],
+                         ["deployed", "manual_drain_started", "manual_drain_finished"])
+        self.assertTrue(all(event["owner_kind"] == "manual" and "token" not in event for event in events[1:]))
+        self.assertEqual(policy.retry_until(self.root), 12000)
+        with self.assertRaisesRegex(ValueError, "invalid manual drain lifecycle"):
+            policy.main(["manual", str(self.root), "private-unrecognized-event"])
+        self.assertEqual(policy.events(self.root), events)
 
     def test_force_is_explicit_and_invalid_limits_never_acquire(self):
         self.assertEqual(self.drain(force=True), 0)
         self.finish("deployed")
         with self.assertRaisesRegex(ValueError, "positive"):
             policy.drain(self.root, "a", lambda: state(), 0, 1800, "owner")
-        self.assertFalse((self.root / "drain").exists())
+        self.assertFalse((self.root / "deploy-drain.json").exists())
 
 
 if __name__ == "__main__":

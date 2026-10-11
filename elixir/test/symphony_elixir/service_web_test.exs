@@ -516,6 +516,31 @@ defmodule SymphonyElixir.ServiceWebTest do
     assert json_response(get(build_conn(), "/api/v1/state"), 200)["throttle"]["drain_reason"] == nil
   end
 
+  test "managed owner evidence reaches read-only API, dashboard and retained admission history" do
+    root = Service.current().state_root
+    owner = start_drain_owner(root)
+    observed = Governor.observe()
+    table = :sys.get_state(Project.via("alpha", :orchestrator)).operations
+    sample = %{running: 0, ready: 1, waiting: 0, attention: 0, open_prs: 0, spend_micro: 0, admission: observed}
+    Operations.record_sample(table, sample)
+    state = json_response(get(build_conn(), "/api/v1/state?history=full"), 200)
+    assert state["throttle"]["drain_owner"]["owner_status"] == "live"
+    assert dispatch_detail(state) =~ "managed deployment drain is present"
+    assert List.last(state["usage"]["samples"])["admission"]["drain_owner"]["kind"] == "managed"
+    payload = Jason.encode!(state)
+    refute payload =~ "private-owner"
+    refute payload =~ root
+    {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ "managed deployment drain is present"
+    Port.command(owner, "exit\n")
+    assert_receive {^owner, {:exit_status, 0}}, 5_000
+    state = json_response(get(build_conn(), "/api/v1/state"), 200)
+    assert state["throttle"]["drain_owner"]["owner_status"] == "abandoned"
+    assert File.exists?(Path.join(root, "deploy-drain.json"))
+    refute Governor.draining?()
+    assert json_response(get(build_conn(), "/api/v1/state"), 200)["throttle"]["drain_owner"] == nil
+  end
+
   test "full history includes older work across projects with the usual privacy and filters" do
     for id <- ["alpha", "beta"] do
       table = :sys.get_state(SymphonyElixir.Project.via(id, :orchestrator)).operations
