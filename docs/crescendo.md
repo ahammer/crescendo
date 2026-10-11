@@ -77,6 +77,11 @@ Autopilot task fields `exclusive: none|global` override project research exclusi
 fresh complete source/dependency/PR inputs, findings, policy and protected execution state.
 Unknown inputs defer. Unchanged inputs advance a separate cursor, preserve completion/audit
 coverage and force a recheck within 24 hours.
+Only verified deliveries establish skip eligibility. Versioned observation-only handoffs preserve
+substantive findings, publication, pending acceptance and protected capacity; legacy cohorts
+remain strict. Retained admission/defer/skip events expose bounded component reasons. See the
+[producer rollout and bounded normal-traffic canary](../elixir/docs/planning_preflight.md). Execution drain does not
+clear pending coverage or authorize checks outside the quiet-performance policy.
 
 Prepared local issue workers can call `defer_quiet_acceptance` once per canonical logical attempt
 when this configured window is unavailable. Commit preparation and evidence first, retain one draft

@@ -925,6 +925,11 @@ for checks that need an idle machine. `skip_unchanged: true` compares fresh sour
 open dependency/PR inventories, findings, configuration and protected execution state before
 creating a workspace. Unknown inputs defer; unchanged inputs update only a check cursor,
 never audit coverage, with a full recheck at least daily. Existing maintenance due rules apply.
+Only verified deliveries establish skip eligibility. Versioned observation-only handoffs preserve
+substantive findings, publication, pending acceptance and protected capacity; legacy cohorts
+remain strict. Retained admission/defer/skip events expose bounded component reasons. See the
+[producer rollout and bounded normal-traffic canary](docs/planning_preflight.md). Execution drain does not
+clear pending coverage or authorize checks outside the quiet-performance policy.
 
 The state API separates managed helper usage from `usage.external` CLI observations. External
 review/planner reports have claimed identities and unknown account debits; they never affect

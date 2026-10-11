@@ -2365,7 +2365,7 @@ defmodule SymphonyElixir.Orchestrator do
     task_state = Autopilot.record_research_finished(state.autopilot, research.channel, outcome, now(), autopilot)
 
     task_state =
-      if is_binary(research[:input_key]) and outcome in [:delivered, :unverified],
+      if is_map(research[:input_key]) and outcome == :delivered,
         do: Autopilot.record_preflight(task_state, research.channel, research.input_key, now(), true),
         else: task_state
 
@@ -2447,15 +2447,41 @@ defmodule SymphonyElixir.Orchestrator do
 
           put_autopilot(state, Autopilot.record_preflight(state.autopilot, item.research.channel, key, now(), false))
         else
-          dispatch_issue(state, put_in(item.research[:input_key], key))
+          Operations.event(state.operations, "task_preflight_admitted", %{
+            issue_identifier: item.identifier,
+            category: Operations.task_category(item.identifier),
+            summary: planning_invalidation(state.autopilot, item.research.channel, key)
+          })
+
+          state
+          |> put_autopilot(Autopilot.invalidate_preflight(state.autopilot, item.research.channel))
+          |> dispatch_issue(put_in(item.research[:input_key], key))
         end
 
       {:error, _reason} ->
+        Operations.event(state.operations, "task_preflight_deferred", %{
+          issue_identifier: item.identifier,
+          category: Operations.task_category(item.identifier),
+          summary: "Planning inputs unknown; no worker started"
+        })
+
         state
     end
   end
 
   defp preflight_research(state, item), do: dispatch_issue(state, item)
+
+  defp planning_invalidation(autopilot, channel, key) do
+    case get_in(autopilot, [:tasks, channel, :preflight_key]) do
+      previous when is_map(previous) ->
+        changed = for {component, digest} <- key, previous[component] != digest, do: component
+        reason = if changed == [], do: "daily_revisit", else: changed |> Enum.sort() |> Enum.join(",")
+        "Planning inputs changed: " <> reason
+
+      _ ->
+        "Planning inputs changed: no_verified_baseline"
+    end
+  end
 
   defp planning_input_key(state) do
     project = Project.current()
@@ -2474,12 +2500,25 @@ defmodule SymphonyElixir.Orchestrator do
         |> Enum.sort_by(& &1.id)
 
       protection = {Map.keys(state.running), state.retry_attempts, state.claimed, state.blocked, state.startup_failures, state.autopilot[:handoff_owners], state.quiet_continuations}
-      key = :crypto.hash(:sha256, :erlang.term_to_binary({sha, issues, state.pull_requests, findings, protection, config})) |> Base.encode16(case: :lower)
+      capacity = if state.throttle, do: Map.take(state.throttle, [:slots, :paused, :over_budget, :allow, :avoid])
+
+      inputs = %{
+        source: sha,
+        tracker: {issues, state.pull_requests},
+        evidence: findings,
+        protection: {protection, capacity},
+        configuration: config
+      }
+
+      key = inputs |> Map.new(fn {name, value} -> {name, planning_digest(value)} end) |> Map.put(:contract, 1)
       {:ok, key}
     else
       _ -> {:error, :planning_inputs_unknown}
     end
   end
+
+  defp planning_digest(value),
+    do: :crypto.hash(:sha256, :erlang.term_to_binary(value, [:deterministic])) |> Base.encode16(case: :lower)
 
   defp fresh_planning_input?(%DateTime{} = at), do: DateTime.diff(now(), at, :second) in 0..600
   defp fresh_planning_input?(_at), do: false
@@ -2495,48 +2534,135 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp planning_findings(root) do
-    with {:ok, latest} <- planning_json(Path.join(root, "autopilot/maintenance/latest.json")),
-         {:ok, costs} <- planning_json(Path.join(root, "autopilot/maintenance/cost-state.json")),
+    with {:ok, latest} when is_map(latest) <- planning_json(Path.join(root, "autopilot/maintenance/latest.json")),
+         {:ok, costs} when is_map(costs) <- planning_json(Path.join(root, "autopilot/maintenance/cost-state.json")),
          {:ok, references} <- planning_reports(root, latest, costs) do
-      {:ok, {latest, costs, references}}
+      planning_evidence_identity(latest, costs, references)
+    else
+      _ -> {:error, :planning_evidence_unknown}
+    end
+  end
+
+  # Producers opt in only after separating confirmed bookkeeping from substantive handoff state.
+  @planning_observation_fields ~w(observed_at updated_at started_at finished_at resumed_at groomed_at
+    run_key observation_key disposition_key report_key report_sha256 ci_cost_key ci_cost_sha256
+    consumed_report_sha256 consumed_ci_cost_sha256 grooming_report_key grooming_report_sha256
+    last_observation_key last_resume_observation_key last_grooming_observed_at)
+
+  defp planning_evidence_identity(latest, costs, references) do
+    documents = [latest, costs | Enum.map(references, fn {_role, {_path, value}} -> value end)]
+
+    cond do
+      Enum.any?(documents, &(&1["preflight_schema"] not in [nil, 1])) ->
+        {:error, :planning_schema_unknown}
+
+      Enum.all?(documents, &(&1["preflight_schema"] == 1)) ->
+        semantic_planning_evidence(latest, costs, references)
+
+      true ->
+        {:ok, {latest, costs, references}}
+    end
+  end
+
+  defp semantic_planning_evidence(latest, costs, references) do
+    with {:ok, latest} <- planning_document(latest),
+         {:ok, costs} <- planning_document(costs),
+         {:ok, reports} <- planning_documents(references) do
+      latest = Map.drop(latest, ~w(report_key pending_report_key grooming_disposition_key))
+      costs = Map.drop(costs, ~w(grooming_disposition_key completed_report_key last_resume_grooming_disposition_key))
+      costs = planning_cost_pointers(costs)
+      {:ok, {latest, costs, reports}}
+    end
+  end
+
+  defp planning_cost_pointers(costs) do
+    Enum.reduce(~w(last_completed pending pending_evaluation), costs, fn field, acc ->
+      case acc[field] do
+        %{} = record -> Map.put(acc, field, Map.delete(record, "report_key"))
+        _ -> acc
+      end
+    end)
+  end
+
+  defp planning_documents(documents) do
+    Enum.reduce_while(documents, {:ok, %{}}, fn {role, {_path, document}}, {:ok, acc} ->
+      case planning_document(document) do
+        {:ok, value} -> {:cont, {:ok, Map.put(acc, role, value)}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp planning_document(document) do
+    observation = Map.get(document, "preflight_observation", %{})
+
+    if is_map(observation) and
+         Enum.all?(observation, fn {field, value} ->
+           field in @planning_observation_fields and (is_binary(value) or is_nil(value))
+         end) do
+      {:ok, Map.drop(document, ["preflight_schema", "preflight_observation"])}
+    else
+      {:error, :planning_observation_unknown}
     end
   end
 
   defp planning_reports(root, latest, costs) do
     keys = [
-      latest && latest["report_key"],
-      latest && latest["grooming_disposition_key"],
-      get_in(costs, ["last_completed", "report_key"]),
-      costs && costs["completed_report_key"],
-      costs && costs["grooming_disposition_key"],
-      costs && costs["last_resume_grooming_disposition_key"]
+      latest_report: latest["report_key"],
+      pending_report: latest["pending_report_key"],
+      latest_disposition: latest["grooming_disposition_key"],
+      last_completed: planning_record_key(costs["last_completed"]),
+      pending: planning_record_key(costs["pending"]),
+      pending_evaluation: planning_record_key(costs["pending_evaluation"]),
+      completed_report: costs["completed_report_key"],
+      cost_disposition: costs["grooming_disposition_key"],
+      resume_disposition: costs["last_resume_grooming_disposition_key"]
     ]
 
-    keys = keys |> Enum.filter(&is_binary/1) |> Enum.uniq()
+    Enum.reduce_while(keys, {:ok, %{}}, fn {role, key}, {:ok, reports} ->
+      case planning_reference(root, key) do
+        {:ok, values} -> {:cont, {:ok, Map.merge(reports, Map.new(values, fn {kind, value} -> {{role, kind}, value} end))}}
+        error -> {:halt, error}
+      end
+    end)
+  end
 
-    paths =
-      Enum.flat_map(keys, fn key ->
-        relative = if String.starts_with?(key, "autopilot/"), do: key, else: "autopilot/maintenance/" <> key
-        path = Path.expand(relative, root)
-        if Path.basename(path) == "findings.json", do: [path, Path.join(Path.dirname(path), "ci-cost.json")], else: [path]
-      end)
-      |> Enum.uniq()
+  defp planning_record_key(nil), do: nil
+  defp planning_record_key(%{} = record), do: record["report_key"]
+  defp planning_record_key(_record), do: :unknown
 
-    Enum.reduce_while(paths, {:ok, %{}}, fn path, {:ok, reports} ->
+  defp planning_reference(_root, nil), do: {:ok, %{}}
+
+  defp planning_reference(root, key) when is_binary(key) do
+    relative = if String.starts_with?(key, "autopilot/"), do: key, else: "autopilot/maintenance/" <> key
+    path = Path.expand(relative, root)
+    paths = if Path.basename(path) == "findings.json", do: [report: path, cost: Path.join(Path.dirname(path), "ci-cost.json")], else: [report: path]
+
+    Enum.reduce_while(paths, {:ok, %{}}, fn {kind, path}, {:ok, reports} ->
       with true <- String.starts_with?(path, Path.expand(root) <> "/"),
-           {:ok, value} when not is_nil(value) <- planning_json(path) do
-        {:cont, {:ok, Map.put(reports, path, value)}}
+           {:ok, value} when is_map(value) <- planning_json(path) do
+        {:cont, {:ok, Map.put(reports, kind, {path, value})}}
       else
         _ -> {:halt, {:error, :planning_report_unknown}}
       end
     end)
   end
 
+  defp planning_reference(_root, _key), do: {:error, :planning_report_unknown}
+
   defp planning_json(path) do
     case File.open(path, [:read, :binary], &IO.binread(&1, 4_194_305)) do
-      {:ok, bytes} when is_binary(bytes) and byte_size(bytes) <= 4_194_304 -> Jason.decode(bytes)
-      {:error, :enoent} -> {:ok, nil}
-      _ -> {:error, :planning_evidence_unknown}
+      {:ok, bytes} when is_binary(bytes) and byte_size(bytes) <= 4_194_304 ->
+        case Jason.decode(bytes) do
+          {:ok, value} when is_map(value) -> {:ok, value}
+          _ -> {:error, :planning_evidence_unknown}
+        end
+
+      {:error, :enoent} ->
+        {:ok, nil}
+
+      _ ->
+        {:error, :planning_evidence_unknown}
     end
   end
 
