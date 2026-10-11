@@ -5,7 +5,7 @@ defmodule SymphonyElixir.GitHub.Client do
 
   require Logger
   alias SymphonyElixir.{Config, Handoff}
-  alias SymphonyElixir.GitHub.ETagCache
+  alias SymphonyElixir.GitHub.{ETagCache, ReportCompletion}
   alias SymphonyElixir.Tracker.Issue
 
   @default_api_url "https://api.github.com"
@@ -267,7 +267,7 @@ defmodule SymphonyElixir.GitHub.Client do
         if is_integer(lifecycle["id"]) and lifecycle["id"] > 0 and matching_delivery_lifecycle?(raw, lifecycle),
           do: lifecycle["id"]
 
-      reports = report_verifications(raw, timeline, settings, root, lifecycle)
+      {reports, rejection} = report_verifications(raw, timeline, settings, request_fun, root, lifecycle)
 
       {:ok,
        %{
@@ -276,6 +276,7 @@ defmodule SymphonyElixir.GitHub.Client do
          lifecycle_id: lifecycle_id,
          sources: sources,
          report_verifications: reports,
+         report_rejection: rejection,
          scope_digest: report_scope_digest([raw["title"], raw["body"]]),
          evidence_source: "github_issue_and_cross_reference"
        }}
@@ -297,7 +298,7 @@ defmodule SymphonyElixir.GitHub.Client do
   defp matching_delivery_lifecycle?(_, _), do: false
 
   # Canonical receipts are repository reports, never independent acceptance or billing proof.
-  defp report_verifications(raw, timeline, settings, root, lifecycle) do
+  defp report_verifications(raw, timeline, settings, request_fun, root, lifecycle) do
     number = to_string(raw["number"])
     url = "https://github.com/#{settings.repo}/issues/#{number}"
 
@@ -315,46 +316,29 @@ defmodule SymphonyElixir.GitHub.Client do
          true <- raw["state"] == "closed" and raw["state_reason"] == "completed",
          %{"event" => "closed", "id" => id, "created_at" => at} when is_integer(id) and id > 0 <- lifecycle,
          true <- is_binary(at) and at == raw["closed_at"],
-         references <- Enum.reject(Enum.uniq(references), &prior_report_reference?(&1, root, number, timeline)),
+         references <- Enum.reject(Enum.uniq(references), &prior_report_reference?(&1, root, number, timeline, settings, request_fun)),
          [[sha, ^number, sha, receipt]] <- references,
          {:ok, report} <- read_report(root, number, sha, receipt, url, [raw["title"], raw["body"]]),
-         :after <- report_reopen_order(report, timeline) do
-      [Map.merge(report, %{closed_at: at, lifecycle_id: id})]
+         {:ok, completion} <- read_completion(root, number, sha, receipt, raw, timeline, settings, request_fun) do
+      {[Map.merge(report, Map.merge(completion, %{closed_at: at, lifecycle_id: id}))], nil}
     else
-      _ -> []
+      {:error, reason} when is_binary(reason) -> {[], reason}
+      _ -> {[], "incomplete-report-verification"}
     end
   end
 
-  defp prior_report_reference?([sha, number, sha, receipt], root, number, timeline) do
-    with {:ok, usage} <- report_json(root, ["issue-#{number}", sha, receipt], "review-usage.json"),
-         true <- report_worker?(usage, number, sha) do
-      report_reopen_order(%{reviewed_s: usage["observed_at_epoch"]}, timeline) == :before
+  defp prior_report_reference?([sha, number, sha, receipt], root, number, timeline, settings, request_fun) do
+    with {:ok, input} <- report_json(root, ["issue-#{number}", sha, receipt], "input.json"),
+         %{"title" => _, "body" => _} = raw <- input["issue"],
+         {:ok, bytes, context, authenticate} <-
+           completion_inputs(root, {number, sha, receipt}, raw, timeline, settings, request_fun) do
+      ReportCompletion.before_reopen?(bytes, context, authenticate)
     else
       _ -> false
     end
   end
 
-  defp prior_report_reference?(_, _, _, _), do: false
-
-  defp report_reopen_order(report, timeline) do
-    with %{"created_at" => at} <- timeline |> Enum.filter(&(&1["event"] == "reopened")) |> List.last(),
-         {:ok, reopened, _} <- DateTime.from_iso8601(to_string(at)) do
-      report_time_order(report.reviewed_s, reopened)
-    else
-      nil -> :after
-      _ -> :ambiguous
-    end
-  end
-
-  defp report_time_order(reviewed, reopened) do
-    at = DateTime.to_unix(reopened, :microsecond) / 1_000_000
-
-    cond do
-      reviewed < at -> :before
-      reopened.microsecond == {0, 0} and reviewed < at + 1 -> :ambiguous
-      true -> :after
-    end
-  end
+  defp prior_report_reference?(_, _, _, _, _, _), do: false
 
   defp read_report(root, number, sha, receipt, url, scope) do
     parts = ["issue-#{number}", sha, receipt]
@@ -382,13 +366,47 @@ defmodule SymphonyElixir.GitHub.Client do
          scope_digest: report_scope_digest(scope),
          source_sha: sha,
          issue_url: url,
-         run_id: usage["parent_run_id"],
-         reviewed_s: usage["observed_at_epoch"],
-         evidence_source: "canonical_verify_existing_receipts_and_github_closure"
+         evidence_source: "canonical_review_completion_and_github_closure"
        }}
     else
       _ -> {:error, :incomplete_report_verification}
     end
+  end
+
+  defp read_completion(root, number, sha, receipt, raw, timeline, settings, request_fun) do
+    with {:ok, bytes, context, authenticate} <-
+           completion_inputs(root, {number, sha, receipt}, raw, timeline, settings, request_fun) do
+      ReportCompletion.read(bytes, context, authenticate)
+    end
+  end
+
+  defp completion_inputs(root, {number, sha, receipt}, raw, timeline, settings, request_fun) do
+    parts = ["issue-#{number}", sha, receipt]
+
+    with {:ok, usage} <- report_json(root, parts, "review-usage.json"),
+         {:ok, input} <- report_json(root, parts, "input.json") do
+      bytes = &completion_bytes(root, parts, &1)
+
+      context = %{
+        repo: settings.repo,
+        number: String.to_integer(number),
+        sha: sha,
+        parts: parts,
+        scope: [raw["title"], raw["body"]],
+        raw: raw,
+        timeline: timeline,
+        usage: usage,
+        input_lifecycle: input["lifecycle_before"]
+      }
+
+      authenticate = fn id -> request_with_settings("GET", "#{repository_issues_path(settings)}/comments/#{id}", %{}, nil, settings, request_fun, true) end
+      {:ok, bytes, context, authenticate}
+    end
+  end
+
+  defp completion_bytes(root, parts, name) do
+    limit = if name == "review.log", do: 16_777_216, else: 131_072
+    report_bytes(root, parts, name, limit)
   end
 
   defp report_scope?(intent, input, number, sha, url, scope) do
@@ -411,7 +429,7 @@ defmodule SymphonyElixir.GitHub.Client do
 
   defp report_worker?(usage, number, sha) do
     usage["role"] == "reviewer" and usage["source_sha"] == sha and usage["terminal_event"] == "turn.completed" and
-      usage["work_item"] == "GH-#{number}" and is_binary(usage["parent_run_id"]) and is_number(usage["observed_at_epoch"])
+      usage["work_item"] == "GH-#{number}" and is_binary(usage["parent_run_id"])
   end
 
   defp approved_report_review?(review, sha) do
@@ -463,14 +481,14 @@ defmodule SymphonyElixir.GitHub.Client do
     end
   end
 
-  defp report_bytes(root, parts, name) do
+  defp report_bytes(root, parts, name, limit \\ 131_072) do
     paths = Enum.scan(parts ++ [name], Path.expand(root), &Path.join(&2, &1))
 
     with true <- Enum.all?(Enum.drop(paths, -1), &match?({:ok, %{type: :directory}}, File.lstat(&1))),
          path = List.last(paths),
-         {:ok, %{type: :regular, size: size}} when size <= 131_072 <- File.lstat(path),
-         {:ok, bytes} <- File.open(path, [:read, :binary], &IO.binread(&1, 131_073)),
-         true <- is_binary(bytes) and byte_size(bytes) <= 131_072 do
+         {:ok, %{type: :regular, size: size}} when size <= limit <- File.lstat(path),
+         {:ok, bytes} <- File.open(path, [:read, :binary], &IO.binread(&1, limit + 1)),
+         true <- is_binary(bytes) and byte_size(bytes) <= limit do
       {:ok, bytes}
     else
       _ -> {:error, :report_receipt_unavailable}
