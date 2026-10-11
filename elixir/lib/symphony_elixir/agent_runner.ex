@@ -5,7 +5,8 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, Governor, ModelRouting, Project, PromptBuilder, Startup, Tracker, Workspace}
+  alias SymphonyElixir.{Config, Governor, ModelRouting, Project, PromptBuilder, QuietContinuation}
+  alias SymphonyElixir.{Startup, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @type worker_host :: String.t() | nil
@@ -31,6 +32,9 @@ defmodule SymphonyElixir.AgentRunner do
 
       {:yield, :deployment_drain} ->
         exit({:shutdown, :deployment_drain})
+
+      {:yield, :quiet_acceptance} ->
+        exit({:shutdown, :quiet_acceptance})
 
       {:error, {:startup_failed, diagnostic} = reason} ->
         send_worker_message(codex_update_recipient, issue, :worker_startup_failure, diagnostic, opts)
@@ -116,6 +120,8 @@ defmodule SymphonyElixir.AgentRunner do
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
 
     codex = Keyword.get(opts, :codex_settings, Config.settings!().codex)
+    opts = revalidate_quiet_continuation(opts, workspace)
+    opts = Keyword.put(opts, :quiet_continuation_available, QuietContinuation.available?(%{kind: issue.kind, recipient: codex_update_recipient, run_id: opts[:run_id], worker_host: worker_host}))
     prompt = PromptBuilder.build_prompt(issue, opts)
     opts = Keyword.merge(opts, initial_prompt: prompt, codex_settings: codex)
     on_message = codex_message_handler(codex_update_recipient, issue, opts)
@@ -131,6 +137,7 @@ defmodule SymphonyElixir.AgentRunner do
       on_message: on_message,
       helper_context: %{
         run_id: Keyword.get(opts, :run_id),
+        kind: issue.kind,
         project: SymphonyElixir.Project.current(),
         issue_id: issue.id,
         identifier: issue.identifier,
@@ -255,7 +262,10 @@ defmodule SymphonyElixir.AgentRunner do
          :ok <- persist_completed_checkpoint(app_session, turn_session, issue, codex_update_recipient, opts) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
-      case continuation_at_boundary(issue, issue_state_fetcher) do
+      case continuation_at_boundary(issue, issue_state_fetcher, codex_update_recipient, opts) do
+        :quiet_acceptance ->
+          {:yield, :quiet_acceptance}
+
         {:yield, refreshed_issue} ->
           Logger.info("Yielding agent run for #{issue_context(refreshed_issue)} session_id=#{turn_session[:session_id]} reason=deployment_drain turn=#{turn_number}/#{max_turns}")
           {:yield, :deployment_drain}
@@ -288,11 +298,27 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp continuation_at_boundary(issue, issue_state_fetcher) do
+  defp continuation_at_boundary(issue, issue_state_fetcher, recipient, opts) do
+    run_id = Keyword.get(opts, :run_id)
+
+    if Keyword.get(opts, :quiet_continuation_available, false) and
+         GenServer.call(recipient, {:quiet_deferred?, issue.id, run_id}),
+       do: :quiet_acceptance,
+       else: active_continuation_at_boundary(issue, issue_state_fetcher)
+  end
+
+  defp active_continuation_at_boundary(issue, issue_state_fetcher) do
     with {:continue, refreshed_issue} <- continue_with_issue?(issue, issue_state_fetcher) do
       if Project.current() != nil and Governor.draining?(),
         do: {:yield, refreshed_issue},
         else: {:continue, refreshed_issue}
+    end
+  end
+
+  defp revalidate_quiet_continuation(opts, workspace) do
+    case Keyword.get(opts, :quiet_continuation) do
+      nil -> opts
+      prepared -> Keyword.put(opts, :quiet_continuation, QuietContinuation.revalidate(prepared, workspace))
     end
   end
 

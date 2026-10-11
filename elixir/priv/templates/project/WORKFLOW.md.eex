@@ -143,6 +143,13 @@ finish. Stop every process you started.
 
 ## Blocked attempts
 
+If `defer_quiet_acceptance` is available and a prepared delivery needs the configured quiet window,
+commit its source/evidence and keep its existing PR draft. Supply the exact HEAD, PR URL, committed
+evidence paths, durable reason and all unmet gates, including product failures. After tool success,
+update the workpad and end the turn without a blocked label. This is one continuation of the same
+logical attempt, including a final attempt; resume must revalidate evidence and finish acceptance.
+Do not wait or poll the window, clone the issue/PR, or count deferral as a passed gate.
+
 {% if final_attempt %}
 **This is the final attempt; the issue will not be retried.** Resolve it now, in order of preference:
 

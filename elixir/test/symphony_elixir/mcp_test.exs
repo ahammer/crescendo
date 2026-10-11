@@ -4,6 +4,10 @@ defmodule SymphonyElixir.MCPTest do
   alias SymphonyElixir.{MCP, PriorityMode, Service}
 
   setup do
+    work_item = System.get_env("CRESCENDO_WORK_ITEM")
+    System.delete_env("CRESCENDO_WORK_ITEM")
+    on_exit(fn -> SymphonyElixir.TestSupport.restore_env("CRESCENDO_WORK_ITEM", work_item) end)
+
     root = Path.join(System.tmp_dir!(), "crescendo-mcp-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
     path = Path.join(root, "crescendo.yml")
@@ -36,13 +40,23 @@ defmodule SymphonyElixir.MCPTest do
     assert PriorityMode.status(service).enabled
   end
 
-  test "worker sessions cannot change cost policy while status remains readable", %{service: service} do
-    set = request(1, "tools/call", %{name: "crescendo_priority_mode_set", arguments: %{enabled: true}})
-    assert {response, true} = MCP.handle(set, service, true, false)
-    assert response.result.isError
+  test "worker sessions cannot change cost policy while status remains readable", %{path: path, service: service} do
+    System.put_env("CRESCENDO_WORK_ITEM", "test-worker")
+
+    messages = [
+      request(1, "initialize", %{protocolVersion: "2025-11-25"}),
+      request(2, "tools/call", %{name: "crescendo_priority_mode_set", arguments: %{enabled: true}}),
+      request(3, "tools/call", %{name: "crescendo_priority_mode_get"})
+    ]
+
+    {:ok, input} = StringIO.open(Enum.map_join(messages, "\n", &Jason.encode!/1) <> "\n")
+    {:ok, output} = StringIO.open("")
+    assert MCP.run(path, input, output) == :ok
+    {_, data} = StringIO.contents(output)
+    assert [_, set, get] = data |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    assert set["result"]["isError"]
     refute PriorityMode.status(service).enabled
-    assert {response, true} = MCP.handle(request(2, "tools/call", %{name: "crescendo_priority_mode_get"}), service, true, false)
-    refute response.result.isError
+    refute get["result"]["isError"]
   end
 
   test "invalid requests and parameters are returned without mutating the policy", %{service: service, path: path} do

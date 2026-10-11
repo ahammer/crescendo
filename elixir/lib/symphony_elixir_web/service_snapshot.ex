@@ -17,6 +17,7 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
       running: tagged(snapshots, :running),
       helpers: tagged(snapshots, :helpers),
       retrying: tagged(snapshots, :retrying),
+      deferred: tagged(snapshots, :deferred),
       blocked: tagged(snapshots, :blocked),
       codex_totals: snapshots |> Enum.map(fn {_id, snapshot} -> snapshot[:codex_totals] || %{} end) |> sum(),
       operations: operations(snapshots, opts, length(results)),

@@ -1245,6 +1245,21 @@ defmodule SymphonyElixir.Operations do
   def startup_state(nil), do: %{}
   def startup_state(table), do: lookup(table, :startup, %{})
 
+  @spec quiet_continuations(handle()) :: map()
+  def quiet_continuations(nil), do: %{}
+  def quiet_continuations(table), do: lookup(table, :quiet_continuations, %{})
+
+  @spec save_quiet_continuations(handle(), map()) :: :ok | {:error, term()}
+  def save_quiet_continuations(nil, _state), do: {:error, :operations_unavailable}
+
+  def save_quiet_continuations(table, state) do
+    with :ok <- :dets.insert(table, {:quiet_continuations, state}), do: :dets.sync(table)
+  rescue
+    error -> {:error, error}
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
   @spec save_startup_state(handle(), map()) :: :ok
   def save_startup_state(nil, _state), do: :ok
 
@@ -1653,7 +1668,7 @@ defmodule SymphonyElixir.Operations do
     end)
   end
 
-  @finish_kinds ["completed", "failed", "stopped", "interrupted"]
+  @finish_kinds ["completed", "failed", "stopped", "interrupted", "deferred"]
 
   # Median wall time of runs finished in the last three days, per kind of work
   # item, paired from each item's dispatch event to its next finish event.

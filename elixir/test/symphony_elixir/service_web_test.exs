@@ -8,6 +8,7 @@ defmodule SymphonyElixir.ServiceWebTest do
 
   defmodule PollTracker do
     def fetch_issues_by_states(_states), do: {:error, :offline_tracker}
+    def fetch_issues_by_ids(_ids), do: {:error, :offline_tracker}
   end
 
   @endpoint SymphonyElixirWeb.Endpoint
@@ -95,6 +96,9 @@ defmodule SymphonyElixir.ServiceWebTest do
     assert Orchestrator.snapshot(beta, 1_000).tracker_ready
     inventory = [%{number: 7, title: "Private persisted inventory", url: "https://github.test/pull/7", draft: true}]
     Operations.save_pull_inventory(before.operations, inventory, before.issues_observed_at)
+    prepared = %{"issue-held" => %{issue_id: "issue-held", item_attempt: 1, run_id: "prepared", reason: "quiet acceptance"}}
+    assert :ok = Operations.save_quiet_continuations(before.operations, prepared)
+    :sys.replace_state(beta, &%{&1 | quiet_continuations: prepared})
 
     previous = Application.get_env(:symphony_elixir, :linear_client_module)
     Application.put_env(:symphony_elixir, :linear_client_module, PollTracker)
@@ -111,6 +115,7 @@ defmodule SymphonyElixir.ServiceWebTest do
     send(beta, :run_poll_cycle)
     failed = Orchestrator.snapshot(beta, 1_000)
     refute failed.tracker_ready
+    assert :sys.get_state(beta).quiet_continuations == prepared
     assert failed.upcoming.observed_at == before.issues_observed_at
     assert failed.upcoming.error == "tracker fetch failed"
     state = SymphonyElixirWeb.Presenter.payload(timeout: 1_000)
@@ -125,6 +130,7 @@ defmodule SymphonyElixir.ServiceWebTest do
     assert unobserved.pull_requests.items == inventory
     assert unobserved.pull_requests.observed_at == before.issues_observed_at
     assert unobserved.upcoming.observed_at == nil
+    assert :sys.get_state(restarted).quiet_continuations == prepared
     refute unobserved.tracker_ready
     assert healthy(SymphonyElixirWeb.Presenter.payload(timeout: 1_000)) == 1
 
@@ -138,6 +144,7 @@ defmodule SymphonyElixir.ServiceWebTest do
     assert recovered.upcoming.observed_at
     assert recovered.upcoming.error == nil
     assert recovered.upcoming.ready == []
+    assert :sys.get_state(restarted).quiet_continuations == %{}
     state = SymphonyElixirWeb.Presenter.payload(timeout: 1_000)
     assert Enum.all?(state.projects, & &1.tracker_ready)
     assert healthy(state) == 0
@@ -170,6 +177,139 @@ defmodule SymphonyElixir.ServiceWebTest do
       assert GenServer.whereis(SymphonyElixir.Project.via("alpha", :orchestrator)) == pid
       assert Governor.snapshot().quiet_window.phase == expected
     end
+  end
+
+  @tag quiet_startup: true
+  test "deferred unlabeled demand keeps throttle, route and dependency gates", %{quiet_issue: issue} do
+    issue = %{issue | labels: []}
+    pid = GenServer.whereis(Project.via("alpha", :orchestrator))
+    initial = :sys.get_state(pid)
+
+    prepared = %{
+      issue_id: issue.id,
+      item_attempt: 1,
+      run_id: "prepared",
+      retry_attempt: 0,
+      reason: "quiet digest required",
+      source_sha: "source",
+      pull_request: "https://github.test/pull/7",
+      evidence: [],
+      unmet_acceptance: ["p99 failed"],
+      final_attempt: false
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    for {policy, item, expected} <- [
+          {%{initial.throttle | paused: "quota low"}, issue, "idle"},
+          {%{initial.throttle | over_budget: "daily budget", allow: []}, issue, "idle"},
+          {%{initial.throttle | avoid: %{"gpt-6.1-sol" => "backed off"}}, issue, "idle"},
+          {initial.throttle, %{issue | dispatchable: false, blocked_by: [%{identifier: "GH-9"}]}, "idle"},
+          {%{initial.throttle | over_budget: "daily budget", allow: ["continuation"]}, issue, "preparing"}
+        ] do
+      Governor.checkin("alpha", 0, 0, 0)
+      Governor.checkin("beta", 0, 0, 0)
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [item])
+      :sys.replace_state(pid, &%{&1 | throttle: policy, quiet_continuations: %{issue.id => prepared}})
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).running == %{}
+      assert Governor.snapshot().quiet_window.phase == expected
+    end
+
+    state = json_response(get(build_conn(), "/api/v1/state?project=alpha"), 200)
+    assert [%{"reason" => "quiet digest required", "unmet_acceptance" => ["p99 failed"]}] = state["deferred"]
+    assert Enum.any?(state["upcoming"]["waiting"], &(&1["reason"] =~ "quiet digest required"))
+    assert get(build_conn(), "/api/v1/state").status == 200
+    assert post(build_conn(), "/api/v1/state", %{}).status == 405
+  end
+
+  @tag quiet_startup: true
+  test "closed and missing quiet deliveries are forgotten across restart without resetting their budget", %{quiet_issue: issue} do
+    pid = GenServer.whereis(Project.via("alpha", :orchestrator))
+    state = :sys.get_state(pid)
+    autopilot = Map.put(state.autopilot, :item_attempts, %{issue.id => 2})
+    prepared = %{issue_id: issue.id, item_attempt: 3, run_id: "prepared", reason: "quiet acceptance pending"}
+    Operations.save_autopilot_state(state.operations, autopilot)
+
+    for items <- [[%{issue | state: "Closed"}], []] do
+      assert :ok = Operations.save_quiet_continuations(state.operations, %{issue.id => prepared})
+      :sys.replace_state(pid, &%{&1 | autopilot: autopilot, quiet_continuations: %{issue.id => prepared}})
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, items)
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).quiet_continuations == %{}
+      assert Operations.quiet_continuations(state.operations) == %{}
+      assert :sys.get_state(pid).autopilot.item_attempts[issue.id] == 2
+      assert Orchestrator.snapshot(pid, 1_000).deferred == []
+    end
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | labels: ["hold"]}])
+    runtime = Project.via("alpha", :agent_runtime)
+    :ok = Supervisor.terminate_child(runtime, Project.via("alpha", :orchestrator))
+    assert {:ok, restarted} = Supervisor.restart_child(runtime, Project.via("alpha", :orchestrator))
+    assert :sys.get_state(restarted).quiet_continuations == %{}
+    assert :sys.get_state(restarted).autopilot.item_attempts[issue.id] == 2
+    assert Orchestrator.snapshot(restarted, 1_000).deferred == []
+  end
+
+  @tag quiet_startup: true
+  test "removing the quiet window on restart fails a retained final attempt exactly once", %{service: service, quiet_issue: issue} do
+    project = Enum.find(Service.projects(service), &(&1.id == "alpha"))
+
+    write_workflow_file!(project.workflow,
+      tracker_kind: "memory",
+      tracker_excluded_labels: ["hold"],
+      poll_interval_ms: 3_600_000,
+      autopilot: %{
+        "enabled" => true,
+        "max_item_attempts" => 3,
+        "channels" => %{"fixture" => "Unused fixture research"},
+        "prompts" => %{"pull_request" => service.path, "research" => service.path}
+      }
+    )
+
+    pid = GenServer.whereis(Project.via("alpha", :orchestrator))
+    state = :sys.get_state(pid)
+
+    autopilot =
+      state.autopilot
+      |> Map.put(:item_attempts, %{issue.id => 2})
+      |> Map.put(:tasks, %{"fixture" => %{finished_at: DateTime.add(DateTime.utc_now(), 1, :day), attempts: 0, last: :delivered}})
+
+    prepared = %{issue_id: issue.id, identifier: issue.identifier, item_attempt: 3, final_attempt: true, run_id: "prepared", reason: "quiet acceptance pending"}
+    Operations.save_autopilot_state(state.operations, autopilot)
+    assert :ok = Operations.save_quiet_continuations(state.operations, %{issue.id => prepared})
+    :sys.replace_state(pid, &%{&1 | autopilot: autopilot, quiet_continuations: %{issue.id => prepared}})
+    Application.put_env(:symphony_elixir, :memory_tracker_writes, [])
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_writes) end)
+
+    stop_supervised!(Projects)
+    stop_supervised!(Governor)
+    service = %{service | quiet_window: nil}
+    Service.put_current(service)
+    start_supervised!({Governor, service})
+    start_supervised!({Projects, service})
+
+    wait_for(fn ->
+      assert Projects.failures() == %{}
+      is_pid(GenServer.whereis(Project.via("alpha", :orchestrator)))
+    end)
+
+    restarted = GenServer.whereis(Project.via("alpha", :orchestrator))
+    send(restarted, :run_poll_cycle)
+    recovered = :sys.get_state(restarted)
+    assert recovered.quiet_continuations == %{}
+    assert recovered.autopilot.item_attempts[issue.id] == 3
+    assert recovered.autopilot.retired_items[issue.id]
+    assert Operations.quiet_continuations(recovered.operations) == %{}
+    assert Operations.autopilot_state(recovered.operations).item_attempts[issue.id] == 3
+    assert recovered.running == %{}
+    assert Governor.snapshot().quiet_window.phase == "idle"
+
+    send(restarted, :run_poll_cycle)
+    assert :sys.get_state(restarted).autopilot.item_attempts[issue.id] == 3
+    assert [{:retire, id, reason}] = Application.get_env(:symphony_elixir, :memory_tracker_writes)
+    assert id == issue.id
+    assert reason =~ "quiet acceptance window removed"
   end
 
   test "operator Fast defaults appear in the dashboard and API without UI controls", %{service: service} do
