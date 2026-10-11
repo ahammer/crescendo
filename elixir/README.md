@@ -401,6 +401,12 @@ codex:
 - Native issue dependencies are checked for label-eligible open issues during polling and again
   on ID refresh before dispatch. An open blocker or one closed as `not_planned` prevents dispatch;
   a dependency API error fails the read rather than treating the issue as unblocked.
+- Worker/intake templates and repository task guidelines require early attachment and paginated
+  read-back of real delivery prerequisites before another unchanged blocked attempt. Native admission
+  and reconciliation retain the owner, workspace and original budget; independent work can use the
+  released slot. A verified open producer ends the turn without a blocked or `in-review` label,
+  including on final attempts. Existing
+  local workflows need the [operator prompt rollout](../docs/crescendo.md#registering-real-native-prerequisites).
 - Tool and auth: `github_api` accepts a relative REST `path` plus optional `params` and JSON
   `body`; Symphony executes it host-side with the session-bound token, removes configured tracker
   credentials and provider authentication aliases from the Codex child, and leaves raw tool access
