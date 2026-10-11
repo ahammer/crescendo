@@ -1006,6 +1006,7 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
       workspace_root: Path.join(fixture.root, "workspaces"),
       codex_command: "python3 #{Path.join(fixture.root, "server.py")}",
       max_turns: 1,
+      max_attempts: 1,
       poll_interval_ms: 3_600_000,
       autopilot: %{
         "enabled" => true,
@@ -1091,6 +1092,7 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     eventually(fn -> :sys.get_state(pid).issues_observed_at != nil end)
     assert :sys.get_state(pid).quiet_continuations[issue.id] == prepared
     assert :sys.get_state(pid).running == %{}
+    change_fixture(fixture, %{"terminal_status" => "failed"})
 
     # Quota, deployment drain and dependencies still prevent dispatch in the eligible hour.
     Application.put_env(:symphony_elixir, :governor_now, fn -> ~U[2026-10-11 10:00:00Z] end)
@@ -1121,12 +1123,31 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     assert prompt =~ "No second quiet deferral"
     File.write!(Path.join(fixture.root, "finish-turn"), "")
     eventually(fn -> :sys.get_state(pid).running == %{} end)
-    assert :sys.get_state(pid).autopilot.item_attempts[issue.id] == 2
+    state = :sys.get_state(pid)
+    assert state.autopilot.item_attempts[issue.id] == 2
+    assert state.quiet_continuations[issue.id] == prepared
+    retry = state.retry_attempts[issue.id]
+    assert retry.attempt == 1
 
-    # The real failed product gate still consumes the final attempt and retires the original owner.
-    Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | labels: ["symphony:blocked"]}])
-    send(pid, :run_poll_cycle)
-    assert :sys.get_state(pid).autopilot.item_attempts[issue.id] == 3
+    File.rm!(Path.join(fixture.root, "finish-turn"))
+    File.rm!(Path.join(fixture.root, "turn-started"))
+    Process.cancel_timer(retry.timer_ref)
+
+    :sys.replace_state(pid, fn state ->
+      put_in(state.retry_attempts[issue.id].due_at_ms, System.monotonic_time(:millisecond))
+    end)
+
+    send(pid, {:retry_issue, issue.id, retry.retry_token})
+    eventually(fn -> File.exists?(Path.join(fixture.root, "turn-started")) end)
+    retried = :sys.get_state(pid).running[issue.id]
+    assert retried.retry_attempt == 1
+    assert retried.item_attempt == 3 and retried.final_attempt
+
+    # Failed acceptance retries exhaust their limit and consume only the final logical attempt.
+    File.write!(Path.join(fixture.root, "finish-turn"), "")
+    eventually(fn -> :sys.get_state(pid).autopilot.item_attempts[issue.id] == 3 end)
+    assert :sys.get_state(pid).running == %{}
+    assert :sys.get_state(pid).retry_attempts == %{}
     assert :sys.get_state(pid).quiet_continuations == %{}
     assert Operations.quiet_continuations(:sys.get_state(pid).operations) == %{}
     assert Enum.count(Application.get_env(:symphony_elixir, :memory_tracker_writes), &match?({:retire, _, _}, &1)) == 1
