@@ -117,7 +117,7 @@ No description provided.
 
 ## Required native prerequisites
 
-When delivery actually requires an existing producer issue, register it before ending blocked so
+When delivery actually requires an existing producer issue, register it before ending the turn so
 unchanged evidence cannot admit another consumer attempt. Optional improvements, diagnostics and
 arbitrary issue mentions are not prerequisites. Within this task's authority, read the producer at
 `GET /repos/OWNER/REPO/issues/NUMBER`; verify its repository, issue number and global numeric `id`
@@ -133,11 +133,17 @@ incomplete reads leave attachment uncertain: preserve that fact and the next rec
 workpad and use the existing bounded failure policy, never claim the prerequisite is satisfied.
 Retain preparation, the branch/PR, source SHAs, unique evidence and unmet acceptance on this owner
 before attachment; reconciliation can stop a running worker as soon as it observes the edge.
-Keep ready and native edges intact. Do not add holds, create prerequisite work in another project,
+Keep `symphony` and native edges intact. Do not add holds, create prerequisite work in another project,
 promote a replacement, renew a budget or weaken acceptance. The existing admission/reconciliation
 owns the wait and resume; independent authorized work may proceed. Fresh accepted completion of
 the exact native producer allows the same owner and remaining attempt budget to resume;
 `not_planned`, unreadable evidence or a completed same-number issue in another repository does not.
+
+After verifying an open native prerequisite, update the workpad and end the turn without a blocked
+label, including on the final attempt. Keep the consumer open and its PR draft; do not split or close
+it solely because that producer is pending. The blocked/final-attempt rules below apply only when
+there is no verified open native prerequisite. Resumption uses the same logical attempt and
+remaining budget; the consumer still has to meet every acceptance gate.
 
 ## When you are blocked
 

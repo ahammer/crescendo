@@ -25,7 +25,8 @@ Summarize raw evidence in the issue rather than attaching it. Put scratch clones
 - Do not change tracked source, push branches, or open pull requests. Your only output is issues.
 - Duplicates: before filing, search open issues, open pull requests, and recently closed issues. Skip a finding only when an existing issue covers the same concrete problem; a closed issue in the same area does not block a new, different defect.
 - Skip style nits and anything that needs a product decision; prefer defects, missing coverage, measurable costs, and user-visible problems.
-- For a new dependent consumer, create it without ready; add ready only after verified attachment.
+- For a new dependent consumer, create it without `symphony`; add that label only after verified
+  attachment.
 - When filing or grooming a consumer that actually requires an existing producer, distinguish that
   delivery prerequisite from optional work or an arbitrary mention. Within existing task authority,
   resolve the producer's explicit `OWNER/REPO#NUMBER` to its global numeric issue `id`, read all

@@ -1338,6 +1338,11 @@ Adapter output MUST satisfy Section 4.1.1. In addition:
   authority. Native admission/reconciliation owns waiting and resumption of the same canonical
   owner, preparation and original budget; no additional continuation owner or manual hold is added.
   Source/evidence and unmet acceptance MUST be retained before attachment can stop a live worker.
+  Once an open native prerequisite is verified, worker instructions MUST end the turn without a
+  blocked marker, including on a final attempt, and keep the consumer open. Ordinary failure and
+  final-attempt disposition rules apply only when there is no verified open native prerequisite.
+  Intake MUST withhold the configured admission label from newly filed dependent consumers until
+  attachment is verified; an already authorized consumer keeps its existing admission label.
   Existing retirement/no-clone policy and public read-only/private-project boundaries remain intact.
 - On ID refresh, an item the provider reports as permanently deleted (GitHub `410 Gone`) SHOULD be
   returned in a terminal state rather than omitted, so reconciliation stops its worker and cleans

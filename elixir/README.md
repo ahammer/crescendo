@@ -403,7 +403,8 @@ codex:
   a dependency API error fails the read rather than treating the issue as unblocked.
 - Worker/intake templates require early attachment and paginated read-back of real existing delivery
   prerequisites before another unchanged blocked attempt. Native admission/reconciliation retains
-  the owner, workspace and original budget; independent work can use the released slot. Existing
+  the owner, workspace and original budget; independent work can use the released slot. A verified
+  open producer ends the turn without a blocked label, including on final attempts. Existing
   local workflows need the [operator prompt rollout](../docs/crescendo.md#registering-real-native-prerequisites).
 - Tool and auth: `github_api` accepts a relative REST `path` plus optional `params` and JSON
   `body`; Symphony executes it host-side with the session-bound token, removes configured tracker

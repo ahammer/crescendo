@@ -852,9 +852,12 @@ issue cannot substitute for the native producer. Keep ready and the original edg
 clone owners, renew successor budgets or weaken acceptance. Final-attempt retirement still applies.
 
 The generated worker and intake templates include this procedure. They do **not** migrate existing
-local workflows. The operator should review a copy of each project's local `WORKFLOW.md` and intake/
-grooming prompt, insert the `Required native prerequisites` section from the generated template
-before blocked/final-attempt rules, and add the matching intake rule from `prompts/research.md.eex`.
+local workflows. New dependent consumers are filed without the configured admission label until
+attachment is verified: `symphony` in the bundled workflow, `<prefix>:ready` in generated projects.
+Already authorized consumers keep that label. The operator should review a copy of each project's
+local `WORKFLOW.md` and intake/grooming prompt. Insert the `Required native prerequisites` section
+from the generated template before blocked/final-attempt rules, and add the matching intake rule
+from `prompts/research.md.eex`.
 Review against custom instructions and the canonical handoff contract, render a sample ordinary and
 final attempt, then roll out the reviewed local prompt through the operator's normal config process.
 Workers changing this repository must never edit the running installation or its local config.
@@ -874,7 +877,9 @@ Concrete procedure using the [GitHub dependency API](https://docs.github.com/en/
 4. If absent, use `github_api` with `method: "POST"`, that consumer dependency `path`, and
    `body: {"issue_id": PRODUCER_GLOBAL_ID}`. Read every page back using `method: "GET"` and verify
    the exact identity. Record verified attachment and the still-open prerequisite in the workpad;
-   POST success by itself is not verification.
+   POST success by itself is not verification. With a verified open producer, keep the consumer open
+   and its PR draft, then end the turn without a blocked label, including on the final attempt.
+   Ordinary blocked/final-attempt disposition rules apply only when that native wait is not verified.
 5. After timeout, disconnect, duplicate response or restart with an uncertain workpad entry, repeat
    the complete read-back first. If present, treat the original write as successful. If a complete
    valid read proves absence, retry the same identity once and read back again. If reads are denied,

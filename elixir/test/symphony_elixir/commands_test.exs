@@ -60,6 +60,35 @@ defmodule SymphonyElixir.CommandsTest do
              Commands.run(["project", "add", service, "babelfit", "ahammer/BabelFit"], &no_gh/1)
   end
 
+  test "worker waits and intake gates match generated and bundled workflows", %{root: root, service: service} do
+    capture_io(fn ->
+      assert :ok = Commands.run(["project", "add", service, "fixture", "fixture/consumer"], &no_gh/1)
+    end)
+
+    assert {:ok, generated} = Workflow.load(Path.join([root, "projects", "fixture", "WORKFLOW.md"]))
+    assert {:ok, bundled} = Workflow.load("WORKFLOW.autopilot.md")
+    issue = %{"id" => "72", "identifier" => "GH-72", "url" => "https://github.com/fixture/consumer/issues/72", "title" => "Consumer", "description" => "Required producer is pending", "labels" => []}
+
+    for workflow <- [generated, bundled], final_attempt <- [false, true] do
+      prompt =
+        workflow.prompt
+        |> Solid.parse!()
+        |> Solid.render!(%{"issue" => issue, "attempt" => nil, "item_attempt" => if(final_attempt, do: 3, else: 2), "final_attempt" => final_attempt}, strict_variables: true, strict_filters: true)
+        |> IO.iodata_to_binary()
+        |> String.replace(~r/\s+/, " ")
+
+      assert prompt =~ "After verifying an open native prerequisite"
+      assert prompt =~ "end the turn without a blocked label, including on the final attempt"
+      assert prompt =~ "rules below apply only when there is no verified open native prerequisite"
+    end
+
+    for workflow <- [generated, bundled] do
+      [admission_label] = workflow.config["tracker"]["required_labels"]
+      research = String.replace(workflow.prompt_templates["research"], ~r/\s+/, " ")
+      assert research =~ "create it without `#{admission_label}`; add that label only after verified attachment"
+    end
+  end
+
   test "project add takes a branch and prefix and rejects bad input", %{root: root, service: service} do
     capture_io(fn ->
       assert :ok = Commands.run(["project", "add", service, "dartboard", "ahammer/dart_board", "--branch", "master", "--prefix", " Board "], &no_gh/1)

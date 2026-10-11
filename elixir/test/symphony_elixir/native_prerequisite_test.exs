@@ -154,12 +154,30 @@ defmodule SymphonyElixir.NativePrerequisiteTest do
 
     assert {:ok, %{body: ^producer}} = api("GET", @producer)
     assert {:ok, %{body: []}} = api("GET", @edge)
+    parent = self()
+
+    intake =
+      Task.async(fn ->
+        assert {:ok, %{body: []}} = api("GET", @edge)
+        send(parent, :intake_saw_absence)
+
+        receive do
+          :attach -> :ok
+        after
+          5_000 -> flunk("worker did not attach the prerequisite")
+        end
+
+        assert {:ok, %{status: 422}} = api("POST", @edge, %{"issue_id" => producer["id"]})
+        assert {:ok, %{body: [^producer]}} = api("GET", @edge)
+      end)
+
+    assert_receive :intake_saw_absence, 1_000
     assert {:error, :timeout} = api("POST", @edge, %{"issue_id" => producer["id"]})
     # Uncertain mutation recovery reads the exact edge before considering another write.
     assert {:ok, %{body: [^producer]}} = api("GET", @edge)
-    # A racing intake can receive a duplicate; read-back still identifies the same edge.
-    assert {:ok, %{status: 422}} = api("POST", @edge, %{"issue_id" => producer["id"]})
-    assert {:ok, %{body: [^producer]}} = api("GET", @edge)
+    # The intake's earlier absence read races the worker's successful write.
+    send(intake.pid, :attach)
+    assert {:ok, %{body: [^producer]}} = Task.await(intake)
     assert {:ok, [blocked]} = Tracker.fetch_issues_by_ids(["72"])
     refute blocked.dispatchable
     poll(pid)
@@ -187,6 +205,10 @@ defmodule SymphonyElixir.NativePrerequisiteTest do
     # A different repository's completed same-number issue does not satisfy the open native producer.
     unrelated = raw(1258, "unrelated") |> Map.merge(%{"id" => 999, "state" => "closed", "state_reason" => "completed"})
     Agent.update(ReplayClient, &%{&1 | read: ok([producer, unrelated])})
+    assert {:ok, [same_number]} = Tracker.fetch_issues_by_ids(["72"])
+    producer_id = to_string(producer["id"])
+    assert [%{id: ^producer_id, state: "open"}, %{id: "999", state: "closed"}] = same_number.blocked_by
+    refute same_number.dispatchable
     poll(pid)
     assert :sys.get_state(pid).running == %{}
 

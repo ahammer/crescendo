@@ -32,7 +32,8 @@ process you started.
 - Search open issues, open pull requests and recently closed issues first; skip only findings an
   existing issue already covers.
 - Skip style nits and anything that needs a product decision.
-- For a new dependent consumer, create it without ready; add ready only after verified attachment.
+- For a new dependent consumer, create it without `<%= @prefix %>:ready`; add that label only after
+  verified attachment.
 - When filing or grooming a consumer that actually requires an existing producer, distinguish that
   delivery prerequisite from optional work or an arbitrary mention. Within existing task authority,
   resolve the producer's explicit `OWNER/REPO#NUMBER` to its global numeric issue `id`, read all
