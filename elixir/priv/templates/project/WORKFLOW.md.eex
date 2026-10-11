@@ -141,6 +141,30 @@ commands, and any blocker. Create it on your first attempt and edit it afterward
 Keep scratch files inside the workspace under `.scratch/` (never commit it) and delete them before you
 finish. Stop every process you started.
 
+## Required native prerequisites
+
+When delivery actually requires an existing producer issue, register it before ending blocked so
+unchanged evidence cannot admit another consumer attempt. Optional improvements, diagnostics and
+arbitrary issue mentions are not prerequisites. Within this task's authority, read the producer at
+`GET /repos/OWNER/REPO/issues/NUMBER`; verify its repository, issue number and global numeric `id`
+(not `node_id` or the repository issue number). Read every page of the consumer's
+`GET /repos/CONSUMER_OWNER/CONSUMER_REPO/issues/CONSUMER_NUMBER/dependencies/blocked_by`.
+If the exact producer is absent, attach it with `POST` to that same path and JSON
+`{"issue_id": PRODUCER_GLOBAL_ID}`, then read every page back and verify the producer's `id`,
+`repository_url` and `number`. A prose link or a successful POST alone is not confirmation.
+
+If the POST times out, disconnects or reports a duplicate, read back before retrying; an exact edge
+means success. Retry only after a complete valid read proves it absent. Unavailable, malformed or
+incomplete reads leave attachment uncertain: preserve that fact and the next recovery read in the
+workpad and use the existing bounded failure policy, never claim the prerequisite is satisfied.
+Retain preparation, the branch/PR, source SHAs, unique evidence and unmet acceptance on this owner
+before attachment; reconciliation can stop a running worker as soon as it observes the edge.
+Keep ready and native edges intact. Do not add holds, create prerequisite work in another project,
+promote a replacement, renew a budget or weaken acceptance. The existing admission/reconciliation
+owns the wait and resume; independent authorized work may proceed. Fresh accepted completion of
+the exact native producer allows the same owner and remaining attempt budget to resume;
+`not_planned`, unreadable evidence or a completed same-number issue in another repository does not.
+
 ## Blocked attempts
 
 If `defer_quiet_acceptance` is available and a prepared delivery needs the configured quiet window,

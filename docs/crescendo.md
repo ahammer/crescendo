@@ -839,6 +839,58 @@ reads of the current tracker observation even when its timestamp and lifecycle s
 See [the GH-72 investigation](report-verification-timing.md) for the
 production reproduction, supported producer contract and real canonical closure verification.
 
+## Registering real native prerequisites
+
+Attach an existing producer only when its delivery is required to meet the consumer's acceptance.
+An optional improvement, diagnostic or prose reference is not an edge and grants no authority to
+start work in another project. The native GitHub graph already owns cross-repository waiting:
+attachment observed during a run stops its worker through reconciliation, preserves its workspace
+and remaining canonical budget, and releases the slot for independent authorized work. Polling and
+ID refresh before dispatch observe completion; a producer closed `not_planned` remains unsatisfied.
+Unavailable/malformed reads do not establish satisfaction, and another repository's same-number
+issue cannot substitute for the native producer. Keep ready and the original edge; do not add holds,
+clone owners, renew successor budgets or weaken acceptance. Final-attempt retirement still applies.
+
+The generated worker and intake templates include this procedure. They do **not** migrate existing
+local workflows. The operator should review a copy of each project's local `WORKFLOW.md` and intake/
+grooming prompt, insert the `Required native prerequisites` section from the generated template
+before blocked/final-attempt rules, and add the matching intake rule from `prompts/research.md.eex`.
+Review against custom instructions and the canonical handoff contract, render a sample ordinary and
+final attempt, then roll out the reviewed local prompt through the operator's normal config process.
+Workers changing this repository must never edit the running installation or its local config.
+
+Concrete procedure using the [GitHub dependency API](https://docs.github.com/en/rest/issues/issue-dependencies):
+
+1. Before attachment, update the single workpad and commit reusable preparation/evidence. Retain the
+   branch, PR URL, exact source SHA, evidence paths and all unmet gates on the canonical consumer.
+   A subsequent reconciliation may stop the process immediately after attachment.
+2. Read `GET /repos/PRODUCER_OWNER/PRODUCER_REPO/issues/PRODUCER_NUMBER`. Verify `repository_url`,
+   `number` and integer `id`, and record that explicit identity and why it is required privately when
+   appropriate. The payload field `issue_id` takes this **global numeric ID**, not the issue number
+   or `node_id`. Do not copy private producer titles, bodies or evidence into public reports.
+3. Read `GET /repos/CONSUMER_OWNER/CONSUMER_REPO/issues/CONSUMER_NUMBER/dependencies/blocked_by`
+   with `per_page=100`, following every page until complete. An existing edge matching the producer's
+   global `id`, repository and `number` needs no mutation. A same-number foreign issue is not a match.
+4. If absent, use `github_api` with `method: "POST"`, that consumer dependency `path`, and
+   `body: {"issue_id": PRODUCER_GLOBAL_ID}`. Read every page back using `method: "GET"` and verify
+   the exact identity. Record verified attachment and the still-open prerequisite in the workpad;
+   POST success by itself is not verification.
+5. After timeout, disconnect, duplicate response or restart with an uncertain workpad entry, repeat
+   the complete read-back first. If present, treat the original write as successful. If a complete
+   valid read proves absence, retry the same identity once and read back again. If reads are denied,
+   malformed or incomplete, record attachment as uncertain and use ordinary bounded failure recovery.
+   Never remove/re-add ready, add a hold, blindly repeat POSTs or claim completion to bypass the wait.
+6. Leave waiting/resumption to current admission/reconciliation. Fresh accepted completion of the
+   exact producer resumes this owner with its original budget; revalidate retained source/evidence
+   and finish unchanged acceptance. A closed root's successor still requires the separate canonical
+   handoff authorization below; prerequisite attachment does not itself grant a fresh budget.
+
+A scrubbed #72/#1258 replay lives in `elixir/test/symphony_elixir/native_prerequisite_test.exs`.
+It preserves issue numbers but uses synthetic repository names, global IDs and preparation, without
+private producer content. The historical paginated consumer timeline places attachment after two
+blocked markers; it records no hold or ready removal/readdition. The replay exercises early attachment,
+including a lost mutation reply, rather than claiming the scheduler lacked dependency support.
+
 ## Canonical final-attempt handoffs (Crescendo extension)
 
 An issue number is a dispatch identity, not authorization for a new outcome budget. Final-attempt

@@ -1331,6 +1331,14 @@ Adapter output MUST satisfy Section 4.1.1. In addition:
 - The GitHub Issues adapter checks native `blocked_by` relationships for otherwise routable open
   issues at polling and ID refresh. Open blockers and `not_planned` closures make them
   `dispatchable=false`; failed or malformed dependency reads fail closed.
+- GitHub worker/intake instructions MUST register an actually required existing delivery producer
+  as a native dependency before another unchanged blocked attempt. Attachment MUST use explicit
+  repository/issue identity and the global issue ID, with complete paginated read-back; uncertain
+  or duplicate mutations MUST be read back before retrying. Prose mentions are not edges or task
+  authority. Native admission/reconciliation owns waiting and resumption of the same canonical
+  owner, preparation and original budget; no additional continuation owner or manual hold is added.
+  Source/evidence and unmet acceptance MUST be retained before attachment can stop a live worker.
+  Existing retirement/no-clone policy and public read-only/private-project boundaries remain intact.
 - On ID refresh, an item the provider reports as permanently deleted (GitHub `410 Gone`) SHOULD be
   returned in a terminal state rather than omitted, so reconciliation stops its worker and cleans
   its workspace. An item that is merely hidden or moved (`404`) is omitted, which stops the worker

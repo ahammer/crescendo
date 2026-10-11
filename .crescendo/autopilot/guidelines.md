@@ -30,3 +30,16 @@ repositories. These rules apply to every agent working in this repository.
 - Simplicity first: the smallest coherent design with one owner per piece of state. No speculative
   options or duplicated policy.
 - Follow `elixir/AGENTS.md` and `elixir/docs/logging.md`.
+
+## Native delivery prerequisites
+
+- Before ending blocked on an unchanged, actually required existing producer, retain preparation,
+  source/evidence and unmet gates on the canonical owner, then attach/read back its native GitHub
+  dependency within existing task authority. Resolve explicit repository/issue identity to the global
+  numeric `id`; read all blocker pages, POST `{"issue_id": ID}` only if absent, and verify `id`,
+  `repository_url` and `number` afterward. After timeout or duplicate, read back before retrying.
+- Optional work and arbitrary mentions grant no edge or authority to start another project. Leave ready
+  and native ownership intact; use current admission/reconciliation and the original budget, without
+  holds, replacement clones or weaker acceptance. Uncertain reads use bounded recovery; `not_planned`
+  or another repository's same-number completion cannot satisfy the prerequisite. See the operator-only
+  [local prompt rollout](../../docs/crescendo.md#registering-real-native-prerequisites); never edit the running installation.

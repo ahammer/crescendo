@@ -50,6 +50,10 @@ defmodule SymphonyElixir.CommandsTest do
     assert settings.codex.routing["default"] == %{"model" => "gpt-6.1-sol", "effort" => "medium"}
     assert workflow.prompt =~ "`ahammer/BabelFit`"
     assert workflow.prompt_templates["research"] =~ "`crescendo:channel:{{ issue.research.channel }}`"
+    assert workflow.prompt =~ "## Required native prerequisites"
+    assert workflow.prompt =~ "read back before retrying"
+    assert workflow.prompt_templates["research"] =~ "read all"
+    assert workflow.prompt_templates["research"] =~ "PRODUCER_GLOBAL_ID"
     assert workflow.prompt_templates["pull_request"] =~ "`crescendo:hold`"
 
     assert {:error, "#{dir} already exists; nothing was written"} ==
