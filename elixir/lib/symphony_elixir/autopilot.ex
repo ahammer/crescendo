@@ -233,7 +233,7 @@ defmodule SymphonyElixir.Autopilot do
     task = state |> tasks() |> Map.get(channel, %{attempts: 0})
     attempts = Map.get(task, :attempts, 0) + if(outcome in [:short, :failed], do: 1, else: 0)
 
-    preserved = Map.take(task, [:preflight_key, :preflight_at, :preflight_run_at])
+    preserved = if outcome == :delivered, do: Map.take(task, [:preflight_key, :preflight_at, :preflight_run_at]), else: %{}
 
     task =
       cond do
@@ -242,11 +242,19 @@ defmodule SymphonyElixir.Autopilot do
         true -> retry(task, attempts, outcome, now)
       end
 
+    task = Map.drop(task, [:preflight_key, :preflight_at, :preflight_run_at])
     Map.put(state, :tasks, Map.put(tasks(state), channel, Map.merge(preserved, task)))
   end
 
+  @doc "Invalidates skip eligibility before admission so a process restart cannot reuse interrupted work."
+  @spec invalidate_preflight(state(), String.t()) :: state()
+  def invalidate_preflight(state, channel) do
+    task = Map.get(tasks(state), channel, %{}) |> Map.drop([:preflight_key, :preflight_run_at])
+    Map.put(state, :tasks, Map.put(tasks(state), channel, task))
+  end
+
   @doc "Records a cheap input check without claiming a completed model run or coverage."
-  @spec record_preflight(state(), String.t(), String.t(), DateTime.t(), boolean()) :: state()
+  @spec record_preflight(state(), String.t(), String.t() | map(), DateTime.t(), boolean()) :: state()
   def record_preflight(state, channel, key, now, ran?) do
     task = Map.get(tasks(state), channel, %{}) |> Map.merge(%{preflight_key: key, preflight_at: now})
     task = if ran?, do: Map.put(task, :preflight_run_at, now), else: task
@@ -254,10 +262,10 @@ defmodule SymphonyElixir.Autopilot do
   end
 
   @doc "Unchanged successful inputs can skip model work; revisit at least daily."
-  @spec unchanged?(state(), String.t(), String.t(), DateTime.t()) :: boolean()
+  @spec unchanged?(state(), String.t(), String.t() | map(), DateTime.t()) :: boolean()
   def unchanged?(state, channel, key, now) do
     case Map.get(tasks(state), channel) do
-      %{preflight_key: ^key, preflight_run_at: %DateTime{} = at} -> DateTime.diff(now, at, :second) < 86_400
+      %{preflight_key: ^key, preflight_run_at: %DateTime{} = at} -> DateTime.diff(now, at, :second) in 0..86_399
       _ -> false
     end
   end

@@ -12,6 +12,8 @@ implements its [specification](SPEC.md). On top of the Symphony reference implem
 - **Read-only helpers.** Up to five global Luna max helpers work alongside primary agents, using pinned source and bounded text evidence without machine leases.
 - **Throttling.** An enforced daily budget that keeps closing open work (pull request reviews,
   final attempts and continuations still run), and model back-off when the Codex quota runs low.
+- **Planning preflight.** Versioned observation-only handoffs can skip unchanged planning work while
+  retaining pending coverage, publication and delivery protection. [Rollout and canary](elixir/docs/planning_preflight.md).
 - **Model routing.** A ladder that climbs on failed attempts, size labels that start small work on a
   cheaper model, and effort floors.
 - **Autopilot.** Pull requests are reviewed and merged, stuck model work is retried and then delivered in

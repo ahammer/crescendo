@@ -27,6 +27,16 @@ defmodule SymphonyElixirWeb.ServiceSnapshotTest do
     )
   end
 
+  test "bounded planning check counts merge without creating cost or coverage" do
+    first = snapshot(%{operations: operations(%{planning: %{unchanged_skips: 3, admitted: 2, deferred: 1}})})
+    second = snapshot(%{operations: operations(%{planning: %{unchanged_skips: 4, admitted: 1, deferred: 2}})})
+    merged = ServiceSnapshot.merge([{"one", first}, {"two", second}], nil).operations
+
+    assert %{unchanged_skips: 7, admitted: 3, deferred: 3, scope: "retained_events"} = merged.planning
+
+    assert merged.recorded.usd_micro == 10_000_000
+  end
+
   test "terminal accounting counts and corrected usage merge across projects" do
     first = snapshot(%{operations: operations(%{accounting: %{terminal_observed: 2, incomplete: 1}})})
     second = snapshot(%{operations: operations(%{accounting: %{terminal_observed: 1, incomplete: 3}})})

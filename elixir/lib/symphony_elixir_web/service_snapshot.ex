@@ -143,7 +143,7 @@ defmodule SymphonyElixirWeb.ServiceSnapshot do
       accounting: accounting(all),
       external: external(ops),
       helpers: Map.put(section_counts(all, :helpers, [:recorded, :terminal_observed, :incomplete]), :external_coverage, "unknown"),
-      planning: Map.put(section_counts(all, :planning, [:unchanged_skips, :ready_promotions, :startup_failures]), :scope, "retained_events"),
+      planning: Map.put(section_counts(all, :planning, [:unchanged_skips, :admitted, :deferred, :ready_promotions, :startup_failures]), :scope, "retained_events"),
       delivery_metrics:
         Map.put(
           delivery_metrics(all),

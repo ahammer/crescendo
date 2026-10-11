@@ -1303,11 +1303,13 @@ defmodule SymphonyElixir.Operations do
     :exit, _ -> @empty_autopilot
   end
 
-  @spec save_autopilot_state(handle(), map()) :: :ok
+  @spec save_autopilot_state(handle(), map()) :: :ok | {:error, term()}
   def save_autopilot_state(nil, _state), do: :ok
 
   def save_autopilot_state(table, state) do
-    safe_write(fn -> :dets.insert(table, {:autopilot, state}) end)
+    checked_write(table, fn ->
+      with :ok <- :dets.insert(table, {:autopilot, state}), do: :dets.sync(table)
+    end)
   end
 
   @doc "Estimated spend recorded today (UTC), in micro-USD."
@@ -1406,7 +1408,7 @@ defmodule SymphonyElixir.Operations do
         reported_usd_micro: 0,
         observations: []
       },
-      planning: %{unchanged_skips: 0, ready_promotions: 0, startup_failures: 0, scope: "retained_events"},
+      planning: %{unchanged_skips: 0, admitted: 0, deferred: 0, ready_promotions: 0, startup_failures: 0, scope: "retained_events"},
       delivery_metrics: empty_delivery_metrics(),
       today: empty_usage(),
       recorded: empty_usage(),
@@ -1493,6 +1495,8 @@ defmodule SymphonyElixir.Operations do
       external: external_summary(table),
       planning: %{
         unchanged_skips: Enum.count(ordered_events, &(&1.kind == "task_preflight_skipped")),
+        admitted: Enum.count(ordered_events, &(&1.kind == "task_preflight_admitted")),
+        deferred: Enum.count(ordered_events, &(&1.kind == "task_preflight_deferred")),
         ready_promotions: Enum.count(ordered_events, &(&1.kind == "ready_promoted")),
         startup_failures: Enum.count(ordered_events, &(&1.kind == "startup_failed")),
         scope: "retained_events"
