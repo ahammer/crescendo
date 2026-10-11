@@ -863,6 +863,8 @@ After daytime preparation, commit the source and evidence, keep the existing PR 
 unchanged threshold). Operations synchronously saves the canonical issue, logical/final attempt,
 PR, commit, evidence digests and recurring active-window wake condition before success is returned.
 Then update the workpad and end the turn without a blocked label; the worker yields at that boundary.
+Untracked nonignored files make source dirty; ignored generated artifacts remain usable.
+Evidence must be committed regular files, not symlinks.
 
 One deferral is allowed per canonical logical attempt. Unknown/active/unconfigured windows, stale
 workers and missing evidence/persistence reject it. Independent work uses the released slot; no

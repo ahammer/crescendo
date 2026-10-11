@@ -91,6 +91,8 @@ dependencies, quota/throttle, deployment drain and quiet exclusivity intact. A f
 revalidates the source/evidence identity and requires task/environment applicability checks;
 changed, dirty or missing source/evidence is marked inapplicable. Acceptance remains incomplete
 until the gates pass; final attempts still deliver reduced scope or retire under the existing rules.
+Untracked nonignored files make source dirty; ignored generated artifacts remain usable.
+Evidence must be committed regular files, not symlinks.
 The read-only `deferred` state contains retained reason, source/evidence, PR and wake identities,
 and `upcoming.waiting` displays the reason. Private-project details are redacted. This adds no local
 configuration and does not change the existing quiet-label policy for whole runs.

@@ -42,6 +42,28 @@ defmodule SymphonyElixir.QuietContinuationTest do
     refute QuietContinuation.revalidate(prepared, root).evidence_applicable
   end
 
+  test "untracked source invalidates preparation and reuse, while ignored artifacts do not", %{root: root, args: args} do
+    File.write!(Path.join(root, ".git/info/exclude"), "scratch/\n")
+    File.mkdir_p!(Path.join(root, "scratch"))
+    File.write!(Path.join(root, "scratch/capture.txt"), "generated artifact")
+    assert {:ok, prepared} = QuietContinuation.prepare(args, root)
+    assert QuietContinuation.revalidate(prepared, root).evidence_applicable
+
+    File.mkdir_p!(Path.join(root, "lib"))
+    File.write!(Path.join(root, "lib/new_source.ex"), "defmodule UncommittedSource do\nend\n")
+    refute QuietContinuation.revalidate(prepared, root).evidence_applicable
+    assert {:error, :invalid_prepared_evidence} = QuietContinuation.prepare(args, root)
+  end
+
+  test "a committed symlink cannot stand in for uncommitted evidence bytes", %{root: root, args: args} do
+    File.write!(Path.join(root, ".git/mutable-report.md"), "p99 failed")
+    File.ln_s!(".git/mutable-report.md", Path.join(root, "evidence-link.md"))
+    git(root, ["add", "evidence-link.md"])
+    git(root, ["-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-qm", "linked evidence"])
+    args = %{args | "source_sha" => git(root, ["rev-parse", "HEAD"]) |> String.trim(), "evidence" => ["evidence-link.md"]}
+    assert {:error, :invalid_prepared_evidence} = QuietContinuation.prepare(args, root)
+  end
+
   test "invalid, missing, escaping, directory and oversized evidence fail closed", %{root: root, args: args} do
     for invalid <- [
           nil,

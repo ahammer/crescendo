@@ -1587,6 +1587,7 @@ acceptance criterion (including failed product gates). Operations MUST synchrono
 canonical issue/attempt, final-attempt flag, PR, source, committed evidence paths and SHA-256 digests,
 and the wake condition before acknowledging the request. Missing persistence/evidence, stale workers,
 duplicate deferrals and unknown/active windows MUST fail closed.
+Nonignored untracked files MUST make source dirty; evidence MUST be committed regular files, not symlinks.
 
 After acknowledgment the worker yields at its next completed turn; its run ends as `deferred`,
 without acceptance, logical failure, workspace removal or a new-budget issue/PR. The service releases

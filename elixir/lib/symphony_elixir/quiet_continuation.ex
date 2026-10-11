@@ -93,7 +93,7 @@ defmodule SymphonyElixir.QuietContinuation do
   end
 
   defp source(workspace) do
-    with "" <- git(workspace, ["diff", "--name-only", "HEAD", "--"]),
+    with "" <- git(workspace, ["status", "--porcelain", "--untracked-files=normal"]),
          sha when is_binary(sha) <- git(workspace, ["rev-parse", "--verify", "HEAD^{commit}"]) do
       String.trim(sha)
     else
@@ -102,8 +102,10 @@ defmodule SymphonyElixir.QuietContinuation do
   end
 
   defp digest(workspace, sha, path) do
+    # A symlink is a Git blob too; evidence must contain regular-file bytes.
     if Path.type(path) == :relative and not Enum.any?(Path.split(path), &(&1 in ["..", ".git"])) and
-         git(workspace, ["cat-file", "-t", "#{sha}:#{path}"]) == "blob\n" do
+         git(workspace, ["cat-file", "-t", "#{sha}:#{path}"]) == "blob\n" and
+         git(workspace, ["--literal-pathspecs", "ls-tree", "--format=%(objectmode)", sha, "--", path]) in ["100644\n", "100755\n"] do
       case git(workspace, ["show", "#{sha}:#{path}"]) do
         nil -> nil
         content -> :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
