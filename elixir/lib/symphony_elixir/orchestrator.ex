@@ -2447,29 +2447,43 @@ defmodule SymphonyElixir.Orchestrator do
 
           put_autopilot(state, Autopilot.record_preflight(state.autopilot, item.research.channel, key, now(), false))
         else
-          Operations.event(state.operations, "task_preflight_admitted", %{
-            issue_identifier: item.identifier,
-            category: Operations.task_category(item.identifier),
-            summary: planning_invalidation(state.autopilot, item.research.channel, key)
-          })
-
-          state
-          |> put_autopilot(Autopilot.invalidate_preflight(state.autopilot, item.research.channel))
-          |> dispatch_issue(put_in(item.research[:input_key], key))
+          admit_planning_research(state, item, key)
         end
 
       {:error, _reason} ->
-        Operations.event(state.operations, "task_preflight_deferred", %{
-          issue_identifier: item.identifier,
-          category: Operations.task_category(item.identifier),
-          summary: "Planning inputs unknown; no worker started"
-        })
-
-        state
+        defer_planning_research(state, item, "Planning inputs unknown; no worker started")
     end
   end
 
   defp preflight_research(state, item), do: dispatch_issue(state, item)
+
+  defp admit_planning_research(state, item, key) do
+    autopilot = Autopilot.invalidate_preflight(state.autopilot, item.research.channel)
+
+    case Operations.save_autopilot_state(state.operations, autopilot) do
+      :ok ->
+        Operations.event(state.operations, "task_preflight_admitted", %{
+          issue_identifier: item.identifier,
+          category: Operations.task_category(item.identifier),
+          summary: planning_invalidation(state.autopilot, item.research.channel, key)
+        })
+
+        dispatch_issue(%{state | autopilot: autopilot}, put_in(item.research[:input_key], key))
+
+      {:error, _reason} ->
+        defer_planning_research(state, item, "Planning baseline could not be saved; no worker started")
+    end
+  end
+
+  defp defer_planning_research(state, item, summary) do
+    Operations.event(state.operations, "task_preflight_deferred", %{
+      issue_identifier: item.identifier,
+      category: Operations.task_category(item.identifier),
+      summary: summary
+    })
+
+    state
+  end
 
   defp planning_invalidation(autopilot, channel, key) do
     case get_in(autopilot, [:tasks, channel, :preflight_key]) do
@@ -2488,7 +2502,8 @@ defmodule SymphonyElixir.Orchestrator do
     repo = RepoAutopilot.status(project)
     config = Config.settings!()
 
-    with nil <- state.issues_error,
+    with nil <- state.operations_error,
+         nil <- state.issues_error,
          nil <- state.pulls_error,
          true <- fresh_planning_input?(state.issues_observed_at),
          true <- fresh_planning_input?(state.pulls_observed_at),

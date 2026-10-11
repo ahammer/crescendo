@@ -1303,11 +1303,13 @@ defmodule SymphonyElixir.Operations do
     :exit, _ -> @empty_autopilot
   end
 
-  @spec save_autopilot_state(handle(), map()) :: :ok
+  @spec save_autopilot_state(handle(), map()) :: :ok | {:error, term()}
   def save_autopilot_state(nil, _state), do: :ok
 
   def save_autopilot_state(table, state) do
-    safe_write(fn -> :dets.insert(table, {:autopilot, state}) end)
+    checked_write(table, fn ->
+      with :ok <- :dets.insert(table, {:autopilot, state}), do: :dets.sync(table)
+    end)
   end
 
   @doc "Estimated spend recorded today (UTC), in micro-USD."

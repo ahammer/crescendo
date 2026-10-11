@@ -15,6 +15,7 @@ the full task is revisited after 24 hours.
 `METALRAIN_SYMPHONY_EVIDENCE_ROOT` is read only. When configured, missing, malformed or oversized
 root inputs, missing referenced reports and unknown schemas defer worker startup. Each JSON read
 is bounded to 4 MiB. With no evidence root configured, the other native inputs still apply.
+An unavailable configured planning ledger or a failed baseline write/sync also defers admission.
 
 Existing `autopilot/maintenance/latest.json`, `cost-state.json`, referenced findings, adjacent
 `ci-cost.json` and grooming dispositions retain their substantive handoff schema. Producers may

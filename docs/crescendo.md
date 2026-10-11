@@ -79,7 +79,8 @@ Unknown inputs defer. Unchanged inputs advance a separate cursor, preserve compl
 coverage and force a recheck within 24 hours.
 Only verified deliveries establish skip eligibility. Versioned observation-only handoffs preserve
 substantive findings, publication, pending acceptance and protected capacity; legacy cohorts
-remain strict. Retained admission/defer/skip events expose bounded component reasons. See the
+remain strict. Ledger failures defer worker startup; baseline invalidation must be synced first.
+Retained admission/defer/skip events expose bounded component reasons. See the
 [producer rollout and bounded normal-traffic canary](../elixir/docs/planning_preflight.md). Execution drain does not
 clear pending coverage or authorize checks outside the quiet-performance policy.
 

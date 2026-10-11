@@ -2667,7 +2667,8 @@ Extension config (`autopilot` object):
     Admission MUST invalidate the old baseline durably before worker creation. The persisted
     contract version MUST invalidate baselines when preflight semantics change.
     One orchestrator owns component identity: source, complete tracker/PR inventory, evidence,
-    delivery protection/capacity and configuration. Unknown/unreadable inputs MUST defer safely.
+    delivery protection/capacity and configuration. Unknown/unreadable inputs and failures to
+    persist or sync baseline invalidation MUST defer safely before worker creation.
     Evidence producers MAY opt in as a complete cohort using `preflight_schema: 1` and the bounded
     `preflight_observation` bookkeeping contract in `elixir/docs/planning_preflight.md`. Legacy
     cohorts MUST retain strict identity. Resolved report pointers MAY compare substantive content

@@ -561,6 +561,35 @@ defmodule SymphonyElixir.AutopilotTest do
   end
 
   describe "persistence" do
+    test "baseline invalidation reaches disk before a worker and exposes write failures" do
+      root = Path.dirname(Workflow.workflow_file_path())
+      path = Path.join(root, "preflight.dets")
+      copy = Path.join(root, "persisted-preflight.dets")
+      table = :preflight_sync_test
+      snapshot = :preflight_snapshot_test
+
+      on_exit(fn ->
+        Operations.close(table)
+        Operations.close(snapshot)
+      end)
+
+      {:ok, ^table} = :dets.open_file(table, file: String.to_charlist(path), ram_file: true)
+      key = %{contract: 1, evidence: "verified"}
+      baseline = Autopilot.record_preflight(@empty, "maintenance", key, DateTime.utc_now(), true)
+      :ok = :dets.insert(table, {:autopilot, baseline})
+      :ok = :dets.sync(table)
+      invalidated = Autopilot.invalidate_preflight(baseline, "maintenance")
+      assert :ok = Operations.save_autopilot_state(table, invalidated)
+      File.cp!(path, copy)
+      {:ok, ^snapshot} = Operations.open(copy, snapshot)
+      assert Operations.autopilot_state(snapshot) == invalidated
+      :ok = Operations.close(table)
+      assert {:error, _reason} = Operations.save_autopilot_state(table, baseline)
+      {:ok, ^table} = :dets.open_file(table, file: String.to_charlist(path), access: :read)
+      assert {:error, _reason} = Operations.save_autopilot_state(table, baseline)
+      assert Operations.autopilot_state(table) == invalidated
+    end
+
     test "autopilot state survives reopening the operations table" do
       path = Path.join(System.tmp_dir!(), "autopilot-ops-#{System.unique_integer([:positive])}.dets")
       table = :"autopilot_ops_#{System.unique_integer([:positive])}"
@@ -752,9 +781,49 @@ defmodule SymphonyElixir.AutopilotTest do
         assert usage.by_task == []
         assert Enum.all?(usage.activity, &(not Map.has_key?(&1, :source_sha)))
 
+        planning_due(pid, channel, baseline)
+        :sys.replace_state(pid, &%{&1 | operations_error: "ledger unavailable"})
+        send(pid, :run_poll_cycle)
+        assert :sys.get_state(pid).running == %{}
+        assert :sys.get_state(pid).autopilot.tasks[channel].preflight_run_at == baseline.tasks[channel].preflight_run_at
+        assert Operations.snapshot(table).planning.deferred == 1
+        :sys.replace_state(pid, &%{&1 | operations_error: nil})
+
+        # A failed durable invalidation must leave both the worker and verified baseline untouched.
+        changed = put_in(fixture["latest"]["publication_status"], "pending")
+        write_planning_cycle(root, changed, "write-failed")
+        planning_due(pid, channel, baseline)
+
+        :sys.replace_state(pid, fn state ->
+          :ok = Operations.close(table)
+          {:ok, ^table} = :dets.open_file(table, file: String.to_charlist(path), access: :read)
+          state
+        end)
+
+        File.rm(marker)
+        send(pid, :run_poll_cycle)
+        state = :sys.get_state(pid)
+        assert state.running == %{}
+        refute File.exists?(marker)
+        assert state.autopilot.tasks[channel].preflight_key == baseline.tasks[channel].preflight_key
+        assert Operations.autopilot_state(table).tasks[channel].preflight_key == baseline.tasks[channel].preflight_key
+
+        :sys.replace_state(pid, fn state ->
+          :ok = Operations.close(table)
+          {:ok, ^table} = Operations.open(path, table)
+          state
+        end)
+
+        send(pid, :run_poll_cycle)
+        assert :sys.get_state(pid).running[id]
+        refute Operations.autopilot_state(table).tasks[channel][:preflight_run_at]
+        finish_running_research(pid, id)
+        :sys.get_state(pid)
+
         mutations = [
           put_in(fixture["findings"]["findings"], [%{"id" => "new-finding"}]),
           put_in(fixture["latest"]["publication_status"], "pending"),
+          put_in(fixture["costs"]["pending_broad_coverage"], false),
           put_in(fixture["findings"]["findings"], [%{"id" => "retained-finding", "dependencies" => [15]}]),
           put_in(fixture["costs"]["acceptance_comparison_status"], "accepted"),
           put_in(fixture["disposition"]["capacity_blocked"], false),
@@ -785,6 +854,14 @@ defmodule SymphonyElixir.AutopilotTest do
         send(pid, :run_poll_cycle)
         key = :sys.get_state(pid).running[id].issue.research.input_key
         refute key.evidence == baseline.tasks[channel].preflight_key.evidence
+        finish_running_research(pid, id)
+        pending_baseline = :sys.get_state(pid).autopilot
+        swapped = Map.merge(latest, %{"report_key" => latest["pending_report_key"], "pending_report_key" => latest["report_key"]})
+        File.write!(latest_path, Jason.encode!(swapped))
+        planning_due(pid, channel, pending_baseline)
+        send(pid, :run_poll_cycle)
+        swapped_key = :sys.get_state(pid).running[id].issue.research.input_key
+        refute swapped_key.evidence == key.evidence
         finish_running_research(pid, id)
         :sys.get_state(pid)
         write_planning_cycle(root, fixture, "0402")
