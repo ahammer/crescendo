@@ -171,7 +171,8 @@ timestamp cannot inherit old proof even when the reopen is missed between polls.
 Receipt polling adds no usage; auxiliary review accounting keeps separate run-ID deduplication.
 Verified cost, latency and helper coverage stay unknown. Ordinary files are bounded to 128 KiB;
 committed review logs to 16 MiB. Raw receipts, paths and review content stay private; only bounded
-rejection codes are projected. See [the GH-72 investigation](../docs/report-verification-timing.md)
+rejection codes are projected and refresh on repeated reads of the current tracker observation
+even when its timestamp and lifecycle stay unchanged. See [the GH-72 investigation](../docs/report-verification-timing.md)
 and [retained delivery evidence](../docs/crescendo.md#retained-issue-delivery-evidence).
 
 `developer_instructions` appends explicitly reviewed service-owned rules to existing configured

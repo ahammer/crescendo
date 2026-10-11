@@ -620,6 +620,49 @@ defmodule SymphonyElixir.ReportDeliveryTest do
     end
   end
 
+  test "repeated reads refresh report rejection without a tracker change", %{root: root, table: table, path: path} do
+    start_worker(table, 42, "worker")
+    {issue, timeline, attempt} = receipt(root, 42, "worker")
+    file = Path.join(attempt, "review-completion.json")
+    original = File.read!(file)
+    File.rm!(file)
+    {:ok, missing} = observation(root, issue, timeline)
+    Operations.observe_delivery(table, missing, "crescendo")
+    [association] = Operations.snapshot(table).delivery_metrics.issue_associations
+    assert association.report_rejection == "missing-completion"
+
+    File.write!(file, "{}")
+    {:ok, invalid} = observation(root, issue, timeline)
+    Operations.observe_delivery(table, invalid, "crescendo")
+    [association] = Operations.snapshot(table).delivery_metrics.issue_associations
+    assert association.disposition == "unknown_acceptance"
+    assert association.report_rejection == "completion-integrity"
+
+    File.write!(file, original)
+    {:ok, complete} = observation(root, issue, timeline)
+    assert complete.issue.updated_at == missing.issue.updated_at
+    assert complete.lifecycle_id == missing.lifecycle_id
+    Operations.observe_delivery(table, complete, "crescendo")
+    [association] = Operations.snapshot(table).delivery_metrics.issue_associations
+    assert association.disposition == "repository_reported_verification"
+    assert association.report_rejection == nil
+
+    older_timestamp = %{missing | issue: %{missing.issue | updated_at: DateTime.add(missing.issue.updated_at, -1)}}
+    older_lifecycle = %{missing | lifecycle_id: missing.lifecycle_id - 1}
+
+    for older <- [older_timestamp, older_lifecycle] do
+      Operations.observe_delivery(table, older, "crescendo")
+      [association] = Operations.snapshot(table).delivery_metrics.issue_associations
+      assert association.report_rejection == nil
+      assert association.disposition == "repository_reported_verification"
+    end
+
+    Operations.close(table)
+    {:ok, ^table} = Operations.open(path, table)
+    [association] = Operations.snapshot(table).delivery_metrics.issue_associations
+    assert association.report_rejection == nil
+  end
+
   test "missing or corrupt completion and original artifact commitments supply no proof", %{root: root} do
     {issue, timeline, attempt} = receipt(root, 42, "worker")
 

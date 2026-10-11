@@ -603,6 +603,7 @@ defmodule SymphonyElixir.Operations do
         :ok = :dets.insert(table, {key, Map.put(previous, :scope_digest, :ambiguous)})
       end
 
+      refresh_report_rejection(table, key, observation, updated_at)
       Enum.each(observation.sources, &retain_delivery_source(table, issue.id, &1))
       Enum.each(Map.get(observation, :report_verifications, []), &retain_report_verification(table, issue, &1))
       :ok = :dets.sync(table)
@@ -624,6 +625,16 @@ defmodule SymphonyElixir.Operations do
             (is_binary(previous[:scope_digest]) and previous[:scope_digest] != scope_digest)),
        do: :ambiguous,
        else: scope_digest
+  end
+
+  defp refresh_report_rejection(table, key, observation, updated_at) do
+    current = lookup(table, key, %{})
+
+    # Receipt availability can change without a tracker edit.
+    if updated_at == current[:updated_at] and observation[:lifecycle_id] == current[:lifecycle_id] and
+         observation[:report_rejection] != current[:report_rejection] do
+      :ok = :dets.insert(table, {key, Map.put(current, :report_rejection, observation[:report_rejection])})
+    end
   end
 
   defp delivery_runs(table, issue_id) do

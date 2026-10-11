@@ -834,7 +834,9 @@ Dispatch/terminal handoffs, canonical ownership, original attempt budgets and un
 intact; a child report cannot accept its broader parent. Receipt polling adds no usage; auxiliary
 review accounting retains its separate run-ID deduplication. This is repository-reported verification,
 not independent acceptance. Verified cost, latency, delivery count and helper coverage stay unknown
-until their own proof exists. Only bounded rejection codes are projected. See [the GH-72 investigation](report-verification-timing.md) for the
+until their own proof exists. Only bounded rejection codes are projected; they refresh on repeated
+reads of the current tracker observation even when its timestamp and lifecycle stay unchanged.
+See [the GH-72 investigation](report-verification-timing.md) for the
 production reproduction, supported producer contract and real canonical closure verification.
 
 ## Canonical final-attempt handoffs (Crescendo extension)
