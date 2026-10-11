@@ -727,6 +727,7 @@ defmodule SymphonyElixir.AutopilotTest do
         :persistent_term.put({RepoAutopilot, :revision, nil}, {:ok, "source"})
         Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
         {pid, _name} = start_orchestrator!()
+        wait_for_startup_poll(pid)
 
         :sys.replace_state(pid, fn state ->
           due = System.monotonic_time(:millisecond) + 600_000
@@ -755,7 +756,7 @@ defmodule SymphonyElixir.AutopilotTest do
         name = Module.concat(__MODULE__, "Restart#{channel}")
         opts = [name: name, task_supervisor: supervisor, operations_path: path, operations_table: table]
         pid = start_supervised!({Orchestrator, opts})
-        assert :sys.get_state(pid).autopilot == baseline
+        assert wait_for_startup_poll(pid).autopilot == baseline
 
         :sys.replace_state(pid, fn state ->
           due = System.monotonic_time(:millisecond) + 600_000
@@ -786,7 +787,7 @@ defmodule SymphonyElixir.AutopilotTest do
         send(pid, :run_poll_cycle)
         assert :sys.get_state(pid).running == %{}
         assert :sys.get_state(pid).autopilot.tasks[channel].preflight_run_at == baseline.tasks[channel].preflight_run_at
-        assert Operations.snapshot(table).planning.deferred == 1
+        assert Operations.snapshot(table).planning.deferred == usage.planning.deferred + 1
         :sys.replace_state(pid, &%{&1 | operations_error: nil})
 
         # A failed durable invalidation must leave both the worker and verified baseline untouched.
@@ -1567,6 +1568,20 @@ defmodule SymphonyElixir.AutopilotTest do
     %{"focus" => focus, "min_issues" => 0, "every" => "30m", "skip_unchanged" => true, "exclusive" => "none"}
   end
 
+  defp wait_for_startup_poll(pid, attempts \\ 100)
+  defp wait_for_startup_poll(_pid, 0), do: flunk("startup poll did not finish")
+
+  defp wait_for_startup_poll(pid, attempts) do
+    state = :sys.get_state(pid)
+
+    if state.issues_observed_at && not state.poll_check_in_progress do
+      state
+    else
+      Process.sleep(10)
+      wait_for_startup_poll(pid, attempts - 1)
+    end
+  end
+
   defp planning_due(pid, channel, baseline) do
     :sys.replace_state(pid, fn state ->
       task = baseline.tasks[channel]
@@ -1663,7 +1678,7 @@ defmodule SymphonyElixir.AutopilotTest do
     name = Module.concat(__MODULE__, "Orchestrator#{suffix}")
     start_supervised!({Task.Supervisor, name: supervisor})
     pid = start_supervised!({Orchestrator, Keyword.merge(opts, name: name, task_supervisor: supervisor)})
-    # Let the startup tick settle so the test drives poll cycles itself.
+    # Synchronize with initialization; the scheduled startup poll may still be pending.
     :sys.get_state(pid)
     {pid, name}
   end
