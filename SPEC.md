@@ -1339,8 +1339,9 @@ Adapter output MUST satisfy Section 4.1.1. In addition:
   owner, preparation and original budget; no additional continuation owner or manual hold is added.
   Source/evidence and unmet acceptance MUST be retained before attachment can stop a live worker.
   Once an open native prerequisite is verified, worker instructions MUST end the turn without a
-  blocked marker, including on a final attempt, and keep the consumer open. Ordinary failure and
-  final-attempt disposition rules apply only when there is no verified open native prerequisite.
+  blocked marker or review handoff label, including on a final attempt, and keep the consumer open.
+  Ordinary failure and final-attempt disposition rules apply only when there is no verified open
+  native prerequisite.
   Intake MUST withhold the configured admission label from newly filed dependent consumers until
   attachment is verified; an already authorized consumer keeps its existing admission label.
   Existing retirement/no-clone policy and public read-only/private-project boundaries remain intact.

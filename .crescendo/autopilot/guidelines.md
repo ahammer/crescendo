@@ -33,14 +33,18 @@ repositories. These rules apply to every agent working in this repository.
 
 ## Native delivery prerequisites
 
+- Intake, grooming and repository tasks must file a new dependent consumer without `crescendo:ready`;
+  add it only after native attachment has been read back and verified. Already authorized consumers
+  keep `crescendo:ready`.
 - Before ending the turn on an unchanged, actually required existing producer, retain preparation,
   source/evidence and unmet gates on the canonical owner, then attach/read back its native GitHub
   dependency within existing task authority. Resolve explicit repository/issue identity to the global
   numeric `id`; read all blocker pages, POST `{"issue_id": ID}` only if absent, and verify `id`,
   `repository_url` and `number` afterward. After timeout or duplicate, read back before retrying.
 - With a verified open native producer, keep the consumer open and its PR draft, then end the turn
-  without a blocked label, including on the final attempt. Ordinary blocked/final-attempt disposition
-  rules apply only when there is no verified open native prerequisite.
+  without a blocked label, including on the final attempt. Do not add `crescendo:in-review` or hand
+  off the draft while waiting. Ordinary blocked/final-attempt disposition rules apply only when there
+  is no verified open native prerequisite.
 - Optional work and arbitrary mentions grant no edge or authority to start another project. Leave ready
   and native ownership intact; use current admission/reconciliation and the original budget, without
   holds, replacement clones or weaker acceptance. Uncertain reads use bounded recovery; `not_planned`

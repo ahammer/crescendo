@@ -167,9 +167,11 @@ the exact native producer allows the same owner and remaining attempt budget to 
 
 After verifying an open native prerequisite, update the workpad and end the turn without a blocked
 label, including on the final attempt. Keep the consumer open and its PR draft; do not split or close
-it solely because that producer is pending. The blocked/final-attempt rules below apply only when
-there is no verified open native prerequisite. Resumption uses the same logical attempt and
-remaining budget; the consumer still has to meet every acceptance gate.
+it solely because that producer is pending.
+Do not add `<%= @prefix %>:in-review` or hand the draft to a reviewer while waiting.
+The blocked/final-attempt rules below apply only when there is no verified open native prerequisite.
+Resumption uses the same logical attempt and remaining budget; the consumer still has to meet every
+acceptance gate.
 
 ## Blocked attempts
 

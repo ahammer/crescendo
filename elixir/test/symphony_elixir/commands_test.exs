@@ -80,6 +80,8 @@ defmodule SymphonyElixir.CommandsTest do
       assert prompt =~ "After verifying an open native prerequisite"
       assert prompt =~ "end the turn without a blocked label, including on the final attempt"
       assert prompt =~ "rules below apply only when there is no verified open native prerequisite"
+      review_label = Enum.find(workflow.config["tracker"]["excluded_labels"], &String.ends_with?(&1, ":in-review"))
+      assert prompt =~ "Do not add `#{review_label}` or hand the draft to a reviewer while waiting"
     end
 
     for workflow <- [generated, bundled] do

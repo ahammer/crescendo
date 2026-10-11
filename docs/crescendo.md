@@ -851,9 +851,11 @@ Unavailable/malformed reads do not establish satisfaction, and another repositor
 issue cannot substitute for the native producer. Keep ready and the original edge; do not add holds,
 clone owners, renew successor budgets or weaken acceptance. Final-attempt retirement still applies.
 
-The generated worker and intake templates include this procedure. They do **not** migrate existing
-local workflows. New dependent consumers are filed without the configured admission label until
-attachment is verified: `symphony` in the bundled workflow, `<prefix>:ready` in generated projects.
+The generated worker and intake templates and this repository's task guidelines include this procedure.
+Task prompts replace the shared research prompt, so custom task intake must carry the same admission gate.
+These changes do **not** migrate existing local workflows. New dependent consumers are filed without
+the configured admission label until attachment is verified: `symphony` in the bundled workflow,
+`<prefix>:ready` in generated projects.
 Already authorized consumers keep that label. The operator should review a copy of each project's
 local `WORKFLOW.md` and intake/grooming prompt. Insert the `Required native prerequisites` section
 from the generated template before blocked/final-attempt rules, and add the matching intake rule
@@ -879,6 +881,7 @@ Concrete procedure using the [GitHub dependency API](https://docs.github.com/en/
    the exact identity. Record verified attachment and the still-open prerequisite in the workpad;
    POST success by itself is not verification. With a verified open producer, keep the consumer open
    and its PR draft, then end the turn without a blocked label, including on the final attempt.
+   Do not add the configured `in-review` label or hand the draft to a reviewer while waiting.
    Ordinary blocked/final-attempt disposition rules apply only when that native wait is not verified.
 5. After timeout, disconnect, duplicate response or restart with an uncertain workpad entry, repeat
    the complete read-back first. If present, treat the original write as successful. If a complete
