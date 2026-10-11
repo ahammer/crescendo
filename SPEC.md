@@ -1430,6 +1430,7 @@ and PR observations. Ownership requires an explicit closing directive or an exac
 during a unique retained worker attempt. Titles and incidental references provide no ownership proof.
 Closing directives may start a line, an unordered Markdown bullet, or a plain prose sentence after `.`, `!` or `?`.
 Sentence prefixes containing straight or Unicode quotation marks, backticks or `>` are not ownership declarations.
+Matched backtick code spans, including multiline spans, do not establish source ownership.
 Backtick and tilde fenced code blocks, including those in Markdown lists or left unclosed,
 do not establish source ownership.
 These body formats retain the same repository, issue-number, branch and worker-attempt checks.
