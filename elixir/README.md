@@ -957,3 +957,6 @@ review/planner reports have claimed identities and unknown account debits; they 
 native run usage or budget enforcement. `pacing` projects consumption toward a soft 90% reset
 window target with 10% interactive allowance. It reports uncertainty for stale/missing epochs
 and preserves the daily budget and weekly quota pause.
+
+The state API also serves `GET /api/v1/state?view=control` (optionally `&project=<id>`)
+for bounded live reconciliation. It excludes historical usage; see the [API contract](../docs/crescendo.md#dashboard-and-api).

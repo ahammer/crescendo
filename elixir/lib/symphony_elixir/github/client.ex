@@ -1120,7 +1120,7 @@ defmodule SymphonyElixir.GitHub.Client do
     if Enum.any?(blockers, &is_nil/1), do: {:error, :github_unknown_payload}, else: {:ok, blockers}
   end
 
-  defp satisfied_blocker?(%{state: "closed", state_reason: reason}), do: reason != "not_planned"
+  defp satisfied_blocker?(%{state: "closed", state_reason: "completed"}), do: true
   defp satisfied_blocker?(_), do: false
 
   defp native_ref(issue, repo) do

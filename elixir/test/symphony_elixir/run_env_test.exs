@@ -26,6 +26,7 @@ defmodule SymphonyElixir.RunEnvTest do
     on_exit(fn -> if Process.alive?(pid), do: Supervisor.stop(pid) end)
 
     url = "http://127.0.0.1:#{SymphonyElixir.HttpServer.bound_port()}/api/v1/state"
+    assert {"CRESCENDO_CONTROL_STATE_URL", url <> "?view=control"} in RunEnv.vars("GH-1")
     assert {"CRESCENDO_STATE_URL", url} in RunEnv.vars("GH-1")
     assert {"SYMPHONY_STATE_URL", url} in RunEnv.vars("GH-1")
   end

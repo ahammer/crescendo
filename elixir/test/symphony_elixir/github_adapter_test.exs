@@ -512,6 +512,21 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
              GitHubClient.fetch_issues_by_ids_for_test(["42"], tracker_settings(), failed_requests)
   end
 
+  test "only accepted completion satisfies a closed native prerequisite" do
+    for reason <- [nil, "not_planned", "duplicate", "completed"] do
+      requests = fn "GET", path, _params, nil, _settings ->
+        if String.ends_with?(path, "/blocked_by") do
+          {:ok, %{status: 200, body: [%{"id" => 7, "number" => 7, "state" => "closed", "state_reason" => reason}]}}
+        else
+          {:ok, %{status: 200, body: Map.put(raw_issue(42), "labels", [%{"name" => "symphony:ready"}])}}
+        end
+      end
+
+      assert {:ok, [issue]} = GitHubClient.fetch_issues_by_ids_for_test(["42"], tracker_settings(), requests)
+      assert issue.dispatchable == (reason == "completed")
+    end
+  end
+
   test "dependency reads page through the final blocker" do
     issue = Map.put(raw_issue(42), "labels", [%{"name" => "symphony:ready"}])
 

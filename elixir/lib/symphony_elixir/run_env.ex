@@ -25,6 +25,7 @@ defmodule SymphonyElixir.RunEnv do
       pair("CRESCENDO_WORK_ITEM", qualified(project, work_item)),
       pair("CRESCENDO_PROJECT", project),
       pair("CRESCENDO_LABEL_PREFIX", label_prefix()),
+      pair("CRESCENDO_CONTROL_STATE_URL", state_url && state_url <> "?view=control"),
       pair("CRESCENDO_STATE_URL", state_url),
       pair("SYMPHONY_STATE_URL", state_url)
     ]

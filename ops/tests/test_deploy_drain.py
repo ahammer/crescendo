@@ -1,5 +1,7 @@
 """Isolated lifecycle checks: no service, units, network or deployment script."""
 import importlib.util
+from datetime import datetime, timezone
+import os
 import sys
 import tempfile
 import unittest
@@ -14,14 +16,39 @@ spec.loader.exec_module(policy)
 
 
 def state(running=1, ready=4, paused=None, budget=None):
-    return dict(snapshot_status="complete", project=None,
-                projects=[dict(started=True, failure=None, snapshot_status="ok", tracker_ready=True,
+    stamp = datetime.now(timezone.utc).isoformat()
+    return dict(view="control", schema_version=1, generated_at=stamp, observed_at=stamp,
+                snapshot_errors=[], snapshot_status="complete", project=None,
+                projects=[dict(observed_at=stamp, started=True, failure=None, snapshot_status="ok", tracker_ready=True,
                                running=running, ready=ready)],
                 running=[{}] * running, counts=dict(running=running),
                 throttle=dict(busy=running, service_slots=3, paused=paused, over_budget=budget))
 
 
 class DrainTest(unittest.TestCase):
+    def test_control_read_requires_freshness_and_explicit_legacy_bootstrap(self):
+        with patch.dict(os.environ, {"CRESCENDO_LEGACY_STATE_TIMEOUT_SECONDS": "0"}):
+            self.assertEqual(policy.request_timeout(), 2.5)
+            good = state(0)
+            self.assertEqual(policy.control_observation(good), good)
+            with self.assertRaisesRegex(ValueError, "stale"):
+                policy.control_observation(dict(good, observed_at="2020-01-01T00:00:00Z"))
+            with self.assertRaisesRegex(ValueError, "missing"):
+                policy.control_observation(dict(good, observed_at=None))
+            for projects in (None, {}, [None]):
+                with self.assertRaisesRegex(ValueError, "invalid project"):
+                    policy.control_observation(dict(good, projects=projects))
+            legacy = dict(good)
+            del legacy["view"]
+            with self.assertRaisesRegex(ValueError, "explicit"):
+                policy.control_observation(legacy)
+            with patch.dict(os.environ, {"CRESCENDO_LEGACY_STATE_TIMEOUT_SECONDS": "20"}):
+                self.assertEqual(policy.request_timeout(), 20)
+                self.assertEqual(policy.control_observation(legacy), legacy)
+            with patch.dict(os.environ, {"CRESCENDO_LEGACY_STATE_TIMEOUT_SECONDS": "21"}):
+                with self.assertRaises(ValueError):
+                    policy.request_timeout()
+
     def test_health_requires_each_project_tracker_but_drain_keeps_capacity_accounting(self):
         snapshot = state(0, 0, "quota", "budget")
         snapshot["throttle"].update(busy=2, helpers=dict(busy=1, slots=5))

@@ -67,6 +67,103 @@ defmodule SymphonyElixir.ServiceWebTest do
     {:ok, service: service, quiet_issue: issue}
   end
 
+  test "control observation is live, scoped and independent of retained analytics" do
+    alpha = GenServer.whereis(Project.via("alpha", :orchestrator))
+    :erlang.trace_pattern({Operations, :snapshot, 2}, true, [])
+    :erlang.trace(alpha, true, [:call])
+
+    try do
+      state = json_response(get(build_conn(), "/api/v1/state?view=control"), 200)
+      assert state["view"] == "control"
+      assert state["schema_version"] == 1
+      assert state["snapshot_status"] == "complete"
+      assert state["observed_at"]
+      assert state["counts"]["waiting"] == 2
+      refute Map.has_key?(state, "usage")
+      refute_receive {:trace, ^alpha, :call, {Operations, :snapshot, _}}, 20
+
+      filtered = json_response(get(build_conn(), "/api/v1/state?view=control&project=alpha"), 200)
+      assert filtered["project"] == "alpha"
+      assert filtered["counts"]["waiting"] == 1
+      assert [%{"project" => "alpha"}] = filtered["upcoming"]["waiting"]
+      assert [%{"snapshot_status" => "ok"}, %{"snapshot_status" => "not_selected"}] = filtered["projects"]
+
+      missing = json_response(get(build_conn(), "/api/v1/state?view=control&project=missing"), 200)
+      assert missing["snapshot_status"] == "partial"
+      assert missing["counts"]["running"] == nil
+    after
+      :erlang.trace(alpha, false, [:call])
+      :erlang.trace_pattern({Operations, :snapshot, 2}, false, [])
+    end
+  end
+
+  test "control view retains run identity and helper capacity while respecting privacy" do
+    for id <- ["alpha", "beta"] do
+      pid = GenServer.whereis(Project.via(id, :orchestrator))
+
+      :sys.replace_state(pid, fn state ->
+        issue = hd(state.polled_issues)
+
+        entry = %{
+          identifier: issue.identifier,
+          issue: issue,
+          run_id: "#{id}-run",
+          session_id: nil,
+          codex_app_server_pid: nil,
+          codex_input_tokens: 0,
+          codex_output_tokens: 0,
+          codex_total_tokens: 0,
+          started_at: DateTime.utc_now(),
+          last_codex_timestamp: nil,
+          last_codex_message: nil,
+          last_codex_event: nil
+        }
+
+        %{state | running: %{issue.id => entry}, helpers: %{"helper" => %{run_id: "#{id}-helper", parent_run_id: "#{id}-run", parent_issue_id: issue.id, status: "running"}}}
+      end)
+    end
+
+    state = json_response(get(build_conn(), "/api/v1/state?view=control"), 200)
+    assert state["counts"]["running"] == 2
+    assert state["counts"]["helpers"] == 2
+    alpha = Enum.find(state["running"], &(&1["project"] == "alpha"))
+    beta = Enum.find(state["running"], &(&1["project"] == "beta"))
+    assert alpha["run_id"] == "alpha-run"
+    assert alpha["issue_identifier"] == "MT-7"
+    assert beta["redacted"]
+    refute Map.has_key?(beta, "run_id")
+    refute Map.has_key?(beta, "title")
+    assert Enum.find(state["helpers"], &(&1["project"] == "alpha"))["parent_run_id"] == "alpha-run"
+    refute Map.has_key?(Enum.find(state["helpers"], &(&1["project"] == "beta")), "parent_run_id")
+  end
+
+  test "a missing governor makes otherwise responsive project control state partial" do
+    stop_supervised!(Governor)
+    state = json_response(get(build_conn(), "/api/v1/state?view=control&project=alpha"), 200)
+    assert state["snapshot_status"] == "partial"
+    assert state["counts"]["running"] == nil
+    assert [%{"project" => "governor", "status" => "unavailable"}] = state["snapshot_errors"]
+    assert hd(state["projects"])["snapshot_status"] == "ok"
+  end
+
+  test "control deadline covers all actors and never turns a partial read into idle" do
+    actors = [Governor, Project.via("alpha", :orchestrator), Project.via("beta", :orchestrator)]
+    Enum.each(actors, &:sys.suspend/1)
+
+    try do
+      started = System.monotonic_time(:millisecond)
+      state = json_response(get(build_conn(), "/api/v1/state?view=control"), 200)
+      assert System.monotonic_time(:millisecond) - started < 300
+      assert state["snapshot_status"] == "partial"
+      assert length(state["snapshot_errors"]) == 3
+      assert state["counts"]["running"] == nil
+      assert state["observed_at"] == nil
+      assert state["upcoming"]["available_slots"] == nil
+    after
+      Enum.each(actors, &:sys.resume/1)
+    end
+  end
+
   @tag quiet_startup: true
   test "quiet work survives a cold service start and project restart", %{service: service} do
     assert Governor.snapshot().quiet_window.phase == "idle"

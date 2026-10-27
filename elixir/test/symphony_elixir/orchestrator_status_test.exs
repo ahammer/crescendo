@@ -21,6 +21,16 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, :stop)
   end
 
+  test "single-workflow control view reports local capacity and live observation time" do
+    pid = start_supervised!({Orchestrator, name: :single_control_orchestrator})
+    state = SymphonyElixirWeb.ControlState.payload(orchestrator: pid, timeout: 1_000)
+    assert state.snapshot_status == "complete"
+    assert state.observed_at
+    assert state.upcoming.available_slots >= 0
+    assert state.throttle == nil
+    assert state.projects == []
+  end
+
   test "orchestrator snapshot reflects last codex update and session id" do
     issue_id = "issue-snapshot"
 
@@ -87,7 +97,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
        }}
     )
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = Orchestrator.snapshot(pid, 5_000)
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.issue_id == issue_id
     assert snapshot_entry.issue_url == "https://example.org/issues/MT-188"
@@ -131,7 +141,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     update = fn payload ->
       send(pid, {:codex_worker_update, issue.id, %{event: :notification, timestamp: DateTime.utc_now(), payload: payload}})
-      GenServer.call(pid, :snapshot)
+      Orchestrator.snapshot(pid, 5_000)
     end
 
     for payload <- ["{manifest}\n[dependencies]\nengine = {{ path = '../../crates/engine' }}\n", [], 42, true, nil] do
@@ -243,7 +253,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
        }}
     )
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = Orchestrator.snapshot(pid, 5_000)
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.codex_app_server_pid == "4242"
     assert snapshot_entry.codex_input_tokens == 12
@@ -324,7 +334,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
        }}
     )
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = Orchestrator.snapshot(pid, 5_000)
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.codex_input_tokens == 0
     assert snapshot_entry.codex_output_tokens == 0
@@ -436,7 +446,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
        }}
     )
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = Orchestrator.snapshot(pid, 5_000)
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.codex_input_tokens == 10
     assert snapshot_entry.codex_output_tokens == 5
@@ -527,7 +537,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
        }}
     )
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = Orchestrator.snapshot(pid, 5_000)
     assert snapshot.rate_limits == rate_limits
   end
 
@@ -599,7 +609,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
        }}
     )
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = Orchestrator.snapshot(pid, 5_000)
     assert snapshot.rate_limits == rate_limits
     assert %{limit_id: "codex", plan: "pro", windows: %{"weekly" => %{used_percent: 75.0}}} = snapshot.quota
   end
@@ -685,7 +695,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
        }}
     )
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = Orchestrator.snapshot(pid, 5_000)
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.codex_input_tokens == 200
     assert snapshot_entry.codex_output_tokens == 100
@@ -759,7 +769,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       )
     end
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = Orchestrator.snapshot(pid, 5_000)
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.codex_input_tokens == 10
     assert snapshot_entry.codex_output_tokens == 4
@@ -842,7 +852,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
        }}
     )
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = Orchestrator.snapshot(pid, 5_000)
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.codex_input_tokens == 0
     assert snapshot_entry.codex_output_tokens == 0
@@ -872,7 +882,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     new_state = %{initial_state | retry_attempts: %{"mt-500" => retry_entry}}
     :sys.replace_state(pid, fn _ -> new_state end)
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = Orchestrator.snapshot(pid, 5_000)
     assert is_list(snapshot.retrying)
 
     assert [
@@ -912,7 +922,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       }
     end)
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = Orchestrator.snapshot(pid, 5_000)
 
     assert %{
              polling: %{
@@ -930,7 +940,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       %{state | poll_check_in_progress: true, next_poll_due_at_ms: nil}
     end)
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = Orchestrator.snapshot(pid, 5_000)
     assert %{polling: %{checking?: true, next_poll_in_ms: nil}} = snapshot
   end
 
@@ -1892,7 +1902,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   defp do_wait_for_snapshot(pid, predicate, deadline_ms) do
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = Orchestrator.snapshot(pid, 5_000)
 
     if predicate.(snapshot) do
       snapshot
