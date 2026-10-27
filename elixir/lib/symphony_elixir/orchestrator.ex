@@ -2760,7 +2760,9 @@ defmodule SymphonyElixir.Orchestrator do
   def snapshot(server, timeout, opts \\ []) do
     if GenServer.whereis(server) do
       try do
-        GenServer.call(server, if(opts[:history], do: {:snapshot, opts}, else: :snapshot), timeout)
+        server
+        |> GenServer.call(:snapshot, timeout)
+        |> enrich_snapshot(opts)
       catch
         :exit, {:timeout, _} -> :timeout
         :exit, _ -> :unavailable
@@ -2769,6 +2771,30 @@ defmodule SymphonyElixir.Orchestrator do
       :unavailable
     end
   end
+
+  # Only capture live state on the scheduling process. Retained usage aggregation
+  # and repository status belong to the reader; a slow dashboard must not queue
+  # worker updates, admission or control observations behind historical scans.
+  defp enrich_snapshot({snapshot, table, project}, opts) do
+    if opts[:view] == :control do
+      snapshot
+    else
+      Project.with_project(project, fn -> enrich_reporting(snapshot, table, opts) end)
+    end
+  end
+
+  defp enrich_snapshot(snapshot, _opts), do: snapshot
+
+  defp enrich_reporting(snapshot, table, opts) do
+    snapshot
+    |> Map.put(:operations, Operations.snapshot(table, opts))
+    |> Map.update!(:running, &Enum.map(&1, fn entry -> with_usage(entry, table) end))
+    |> Map.update!(:helpers, &Enum.map(&1, fn entry -> Map.put(entry, :usage, Operations.run_usage(table, entry.run_id)) end))
+    |> update_in([:autopilot], &Map.put(&1, :repo, repo_autopilot_status()))
+  end
+
+  defp with_usage(entry, table),
+    do: Map.merge(entry, %{run_usage: Operations.run_usage(table, entry.run_id), item_usage: Operations.item_usage(table, entry.identifier)})
 
   @impl true
   def handle_call({:quiet_deferred?, issue_id, run_id}, {worker, _}, state) do
@@ -2808,7 +2834,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_call(:snapshot, from, state), do: handle_call({:snapshot, []}, from, state)
 
-  def handle_call({:snapshot, opts}, _from, state) do
+  def handle_call({:snapshot, _opts}, _from, state) do
     state = refresh_runtime_config(state)
     now = DateTime.utc_now()
     now_ms = System.monotonic_time(:millisecond)
@@ -2849,8 +2875,6 @@ defmodule SymphonyElixir.Orchestrator do
           codex_reported_total_tokens: Map.get(metadata, :codex_reported_total_tokens),
           codex_model_context_window: Map.get(metadata, :codex_model_context_window),
           codex_provenance: Map.drop(Map.get(metadata, :codex_provenance, %{}), [:run_id]),
-          run_usage: Operations.run_usage(state.operations, Map.get(metadata, :run_id)),
-          item_usage: Operations.item_usage(state.operations, metadata.identifier),
           turn_count: Map.get(metadata, :turn_count, 0),
           started_at: metadata.started_at,
           last_codex_timestamp: metadata.last_codex_timestamp,
@@ -2905,39 +2929,40 @@ defmodule SymphonyElixir.Orchestrator do
         |> Map.merge(%{state: "Startup blocked", session_id: nil, last_codex_event: nil, last_codex_message: nil, last_codex_timestamp: nil})
       end
 
-    {:reply,
-     %{
-       running: running,
-       helpers:
-         for(
-           {_id, entry} <- state.helpers,
-           entry[:finished] != true,
-           do: Map.take(entry, [:run_id, :parent_run_id, :parent_issue_id, :source_sha, :model, :effort, :status]) |> Map.put(:usage, Operations.run_usage(state.operations, entry.run_id))
-         ),
-       retrying: retrying,
-       deferred: Map.values(state.quiet_continuations),
-       blocked: blocked ++ startup_blocked,
-       codex_totals: state.codex_totals,
-       operations: Operations.snapshot(state.operations, opts),
-       operations_error: state.operations_error,
-       tracker_ready: not is_nil(state.issues_observed_at) and is_nil(state.issues_error),
-       upcoming: upcoming_issues(state),
-       autopilot: autopilot_snapshot(state),
-       pull_requests: %{
-         items: state.pull_requests,
-         observed_at: state.pulls_observed_at,
-         error: state.pulls_error,
-         enabled: Config.settings!().tracker.kind == "github"
-       },
-       rate_limits: Map.get(state, :codex_rate_limits),
-       quota: Map.get(state, :codex_quota),
-       throttle: Map.get(state, :throttle),
-       polling: %{
-         checking?: state.poll_check_in_progress == true,
-         next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
-         poll_interval_ms: state.poll_interval_ms
-       }
-     }, state}
+    snapshot = %{
+      observed_at: now,
+      running: running,
+      helpers:
+        for(
+          {_id, entry} <- state.helpers,
+          entry[:finished] != true,
+          do: Map.take(entry, [:run_id, :parent_run_id, :parent_issue_id, :source_sha, :model, :effort, :status])
+        ),
+      retrying: retrying,
+      deferred: Map.values(state.quiet_continuations),
+      blocked: blocked ++ startup_blocked,
+      codex_totals: state.codex_totals,
+      operations_error: state.operations_error,
+      tracker_ready: not is_nil(state.issues_observed_at) and is_nil(state.issues_error),
+      upcoming: upcoming_issues(state),
+      autopilot: autopilot_snapshot(state),
+      pull_requests: %{
+        items: state.pull_requests,
+        observed_at: state.pulls_observed_at,
+        error: state.pulls_error,
+        enabled: Config.settings!().tracker.kind == "github"
+      },
+      rate_limits: Map.get(state, :codex_rate_limits),
+      quota: Map.get(state, :codex_quota),
+      throttle: Map.get(state, :throttle),
+      polling: %{
+        checking?: state.poll_check_in_progress == true,
+        next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
+        poll_interval_ms: state.poll_interval_ms
+      }
+    }
+
+    {:reply, {snapshot, state.operations, Project.current()}, state}
   end
 
   def handle_call(:request_refresh, _from, state) do
@@ -3041,8 +3066,7 @@ defmodule SymphonyElixir.Orchestrator do
       research_pending: for(task <- tasks, DateTime.compare(task.due_at, now) != :gt, do: task.name),
       research_finished_at: Autopilot.last_finished_at(state.autopilot),
       next_research_at: upcoming,
-      tasks: tasks,
-      repo: repo_autopilot_status()
+      tasks: tasks
     }
   end
 

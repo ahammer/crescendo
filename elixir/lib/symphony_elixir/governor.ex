@@ -83,8 +83,8 @@ defmodule SymphonyElixir.Governor do
   @spec draining?() :: boolean()
   def draining?, do: running?() and GenServer.call(__MODULE__, :draining)
 
-  @spec snapshot() :: map()
-  def snapshot, do: GenServer.call(__MODULE__, :snapshot)
+  @spec snapshot(timeout()) :: map()
+  def snapshot(timeout \\ 5_000), do: GenServer.call(__MODULE__, :snapshot, timeout)
 
   @doc "A credential-free service capacity observation; unavailable Governors remain unknown."
   @spec observe() :: map() | nil

@@ -10,6 +10,7 @@ import time
 import urllib.request
 import uuid
 from pathlib import Path
+from datetime import datetime, timezone
 from contextlib import contextmanager
 
 
@@ -104,6 +105,45 @@ def recover(root):
 
 def count(value):
     return type(value) is int and value >= 0
+
+
+def request_timeout():
+    legacy = float(os.environ.get("CRESCENDO_LEGACY_STATE_TIMEOUT_SECONDS", "0"))
+    if not math.isfinite(legacy) or not 0 <= legacy <= 20:
+        raise ValueError("legacy observation timeout must be between zero and twenty seconds")
+    return legacy or 2.5
+
+
+def control_observation(state):
+    """The one-upgrade legacy allowance is explicit and remains freshness checked."""
+    legacy = bool(float(os.environ.get("CRESCENDO_LEGACY_STATE_TIMEOUT_SECONDS", "0")))
+    request_timeout()
+    if not isinstance(state, dict):
+        raise ValueError("invalid control observation")
+    stamps = [state.get("generated_at")]
+    if state.get("view") == "control":
+        if state.get("schema_version") != 1 or state.get("snapshot_errors") != []:
+            raise ValueError("incomplete control observation")
+        projects = state.get("projects")
+        if not isinstance(projects, list) or not all(isinstance(project, dict) for project in projects):
+            raise ValueError("invalid project observations")
+        stamps.append(state.get("observed_at"))
+        stamps.extend(project.get("observed_at") for project in projects)
+    elif not legacy:
+        raise ValueError("control view unavailable; legacy upgrade requires an explicit timeout")
+    try:
+        for stamp in stamps:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(stamp.replace("Z", "+00:00"))).total_seconds()
+            if not -5 <= age <= 30:
+                raise ValueError("stale control observation")
+    except (AttributeError, TypeError) as error:
+        raise ValueError("missing control observation time") from error
+    return state
+
+
+def fetch_state(url):
+    with urllib.request.urlopen(url, timeout=request_timeout()) as response:
+        return control_observation(json.load(response))
 
 
 def validate(state, mode):
@@ -286,16 +326,16 @@ def main(args):
     if mode == "drain":
         root, target, url, limit, pause, token, force = args[1:]
 
-        def fetch_state():
-            with urllib.request.urlopen(url, timeout=10) as response:
-                return json.load(response)
-
-        return drain(Path(root), target, fetch_state, int(limit), int(pause), token, force == "0")
+        return drain(Path(root), target, lambda: fetch_state(url), int(limit), int(pause), token, force == "0")
     if mode == "finish":
         root, target, token, outcome = args[1:]
         finish(Path(root), target, token, outcome)
         return 0
-    running = validate(json.load(sys.stdin), mode)
+    state = json.load(sys.stdin)
+    if mode == "control-healthy":
+        state = control_observation(state)
+        mode = "healthy"
+    running = validate(state, mode)
     if mode == "running":
         print(running)
     return 0

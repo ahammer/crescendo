@@ -454,7 +454,7 @@ defmodule SymphonyElixir.CoreTest do
 
     assert is_pid(restarted_pid)
     assert is_pid(restarted_task_supervisor_pid)
-    assert is_map(GenServer.call(restarted_pid, :snapshot))
+    assert is_map(Orchestrator.snapshot(restarted_pid, 5_000))
     refute Process.alive?(first_worker_pid)
 
     second_worker_pid =

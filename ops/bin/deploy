@@ -13,7 +13,7 @@ repo=${CRESCENDO_REPO:-https://github.com/ahammer/crescendo.git}
 branch=${CRESCENDO_BRANCH:-main}
 drain_limit=${CRESCENDO_DRAIN_LIMIT_SECONDS:-300}
 dispatch_pause=${CRESCENDO_DISPATCH_PAUSE_SECONDS:-1800}
-state_url=http://127.0.0.1:${CRESCENDO_PORT:-4280}/api/v1/state
+state_url=http://127.0.0.1:${CRESCENDO_PORT:-4280}/api/v1/state?view=control
 env_file=$config/service.env
 validator=$(dirname "$0")/deploy-state.py
 
@@ -33,7 +33,7 @@ mkdir -p "$state"
 exec 8>"$state/deploy-drain.lock"
 if ! flock -n 8; then log "another drain owner is running"; exit 0; fi
 healthy() {
-  curl -fsS --max-time 10 "$state_url" | python3 "$validator" healthy
+  curl -fsS --max-time "${CRESCENDO_LEGACY_STATE_TIMEOUT_SECONDS:-2.5}" "$state_url" | python3 "$validator" control-healthy
 }
 wait_healthy() {
   for _ in $(seq 1 24); do

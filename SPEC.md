@@ -1329,8 +1329,9 @@ Adapter output MUST satisfy Section 4.1.1. In addition:
 - `blocked_by` is best-effort metadata; adapters MUST NOT invent blocker semantics they cannot
   represent reliably.
 - The GitHub Issues adapter checks native `blocked_by` relationships for otherwise routable open
-  issues at polling and ID refresh. Open blockers and `not_planned` closures make them
-  `dispatchable=false`; failed or malformed dependency reads fail closed.
+  issues at polling and ID refresh. Only an explicit closed `completed` prerequisite is
+  satisfied; open, failed or unknown closures make them `dispatchable=false`. Failed or
+  malformed dependency reads fail closed before model admission.
 - GitHub worker/intake instructions MUST register an actually required existing delivery producer
   as a native dependency before another unchanged blocked attempt. Attachment MUST use explicit
   repository/issue identity and the global issue ID, with complete paginated read-back; uncertain
@@ -1820,6 +1821,14 @@ Minimum endpoints:
 - `GET /api/v1/state`
   - Returns a summary view of the current system state (running sessions, retry queue/delays,
     aggregate token/runtime totals, latest rate limits, and any additional tracked summary fields).
+  - `?view=control` returns live project/run identities, helpers, retries, waiting work and
+    capacity within a shared two-second actor deadline. It composes with `project=<id>`;
+    unknown projects, unavailable actors and Governor failures produce partial observations
+    with null aggregate counts/slots. Observation times and per-project readiness remain explicit.
+    Private projects omit run identities. Historical aggregation MUST NOT execute in scheduling
+    callbacks. Legacy summary/history URLs remain available; runs receive the additional
+    `CRESCENDO_CONTROL_STATE_URL`. Consumers MUST NOT infer stopped work from missing, partial,
+    stale or unidentifiable observations.
   - `?history=full` returns the retained Operations history: up to 2,000 lifecycle events per
     selected project and 48 hours of five-minute samples. It composes with `project=<id>`;
     service aggregation MUST preserve each selected project's retained events and privacy policy.

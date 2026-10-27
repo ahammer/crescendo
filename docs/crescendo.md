@@ -573,6 +573,8 @@ Every agent command and workspace hook of a run gets these variables:
 | --- | --- |
 | `CRESCENDO_PROJECT` | The project id (unset for a single workflow). |
 | `CRESCENDO_WORK_ITEM` | The qualified work item, e.g. `metalrain/GH-12`. |
+| `CRESCENDO_CONTROL_STATE_URL` | Bounded live state (`view=control`) for leases, reconciliation and deployment. |
+| `CRESCENDO_RUN_ID` | Identity of this run; a later run of the same issue is distinct. |
 | `CRESCENDO_STATE_URL` | The service's read-only state API. |
 | `CRESCENDO_HOOK` | The hook being run (hooks only). |
 | `SYMPHONY_WORK_ITEM` | The bare work item (`GH-12`). |
@@ -611,6 +613,13 @@ This adds no configuration, control or write endpoint.
   that workflow's prefix (default `symphony`); an open inspector keeps its last resolved prefix if
   configuration becomes unavailable.
 - `GET /api/v1/state[?project=<id>]` is the merged state, with every item tagged by `project`.
+- Add `view=control` for a live observation with a shared two-second deadline across the
+  selected projects and Governor. It omits retained analytics and transcripts; historical
+  reporting runs outside the scheduling callback. `snapshot_status`, `snapshot_errors`,
+  per-project readiness and observation times distinguish incomplete or stale data from idle.
+  Counts and available slots are unknown on a partial read. Clients must check freshness and
+  project/run identity before treating absence as a stopped worker. Unknown project filters
+  return partial state; private projects omit run identities. The original view stays available.
 - Add `history=full` for retrospectives: `usage.activity` includes up to 2,000 retained events
   per selected project and `usage.samples` includes the retained 48 hours of five-minute samples.
   The default API and dashboard show the newest 100 events and 12 hours of samples. Project
@@ -618,6 +627,15 @@ This adds no configuration, control or write endpoint.
   Check the oldest timestamps before claiming a complete cycle; event eviction can shorten it.
   Daily totals and 14-day task averages keep their existing windows.
 - `GET /api/v1/<project>/<id>` is one work item.
+
+Managed deployment reads the control view and rejects stale or incomplete observations.
+For the initial upgrade from a release without that view, an operator may set
+`CRESCENDO_LEGACY_STATE_TIMEOUT_SECONDS=20` for that invocation. It allows a bounded legacy
+read with the same freshness check; omit it after upgrading. Drain, health and rollback
+still require complete project observations and account for helper slots.
+
+Native GitHub prerequisites admit work only when closed as `completed`; missing or unknown
+closure reasons remain blocked before model admission and do not consume delivery attempts.
 
 There are no write routes.
 
