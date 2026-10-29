@@ -224,6 +224,61 @@ defmodule SymphonyElixir.OperationsTest do
     assert Operations.snapshot(table).delivery_metrics.verified_deliveries == nil
   end
 
+  test "delivery history keeps issues separate without scanning the ledger per issue" do
+    alias SymphonyElixir.Tracker.Issue
+    path = Path.join(System.tmp_dir!(), "delivery-scans-#{System.unique_integer([:positive])}.dets")
+    {:ok, table} = Operations.open(path, :delivery_scans_test)
+
+    on_exit(fn ->
+      Operations.close(table)
+      File.rm(path)
+    end)
+
+    for number <- 1..40 do
+      id = to_string(number)
+      Operations.start_run(table, "run-#{id}", %{issue_id: id, issue_identifier: "GH-#{id}", kind: :issue})
+      issue = %Issue{id: id, identifier: "GH-#{id}", state: "open", updated_at: DateTime.utc_now()}
+      source = %{pr_number: number, status: "open"}
+      Operations.observe_delivery(table, %{issue: issue, sources: [source], closed_at: nil, evidence_source: "github"}, "crescendo")
+      report = %{issue_id: id, reviewed_s: number, verification_id: "report-#{id}"}
+      :dets.insert(table, {{:lineage_evidence, "issue_report", {id, report.verification_id}}, report})
+    end
+
+    reader = Task.async(fn -> receive do: (:snapshot -> Operations.snapshot(table)) end)
+    :erlang.trace_pattern({:dets, :match_object, 2}, true, [])
+    :erlang.trace(reader.pid, true, [:call])
+
+    try do
+      send(reader.pid, :snapshot)
+      snapshot = Task.await(reader)
+      delivered = :erlang.trace_delivered(:all)
+      assert_receive {:trace_delivered, :all, ^delivered}
+      # The number of whole-ledger reads stays bounded as retained issue history grows.
+      assert history_scan_count(reader.pid) <= 10
+      assert snapshot.status == "ok"
+      assert length(snapshot.delivery_metrics.issue_associations) == 40
+
+      for association <- snapshot.delivery_metrics.issue_associations do
+        id = association.issue_id
+        assert [%{run_id: "run-" <> ^id}] = association.attempts
+        assert [%{issue_id: ^id, pr_number: number}] = association.sources
+        assert Integer.to_string(number) == id
+        assert [%{issue_id: ^id, verification_id: "report-" <> ^id}] = association.report_verifications
+      end
+    after
+      :erlang.trace_pattern({:dets, :match_object, 2}, false, [])
+      Task.shutdown(reader, :brutal_kill)
+    end
+  end
+
+  defp history_scan_count(pid, count \\ 0) do
+    receive do
+      {:trace, ^pid, :call, {:dets, :match_object, _}} -> history_scan_count(pid, count + 1)
+    after
+      0 -> count
+    end
+  end
+
   test "historical and outside-worker sources never gain accepted lineage" do
     alias SymphonyElixir.Tracker.Issue
     path = Path.join(System.tmp_dir!(), "unknown-delivery-#{System.unique_integer([:positive])}.dets")

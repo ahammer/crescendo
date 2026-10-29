@@ -749,20 +749,29 @@ defmodule SymphonyElixir.Operations do
       run.started_s <= created_s and created_s < (run[:finished_s] || System.os_time(:second)) + 1
   end
 
-  defp delivery_associations(table) do
-    ids = delivery_issue_ids(table)
+  defp delivery_associations(table, runs, evidence) do
+    ids =
+      for {_, %{kind: :issue, delivery_tracking: true, issue_id: id}} <- runs,
+          is_binary(id),
+          into: MapSet.new(),
+          do: id
 
-    for {_, issue} <- :dets.match_object(table, {{:lineage_evidence, "issue", :_}, :_}), issue.issue_id in ids do
-      delivery_association(table, issue)
+    # Group the retained rows once; matching DETS separately for each issue scans the entire ledger.
+    runs = runs |> Enum.filter(fn {_, run} -> run[:kind] == :issue end) |> Enum.group_by(fn {_, run} -> run[:issue_id] end)
+    sources = delivery_evidence_by_issue(evidence, "issue_source")
+    reports = delivery_evidence_by_issue(evidence, "issue_report")
+
+    for {{:lineage_evidence, "issue", _}, issue} <- evidence, MapSet.member?(ids, issue.issue_id) do
+      delivery_association(table, issue, Map.get(runs, issue.issue_id, []), Map.get(sources, issue.issue_id, []), Map.get(reports, issue.issue_id, []))
     end
   end
 
-  defp delivery_association(table, issue) do
-    sources =
-      for {_, source} <- :dets.match_object(table, {{:lineage_evidence, "issue_source", {issue.issue_id, :_}}, :_}),
-          do: source
+  defp delivery_evidence_by_issue(evidence, kind) do
+    for({{:lineage_evidence, ^kind, {id, _}}, value} <- evidence, do: {id, value})
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+  end
 
-    runs = delivery_runs(table, issue.issue_id)
+  defp delivery_association(table, issue, runs, sources, reports) do
     scope = retained_delivery_scope(runs, issue, %Issue{id: issue.issue_id})
     issue = %{issue | handoff: scope.handoff}
     issue = %{issue | reduced_scope: issue.reduced_scope or scope.reduced_scope or reduced_delivery?(issue)}
@@ -770,10 +779,6 @@ defmodule SymphonyElixir.Operations do
     attempts =
       for {{:lineage_run, id}, run} <- runs,
           do: Map.put(Map.take(run, [:item_attempt, :status, :started_s, :finished_s, :delivery_key]), :run_id, id)
-
-    reports =
-      for {_, report} <- :dets.match_object(table, {{:lineage_evidence, "issue_report", {issue.issue_id, :_}}, :_}),
-          do: report
 
     proof = delivery_proof(table, issue, sources, reports)
     disposition = delivery_disposition(issue, proof)
@@ -1616,7 +1621,7 @@ defmodule SymphonyElixir.Operations do
     }
 
   defp delivery_snapshot(table) do
-    runs = for {_, run} <- :dets.match_object(table, {{:lineage_run, :_}, :_}), do: run
+    runs = :dets.match_object(table, {{:lineage_run, :_}, :_})
     threads = for {_, thread} <- :dets.match_object(table, {{:thread_context, :_}, :_}), do: thread
     evidence = :dets.match_object(table, {{:lineage_evidence, :_, :_}, :_})
 
@@ -1630,11 +1635,11 @@ defmodule SymphonyElixir.Operations do
     empty_delivery_metrics()
     |> Map.merge(%{
       runs_recorded: length(runs),
-      review_heads_recorded: Enum.count(runs, &is_binary(&1[:review_head])),
+      review_heads_recorded: Enum.count(runs, fn {_, run} -> is_binary(run[:review_head]) end),
       thread_links: Enum.sum(Enum.map(threads, &MapSet.size(&1.runs))),
       merge_observations: merges,
       research_associations: research,
-      issue_associations: delivery_associations(table)
+      issue_associations: delivery_associations(table, runs, evidence)
     })
   end
 
