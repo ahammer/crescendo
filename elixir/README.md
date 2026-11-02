@@ -560,7 +560,8 @@ The observability UI now runs on a minimal Phoenix stack:
   For a retrospective, request `/api/v1/state?history=full` (optionally `&project=<id>`) to read
   up to 2,000 events per selected project and 48 hours of five-minute samples. Check the oldest
   timestamps before claiming a complete cycle; daily totals and 14-day task averages keep their
-  existing windows. The default API and dashboard show 100 events and 12 hours of samples.
+  existing windows. The default API shows 100 events and 12 hours of samples; the issue dashboard
+  requests full retained history through the same Presenter.
 - Five-minute samples also retain timestamped Governor capacity observations (`admission`), including
   shared held slots, drain reasons and global research phases. Unavailable and legacy observations
   stay null. Service history keeps one whole latest observation per bucket and independent
@@ -574,32 +575,31 @@ The observability UI now runs on a minimal Phoenix stack:
   warns when estimated worker usage for the UTC day reaches `observability.daily_budget_usd`
   (default $50); separate planner and independent reviewer calls are not included, and the
   warning does not stop dispatch.
-- The dashboard at `/` is built for phones first. Eight header stats carry sparklines: agents,
-  queue, open pull requests (with a link to each project's pull request list on GitHub), pull
-  request transitions today, runs done today, the 14-day turn completion rate, the average task cost and time,
-  and spend today (from a five-minute sample of queue counts and spend kept for 48 hours in
-  `operations.dets`). Below them are the 14-day runs and spend charts (with each model's and
-  project's spend) and cards for system health, autopilot, model usage and per-task averages (cost
-  and time per delivery, review, research and marketing task over 14 days).
+- The dashboard at `/` centers Intake, Active and Done issue cards. Desktop controls sit above
+  the board, stats/charts on the left, selected-issue details and timeline on the right, and UTC
+  daily totals below. Mobile tabs switch Board, Stats, Pictures and History; issue details open
+  in a drawer. Search, project and existing Show filters narrow the view. Personal browser pins
+  affect this view only, never scheduling or tracker priorities.
+  Cards group observed runs, reviews, retries, outcomes and images only through explicit
+  project-scoped issue/run/PR relationships in the already-redacted Presenter payload. Missing
+  parents, run IDs, total run coverage and media/run attribution stay unavailable; prerequisites
+  and handoff owners are not inferred parents. Observed placement, waiting reasons and the latest
+  agent summary replace invented percentages. Worker completion, validation, acceptance, issue
+  closure and PR merge remain separate facts. The live agent inspector retains detailed evidence.
+  The selected UTC day filters dated terminal outcomes; current unfinished work carries forward.
+  Historical queue state is unavailable. Rollover changes the view, never deletes retained data.
+  History reads up to 2,000 retained lifecycle events per selected project and 48 hours of samples;
+  media shows the newest 120 images within three days, and daily charts cover 14 days. Older or
+  missing observations are unavailable. Lane counts describe visible cards, not service capacity.
+  Stats retain their labelled project/day scopes and API-equivalent cost caveats.
   Polling and tracker health warn before the first tracker observation and after five poll
   intervals without a fresh read from any selected project, using each project's own interval.
   Tracker errors make both checks critical. Polling in progress does not hide
   stale observations. The combined tracker timestamp stays unknown until every selected project
   has an available snapshot and observation, then uses the oldest one. Fresh successful reads
   clear the warnings.
-  The work timeline runs the full height on the right: up next (retries and the ready queue with
-  estimated start times, soonest nearest the middle, waiting items folded away), now (running
-  agents) and done (finished runs, merges, closes and failures, newest first with their time and
-  cost), each step with its own icon. The picture timeline shows the images agents captured, one
-  card per run with the newest image large, as a full-height column on the left from 1600px and a
-  film strip under the stats on narrower desktops. A wide window at least 900px tall fits the page;
-  on phones Timeline, Pictures and Stats are tabs. Running agents sit in a strip under the cards,
-  horizontal on wide screens and stacked on phones. The strip keeps one slot per
-  worker (up to four empty ones), so its size holds steady; each agent card shows the plan's
-  progress, a plain-language line for the latest step, the last thing the agent said, its latest
-  image, and its model, tokens, cost and changed lines, and free slots show the next ready item.
-  Queue estimates use the median run time of the same kind of work over the last three days, in
-  waves of `agent.max_concurrent_agents`. Health checks report only signals Symphony observes:
+  History keeps the existing up-next, running and finished event timeline. Health checks report
+  only signals Symphony observes:
   polling, dispatch capacity, blocked items, research, tracker and pull request read age and
   errors, rate limit use and failed attempts in the last hour, the usage store, and free workspace
   disk space.

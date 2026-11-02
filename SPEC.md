@@ -1792,6 +1792,25 @@ or unreadable build identities, development checkouts and Burrito packages repor
 release directories, host paths and environment values are never exposed by this metadata.
 This adds no configuration, control or write endpoint.
 
+Crescendo's dashboard projects the existing redacted Presenter payload into an issue workspace.
+The center has Intake, Active and Done lanes; desktop stats/charts, selected-issue details and
+UTC daily totals occupy fixed surrounding rails. Mobile sections use tabs and a detail drawer.
+Project and existing Show filters remain available alongside search and personal browser pins.
+Pins MUST affect only the view, never tracker priorities or scheduling.
+
+Cards MUST use explicit project-scoped issue identities and observed run/PR associations.
+Prerequisites and handoff owners MUST NOT be inferred as parents; missing parent links, run IDs,
+total run coverage and media/run attribution remain unavailable. Cards show observed placement,
+waiting reasons and agent summaries instead of invented progress percentages. Worker completion,
+validation, acceptance, issue closure and PR merge MUST remain distinct observations.
+
+The selected UTC day filters dated terminal outcomes. Current unfinished work carries forward;
+historical queue state is unavailable. Daily rollover MUST NOT delete issues, runs, events or
+media. The board requests full retained Presenter history: up to 2,000 lifecycle events per selected
+project and 48 hours of samples. Media remains bounded to the newest 120 images within three days;
+daily charts retain their 14-day window. Missing or evicted observations remain unavailable.
+These view operations MUST preserve API, event, privacy and coordinator contracts.
+
 - Host a human-readable dashboard at `/`.
 - The returned document SHOULD depict the current state of the system (for example active sessions,
   retry delays, token consumption, runtime totals, recent events, and health/error indicators).
@@ -1832,7 +1851,8 @@ Minimum endpoints:
   - `?history=full` returns the retained Operations history: up to 2,000 lifecycle events per
     selected project and 48 hours of five-minute samples. It composes with `project=<id>`;
     service aggregation MUST preserve each selected project's retained events and privacy policy.
-    The default summary and dashboard use the newest 100 events and 12 hours of samples.
+    The default API summary uses the newest 100 events and 12 hours of samples; the issue dashboard
+    requests the full retained history described above.
     History is bounded, not a guaranteed cycle or lifetime record; callers MUST check timestamps
     before treating a window as complete. Daily totals and 14-day task averages keep their existing windows.
 

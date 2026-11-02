@@ -585,6 +585,28 @@ The `SYMPHONY_*` names are kept for tools that predate the service.
 
 ## Dashboard and API
 
+The issue workspace centers Intake, Active and Done cards over the existing redacted Presenter
+payload. Desktop top controls, left stats/charts, right selected-issue details/timeline and bottom
+UTC daily totals stay fixed around the board. Mobile tabs switch sections and use a detail drawer.
+Search, project and existing Show filters affect the view; personal browser pins never change
+tracker priority, dispatch or configuration. Stats retain their labelled project/day scopes;
+lane counts describe visible cards, not service capacity or accepted deliveries.
+
+Issue cards group runs, reviews, retries, PRs and media only through explicit project-scoped
+relationships already observed by the service. Prerequisites and handoff owners are not inferred
+parents. Missing parent links, worker run IDs, total run coverage and image/run attribution stay
+unavailable. Cards show observed placement, waiting reasons and the latest agent summary instead
+of invented percentages. Worker completion, validation, acceptance, issue closure and merge remain
+separate facts. The selected-issue timeline and live inspector preserve their evidence sources.
+
+The day selector uses UTC, matching existing daily totals. It filters dated terminal outcomes and
+carries current unfinished work forward; it does not reconstruct historical queue state. Daily
+rollover changes the view without deleting issues, runs, events or media. The board requests full
+retained Presenter history: up to 2,000 lifecycle events per selected project and 48 hours of
+samples. Media remains limited to the newest 120 images within three days; daily charts cover
+14 days. Missing or evicted data stays unavailable. API/event contracts, redaction and scheduler
+behavior remain unchanged.
+
 Polling and tracker health require successful tracker observations from every selected project.
 Both checks warn before a first observation or when any selected project's data is older than
 five of its own configured poll intervals; tracker errors make both checks critical.
@@ -622,7 +644,8 @@ This adds no configuration, control or write endpoint.
   return partial state; private projects omit run identities. The original view stays available.
 - Add `history=full` for retrospectives: `usage.activity` includes up to 2,000 retained events
   per selected project and `usage.samples` includes the retained 48 hours of five-minute samples.
-  The default API and dashboard show the newest 100 events and 12 hours of samples. Project
+  The default API shows the newest 100 events and 12 hours of samples; the issue dashboard requests
+  full retained history. Project
   filtering, private-project redaction and partial-snapshot reporting apply to both views.
   Check the oldest timestamps before claiming a complete cycle; event eviction can shorten it.
   Daily totals and 14-day task averages keep their existing windows.

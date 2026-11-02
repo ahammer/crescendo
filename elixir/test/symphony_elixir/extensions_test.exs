@@ -939,12 +939,16 @@ defmodule SymphonyElixir.ExtensionsTest do
     # The HUD carries no transcript; the inspector loads one agent's.
     refute html =~ "Compare results"
 
-    # Phones switch sections with tabs; the choice is only a class.
-    assert has_element?(view, ~s(aside.timeline.is-active))
+    # The issue board is the default; retained history and pictures have their own tabs.
+    assert has_element?(view, "#issue-workspace.workspace-section-board")
+    refute has_element?(view, "aside.timeline")
     view |> element(~s(button[phx-value-id="stats"])) |> render_click()
     assert has_element?(view, ~s(button.section-tab.is-active[phx-value-id="stats"]))
     assert has_element?(view, "div.charts.is-active")
     refute has_element?(view, ~s(aside.timeline.is-active))
+    view |> element(~s(button.section-tab[phx-value-id="history"])) |> render_click()
+    assert has_element?(view, ~s(button.section-tab.is-active[phx-value-id="history"]))
+    assert has_element?(view, "aside.timeline.is-active")
     view |> element(~s(button[phx-value-id="pictures"])) |> render_click()
     assert has_element?(view, "aside.pictures.is-active")
     assert render(view) =~ "No pictures yet"
@@ -1097,7 +1101,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
-    {:ok, _view, html} = live(build_conn(), "/")
+    {:ok, view, _html} = live(build_conn(), "/")
+    html = view |> element(~s(button.section-tab[phx-value-id="history"])) |> render_click()
 
     # Two slots: the first two issues finish in one median run, the review in the second wave.
     assert html =~ ~r/First ready.*?~10m/s
@@ -1105,7 +1110,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ ~r/Third ready.*?~10m/s
     assert html =~ "Blocked"
     assert html =~ ~s(title="dependency blocked: GH-10")
-    assert html =~ "1/2 running"
+    assert view |> element(".board-stats .stat", "Agents") |> render() =~ "1/2"
     assert html =~ ~r/PR transitions today.*?3.*?2 merged · 1 closed/s
     assert html =~ ~r/class="spend-table".*?gpt-6-sol.*?\$1\.50.*?\$1\.50/s
     assert html =~ ~r/Free slot.*?Next up.*?GH-10.*?First ready/s
@@ -1227,7 +1232,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
-    {:ok, _view, html} = live(build_conn(), "/")
+    {:ok, view, _html} = live(build_conn(), "/")
+    html = view |> element(~s(button.section-tab[phx-value-id="history"])) |> render_click()
 
     assert html =~ "Startup admission failed"
     assert html =~ "Startup retry scheduled"
@@ -1263,11 +1269,6 @@ defmodule SymphonyElixir.ExtensionsTest do
           "Blocked",
           ~s(href="https://github.com/acme/app/pulls"),
           "Cost breakdown",
-          "Pictures",
-          "Live",
-          "+1",
-          ~s(src="/artifacts/0123456789abcdef01234567/5.png"),
-          "Fireplace shot",
           "86%",
           "$0.500",
           "10m 0s"
@@ -1290,27 +1291,36 @@ defmodule SymphonyElixir.ExtensionsTest do
       assert html =~ text
     end
 
+    view |> element(~s(button.section-tab[phx-value-id="pictures"])) |> render_click()
+    pictures = view |> element("aside.pictures.is-active") |> render()
+
+    for text <- ["Pictures", "Live", "+1", ~s(src="/artifacts/0123456789abcdef01234567/5.png"), "Fireplace shot"] do
+      assert pictures =~ text
+    end
+
+    view |> element(~s(button.section-tab[phx-value-id="history"])) |> render_click()
+
     # The Show filter narrows the timeline to one kind of work, and keeps the project filter.
     assert html =~ ~s(href="/?show=autopilot")
-    timeline = fn page -> page |> String.split(~s(aria-labelledby="timeline-title")) |> List.last() end
-    {:ok, _view, reviews} = live(build_conn(), "/?show=review")
-    reviews = timeline.(reviews)
+    render_patch(view, "/?show=review")
+    reviews = view |> element("aside.timeline.is-active") |> render()
     assert reviews =~ "Review turn completed"
     refute reviews =~ "Delivery failed"
     refute reviews =~ "Queued 1"
-    {:ok, _view, prs} = live(build_conn(), "/?show=prs")
-    prs = timeline.(prs)
+    render_patch(view, "/?show=prs")
+    prs = view |> element("aside.timeline.is-active") |> render()
     assert prs =~ "Merged"
     refute prs =~ "Review turn completed"
-    {:ok, _view, tasks_page} = live(build_conn(), "/?show=autopilot")
-    tasks_page = timeline.(tasks_page)
+    render_patch(view, "/?show=autopilot")
+    tasks_page = view |> element("aside.timeline.is-active") |> render()
     assert tasks_page =~ "Marketing delivered"
     refute tasks_page =~ "6 waiting"
-    {:ok, _view, unknown} = live(build_conn(), "/?show=bogus")
+    render_patch(view, "/?show=bogus")
+    unknown = view |> element("aside.timeline.is-active") |> render()
     assert unknown =~ "Delivery failed"
 
     # Dispatches show as running work, not as finished rows.
-    refute html =~ "GH-3"
+    refute unknown =~ "GH-3"
 
     # Several models name the model on each per-task row.
     usage = Map.put(usage, :by_task, [hd(by_task), %{hd(by_task) | model: "gpt-7"}])

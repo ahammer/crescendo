@@ -7,6 +7,20 @@ defmodule SymphonyElixir.DashboardComponentsTest do
 
   @now ~U[2026-09-27 12:00:00Z]
 
+  test "issue stories preserve distinct source outcome labels and bounded source titles" do
+    timeline = SymphonyElixirWeb.Timeline
+    assert timeline.describe_event(%{kind: "completed", issue_identifier: "GH-1"}).label == "Delivery turn completed"
+    assert timeline.describe_event(%{kind: "item_disposition", disposition: "unknown"}).label == "Item disposition: unknown"
+    assert timeline.describe_event(%{kind: "item_disposition", disposition: nil}).label == "Item disposition: unknown"
+    assert timeline.describe_event(%{kind: "task_short", issue_identifier: "research-scorecard"}).label == "Scorecard fell short"
+    assert timeline.describe_event(%{kind: "pr_opened", summary: "Exact PR title"}).title == "Exact PR title"
+    assert timeline.describe_event(%{kind: "startup_retry", summary: "Startup timeout"}).title == "Startup timeout"
+    assert timeline.describe_event(%{kind: "completed", title: "Exact issue title"}).title == "Exact issue title"
+    assert timeline.describe_event(%{kind: nil, title: 4}).title == nil
+    assert timeline.describe_event(%{kind: "pr_merged", summary: String.duplicate("x", 300)}).title == String.duplicate("x", 240)
+    assert timeline.describe_event(%{}).label == "Delivery unknown"
+  end
+
   test "work icons render startup, helper and future task categories" do
     for name <- ["startup", "helper", "future-task"] do
       assert render_component(&SymphonyElixirWeb.Timeline.icon/1, name: name) =~ "<svg"

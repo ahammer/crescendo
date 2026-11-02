@@ -1,35 +1,55 @@
 defmodule SymphonyElixirWeb.DashboardLive do
   @moduledoc """
-  Live observability dashboard for Crescendo. Stats and charts sit at the top
-  of the main column, above a strip of fixed worker slots where each running
-  agent's card opens the full-screen agent inspector. The work timeline (what
-  is next, running and done) runs the full height beside it. Phones show one
-  section at a time and stack the cards.
+  Read-only issue workspace over the existing redacted observability payload.
+  UTC day selection filters retained terminal outcomes; unfinished work carries
+  forward. Personal view preferences never change coordinator state.
   """
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
   import SymphonyElixirWeb.DashboardComponents
 
-  alias SymphonyElixirWeb.{Charts, Endpoint, Gallery, LiveRefresh, Presenter, Timeline, TranscriptComponents}
+  alias SymphonyElixirWeb.{Charts, Endpoint, Gallery, IssueBoard, LiveRefresh, Presenter, Timeline}
+  alias SymphonyElixirWeb.TranscriptComponents
 
-  @sections [{"timeline", "Timeline"}, {"pictures", "Pictures"}, {"stats", "Stats"}]
+  @sections [{"board", "Board"}, {"stats", "Stats"}, {"pictures", "Pictures"}, {"history", "History"}]
   @shows [{nil, "All"}, {"delivery", "Delivery"}, {"review", "Reviews"}, {"autopilot", "Autopilot"}, {"prs", "PRs & issues"}]
 
   @impl true
   def mount(params, _session, socket) do
     project = params["project"]
-    {:ok, socket |> assign(section: "timeline", project: project, show: show(params)) |> LiveRefresh.start(fn -> load_payload(project) end)}
+
+    socket =
+      assign(socket,
+        section: "board",
+        project: project,
+        show: show(params),
+        selected: nil,
+        detail_open: false,
+        board_filter: "all",
+        query: "",
+        area: "all",
+        date: nil,
+        day_error: nil,
+        pins: MapSet.new()
+      )
+
+    {:ok, LiveRefresh.start(socket, fn -> load_payload(project) end)}
   end
 
-  # Filters live in the URL (`?project=` and `?show=`), so views can be shared.
   @impl true
   def handle_params(params, _uri, socket) do
+    changed_show = socket.assigns.show != show(params)
     socket = assign(socket, :show, show(params))
+    socket = if changed_show, do: assign(socket, area: "all", selected: nil, detail_open: false), else: socket
 
     case params["project"] do
-      project when project == socket.assigns.project -> {:noreply, socket}
-      project -> {:noreply, socket |> assign(:project, project) |> LiveRefresh.replace(fn -> load_payload(project) end)}
+      project when project == socket.assigns.project ->
+        {:noreply, socket}
+
+      project ->
+        socket = assign(socket, project: project, area: "all", selected: nil, detail_open: false)
+        {:noreply, LiveRefresh.replace(socket, fn -> load_payload(project) end)}
     end
   end
 
@@ -42,153 +62,327 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   @impl true
-  def handle_event("section", %{"id" => section}, socket) do
-    {:noreply, assign(socket, :section, section)}
+  def handle_event("section", %{"id" => section}, socket) when section in ["board", "stats", "pictures", "history"] do
+    {:noreply, assign(socket, section: section, detail_open: false)}
   end
+
+  def handle_event("select-issue", %{"key" => key}, socket) do
+    board = IssueBoard.build(socket.assigns.payload, board_day(socket.assigns))
+
+    if IssueBoard.select(board, key),
+      do: {:noreply, socket |> assign(selected: key, detail_open: true) |> push_event("board-selection", %{})},
+      else: {:noreply, socket}
+  end
+
+  def handle_event("close-issue", _params, socket) do
+    {:noreply, socket |> assign(:detail_open, false) |> push_event("board-close", %{})}
+  end
+
+  def handle_event("board-filter", %{"filter" => filter}, socket) when filter in ["all", "blocked", "pinned"] do
+    {:noreply, assign(socket, board_filter: filter, selected: nil, detail_open: false)}
+  end
+
+  def handle_event("search", %{"query" => query}, socket) when is_binary(query) do
+    {:noreply, assign(socket, query: String.slice(query, 0, 200), selected: nil, detail_open: false)}
+  end
+
+  def handle_event("area", %{"area" => area}, socket) when is_binary(area) and byte_size(area) <= 80 do
+    {:noreply, assign(socket, area: area, selected: nil, detail_open: false)}
+  end
+
+  def handle_event("pin-issue", %{"key" => key}, socket) do
+    board = IssueBoard.build(socket.assigns.payload, board_day(socket.assigns))
+    pins = socket.assigns.pins
+
+    if IssueBoard.select(board, key) do
+      pins = if MapSet.member?(pins, key), do: MapSet.delete(pins, key), else: MapSet.put(pins, key)
+      {:noreply, socket |> assign(:pins, pins) |> push_event("board-pins", %{keys: Enum.take(pins, 250)})}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_event("restore-pins", %{"keys" => keys}, socket) when is_list(keys) do
+    pins = keys |> Enum.filter(&(is_binary(&1) and byte_size(&1) <= 400)) |> Enum.take(250) |> MapSet.new()
+    {:noreply, assign(socket, :pins, pins)}
+  end
+
+  def handle_event("day", %{"date" => date}, socket), do: change_day(socket, date)
+
+  def handle_event("day-step", %{"offset" => offset}, socket) when offset in ["-1", "1"] do
+    {:ok, date} = Date.from_iso8601(board_day(socket.assigns))
+    change_day(socket, date |> Date.add(String.to_integer(offset)) |> Date.to_iso8601())
+  end
+
+  def handle_event("today", _params, socket) do
+    {:noreply, assign(socket, date: nil, day_error: nil, area: "all", selected: nil, detail_open: false)}
+  end
+
+  def handle_event("reset-view", _params, socket) do
+    socket =
+      socket
+      |> assign(section: "board", date: nil, day_error: nil, selected: nil, detail_open: false, board_filter: "all", query: "", area: "all", pins: MapSet.new())
+      |> push_event("board-pins", %{keys: []})
+      |> push_patch(to: filter_path(socket.assigns.project, nil))
+
+    {:noreply, socket}
+  end
+
+  def handle_event(_event, _params, socket), do: {:noreply, socket}
+
+  defp change_day(socket, value) when is_binary(value) do
+    case Date.from_iso8601(value) do
+      {:ok, date} ->
+        if Date.compare(date, DateTime.to_date(socket.assigns.now)) != :gt do
+          {:noreply, assign(socket, date: value, day_error: nil, area: "all", selected: nil, detail_open: false)}
+        else
+          {:noreply, assign(socket, :day_error, "Future days are unavailable.")}
+        end
+
+      _ ->
+        {:noreply, assign(socket, :day_error, "Choose a valid UTC day.")}
+    end
+  end
+
+  defp change_day(socket, _value), do: {:noreply, assign(socket, :day_error, "Choose a valid UTC day.")}
 
   @impl true
   def handle_info(message, socket), do: {:noreply, LiveRefresh.handle_info(message, socket)}
 
+  defp board_day(assigns), do: assigns.date || assigns.now |> DateTime.to_date() |> Date.to_iso8601()
+
   @impl true
   def render(assigns) do
-    assigns = assign(assigns, sections: @sections, shows: @shows, refresh_error: assigns[:refresh_error])
+    assigns = view_defaults(assigns)
+    day = board_day(assigns)
+    observed = assigns.payload |> IssueBoard.build(day) |> IssueBoard.filter(assigns.show)
+    areas = (observed.cards ++ observed.history_cards ++ observed.undated_cards) |> Enum.map(& &1.area) |> Enum.reject(&is_nil/1) |> Enum.uniq() |> Enum.sort()
+    assigns = assign(assigns, :area, if(assigns.area in areas, do: assigns.area, else: "all"))
+    board = personal_filter(observed, assigns)
+    selected = if assigns.selected, do: IssueBoard.select(board, assigns.selected), else: List.first(board.cards)
+
+    assigns =
+      assign(assigns,
+        sections: @sections,
+        shows: @shows,
+        refresh_error: assigns[:refresh_error],
+        board: board,
+        selected_card: selected,
+        day: day,
+        areas: areas,
+        today: assigns.now |> DateTime.to_date() |> Date.to_iso8601(),
+        daily: Enum.find(get_in(assigns.payload, [:usage, :daily]) || [], &(&1.date == day))
+      )
 
     ~H"""
-    <section class={["dash", @payload[:error] && "dash-error"]}>
-      <header class="masthead">
-        <div class="brand">
-          <span class="brand-mark" aria-hidden="true"></span>
-          <div class="brand-text">
-            <h1 class="brand-title">Crescendo</h1>
-            <p class="brand-sub"><%= brand_line(@payload) %></p>
-            <p class="brand-sub" id="service-revision">
-              <%= if @payload.service.revision do %>
-                Revision <a href={@payload.service.commit_url} title={@payload.service.revision}><%= String.slice(@payload.service.revision, 0, 7) %></a>
-              <% else %>
-                Revision unknown
-              <% end %>
-            </p>
-            <p :if={@payload[:priority_mode]} class="brand-sub" id="priority-mode" role="status">
-              <span class={["speed-badge", @payload.priority_mode.enabled && "is-fast"]}>
-                Fast mode: <%= if @payload.priority_mode.enabled, do: "On", else: "Off" %>
-              </span>
-              <span :if={@payload.priority_mode.expires_at}>until <%= @payload.priority_mode.expires_at %></span>
-              <span :if={@payload.priority_mode.error}>Policy unavailable; standard speed</span>
-            </p>
-          </div>
-          <.live_badge />
-        </div>
-        <section :if={@refresh_error || @payload[:error]} class="error-card" role="status">
-          <h2 class="error-title">Snapshot unavailable</h2>
-          <p class="error-copy"><strong><%= (@refresh_error || @payload.error).code %>:</strong> <%= (@refresh_error || @payload.error).message %>. Retrying automatically.</p>
-          <p :if={!@payload[:error]} class="error-copy">Showing the last snapshot from <%= @payload.generated_at %>.</p>
-        </section>
-        <div :if={!@payload[:error]} class="filters">
-          <nav :if={length(@payload[:projects] || []) > 1} class="project-filter" aria-label="Project">
-            <span class="filter-label">Project</span>
-            <.link patch={filter_path(nil, @show)} class={["project-pill", is_nil(@payload[:project]) && "is-active"]}>All</.link>
-            <.link
-              :for={project <- @payload.projects}
-              patch={filter_path(project.id, @show)}
-              class={["project-pill", @payload[:project] == project.id && "is-active", (project.failure || project.snapshot_status in ["timeout", "unavailable"]) && "is-failed"]}
-              title={project.failure || "Snapshot: #{project.snapshot_status} · #{project.running || "—"} running · #{project.ready || "—"} ready"}
-            ><%= project.id %><span :if={is_integer(project.running) and project.running > 0} class="tab-count"><%= project.running %></span></.link>
-          </nav>
-          <nav class="project-filter" aria-label="Timeline">
-            <span class="filter-label">Show</span>
-            <.link
-              :for={{value, label} <- @shows}
-              patch={filter_path(@payload[:project], value)}
-              class={["project-pill", @show == value && "is-active"]}
-            ><%= label %></.link>
-          </nav>
-        </div>
-        <div :if={!@payload[:error]} class="stats">
-          <.stat
-            label="Agents"
-            value={"#{@payload.counts.running || "—"}/#{@payload.header.max_agents || "—"}"}
-            detail={if @payload[:snapshot_status] == "partial", do: "Snapshot incomplete", else: longest_detail(@payload.running, @now)}
-            values={@payload.history.running}
-            tone="green"
-          />
-          <.stat label="Queue" value={@payload.counts.ready || "—"} detail={"#{@payload.counts.waiting || "—"} waiting"} values={@payload.history.ready} tone="blue" />
-          <.stat label="Open PRs" value={@payload.counts.open_prs || "—"} detail="on GitHub" values={@payload.history.open_prs} tone="cyan" links={pull_links(@payload)} />
-          <.stat
-            label="PR transitions today"
-            value={today(@payload.usage, :merged) + today(@payload.usage, :closed)}
-            detail={"#{today(@payload.usage, :merged)} merged · #{today(@payload.usage, :closed)} closed"}
-            values={closed_per_day(@payload.usage)}
-            span="14 days"
-            tone="violet"
-            title="Observed PR merge and close transitions (UTC), including transient closures"
-          />
-          <.stat
-            label="Turn completion rate"
-            value={share_percent(@payload.run_stats.completed, @payload.run_stats.total)}
-            detail={"#{format_int(@payload.run_stats.completed)} of #{format_int(@payload.run_stats.total)} runs · 14 days"}
-            values={success_per_day(@payload.usage)}
-            span="14 days"
-            tone="cyan"
-            title="Runs that finished normally, of all finished runs, over 14 days"
-          />
-          <.stat
-            label="API estimate today"
-            value={if @payload.usage.status == "ok", do: format_usd(@payload.usage.today[:usd_micro]), else: "n/a"}
-            detail={budget_detail(@payload)}
-            values={@payload.history.spend_micro}
-            tone="gold"
-            warn={over_budget?(@payload)}
-            title={budget_title(@payload)}
-          />
-        </div>
+    <section id="issue-workspace" phx-hook="BoardView" class={["issue-workspace", "workspace-section-#{@section}", @payload[:error] && "dash-error"]}>
+      <header class="workspace-top">
+        <div class="workspace-brand"><span class="brand-mark workspace-mark" aria-hidden="true">≋</span><strong>Crescendo</strong><span class="workspace-slash">/</span><span>Issue workspace</span></div>
+        <span id="service-revision" class="workspace-subtitle"><%= if @payload.service.revision do %>Revision <a href={@payload.service.commit_url} title={@payload.service.revision}><%= String.slice(@payload.service.revision, 0, 7) %></a><% else %>Revision unknown<% end %></span>
+        <.live_badge />
+        <button type="button" class="quiet" phx-click="reset-view">Reset view</button>
       </header>
-
-      <%= if !@payload[:error] do %>
-        <section :if={@payload[:snapshot_status] == "partial"} class="error-card" role="status">
-          <h2 class="error-title">Snapshot incomplete</h2>
-          <p class="error-copy">Counts are unknown. Showing only observed project data.</p>
-          <p :for={error <- @payload.snapshot_errors} class="error-copy"><%= error.project %>: <%= error.status %></p>
-        </section>
-        <nav class="section-tabs" role="tablist" aria-label="Sections">
-          <button
-            :for={{id, label} <- @sections}
-            type="button"
-            role="tab"
-            aria-selected={to_string(@section == id)}
-            class={["section-tab", @section == id && "is-active"]}
-            phx-click="section"
-            phx-value-id={id}
-          ><%= label %><span :if={section_count(@payload, id)} class="tab-count"><%= section_count(@payload, id) %></span></button>
-        </nav>
-
-        <div class={["charts", @section == "stats" && "is-active"]}>
-          <.runs_panel stats={@payload.run_stats} usage={@payload.usage} />
-          <.spend_panel usage={@payload.usage} usage_error={@payload.usage_error} stats={@payload.run_stats} />
-          <.cost_panel usage={@payload.usage} />
-          <.autopilot_panel :if={@payload.autopilot.enabled} payload={@payload} now={@now} />
-          <.health_panel payload={@payload} quota={@payload.quota} throttle={@payload[:throttle]} now={@now} />
-        </div>
-
-        <Gallery.gallery payload={@payload} now={@now} mixed={mixed?(@payload)} active={@section == "pictures"} />
-
-        <section class="dock" aria-labelledby="dock-title">
-          <header class="dock-head">
-            <h2 id="dock-title">Agents</h2>
-            <span class="count"><%= @payload.counts.running || "—" %>/<%= @payload.header.max_agents || "—" %> running</span>
-            <span :if={get_in(@payload, [:throttle, :helpers])} class="count"><%= get_in(@payload, [:throttle, :helpers, :busy]) %>/<%= get_in(@payload, [:throttle, :helpers, :slots]) %> read-only helpers</span>
-            <.attention blocked={@payload.blocked} retrying={@payload.retrying} now={@now} />
-          </header>
-          <div class="dock-slots">
-            <.agent_card :for={entry <- @payload.running} entry={entry} now={@now} mixed={mixed?(@payload)} />
-            <.free_slot :for={next <- free_slots(@payload)} next={next} idle={idle_reason(@payload, @now)} />
+      <section class="workspace-heading">
+        <div><p class="workspace-eyebrow">YOUR WORK, NOT YOUR WORKERS</p><h1>A clear path to done<span>.</span></h1><p class="workspace-subtitle"><%= brand_line(@payload) %></p></div>
+        <div class="workspace-controls">
+          <nav class="section-tabs workspace-section-tabs" role="tablist" aria-label="Sections"><button :for={{id, label} <- @sections} type="button" role="tab" aria-selected={to_string(@section == id)} class={["section-tab", @section == id && "is-active"]} phx-click="section" phx-value-id={id}><%= label %><span :if={section_count(@payload, id)} class="tab-count"><%= section_count(@payload, id) %></span></button></nav>
+          <nav :if={!@payload[:error] && length(@payload[:projects] || []) > 1} class="project-filter" aria-label="Project">
+            <.link patch={filter_path(nil, @show)} class={["project-pill", is_nil(@payload[:project]) && "is-active"]}>All projects</.link>
+            <.link :for={project <- @payload.projects} patch={filter_path(project.id, @show)} class={["project-pill", @payload[:project] == project.id && "is-active", (project.failure || project.snapshot_status in ["timeout", "unavailable"]) && "is-failed"]} title={project.failure || "Snapshot: #{project.snapshot_status} · #{project.running || "—"} running · #{project.ready || "—"} ready"}><%= project.id %><span :if={is_integer(project.running) and project.running > 0} class="tab-count"><%= project.running %></span></.link>
+          </nav>
+          <form :if={@areas != [] && @section != "pictures"} phx-change="area"><label class="sr-only" for="board-area">Area</label><select id="board-area" name="area"><option value="all" selected={@area == "all"}>All areas</option><option :for={area <- @areas} value={area} selected={@area == area}><%= area %></option></select></form>
+          <div class="board-date-control">
+            <button type="button" phx-click="day-step" phx-value-offset="-1" aria-label="Previous UTC day">‹</button>
+            <form phx-change="day"><label class="sr-only" for="board-day">UTC day</label><input id="board-day" type="date" name="date" value={@day} max={@today} /></form>
+            <button type="button" phx-click="day-step" phx-value-offset="1" disabled={@day >= @today} aria-label="Next UTC day">›</button>
+            <button type="button" phx-click="today" class="board-today">Today</button>
           </div>
-        </section>
+          <nav :if={@section != "pictures"} class="project-filter" aria-label="Work category">
+            <.link :for={{value, label} <- @shows} patch={filter_path(@payload[:project], value)} class={["project-pill", @show == value && "is-active"]}><%= label %></.link>
+          </nav>
+        </div>
+      </section>
 
-        <Timeline.timeline payload={@payload} now={@now} mixed={mixed?(@payload)} active={@section == "timeline"} show={@show} />
-      <% end %>
+      <div :if={@refresh_error || @payload[:error]} class="workspace-alert error-card" role="status">
+        <h2 class="error-title">Snapshot unavailable</h2><p><%= (@refresh_error || @payload.error).message %>. Retrying automatically.</p>
+        <code><%= (@refresh_error || @payload.error).code %></code>
+        <p :if={!@payload[:error]}>Showing the last snapshot from <%= @payload.generated_at %>.</p>
+      </div>
+      <div :if={!@payload[:error]} class="workspace-layout">
+        <aside class="board-stats" aria-label="Service statistics and charts">
+          <p class="workspace-eyebrow">CURRENT SCOPE · <%= @payload[:project] || "All projects" %></p>
+          <div class="stats">
+            <.stat label="Agents" value={"#{@payload.counts.running || "—"}/#{@payload.header.max_agents || "—"}"} detail={if @board.partial, do: "Snapshot incomplete", else: longest_detail(@payload.running, @now)} values={@payload.history.running} tone="green" />
+            <.stat label="Queue" value={@payload.counts.ready || "-"} detail={"#{@payload.counts.waiting || "-"} waiting"} values={@payload.history.ready} tone="blue" />
+            <.stat label="Open PRs" value={@payload.counts.open_prs || "-"} links={pull_links(@payload)} values={@payload.history.open_prs} tone="cyan" />
+            <.stat label="PR transitions today" value={today(@payload.usage, :merged) + today(@payload.usage, :closed)} detail={"#{today(@payload.usage, :merged)} merged · #{today(@payload.usage, :closed)} closed · UTC"} values={closed_per_day(@payload.usage)} span="14 days" tone="violet" title="Observed PR transitions, including transient closures; separate from accepted issue deliveries" />
+            <.stat label="Turn completion rate" value={share_percent(@payload.run_stats.completed, @payload.run_stats.total)} detail={"#{format_int(@payload.run_stats.completed)} of #{format_int(@payload.run_stats.total)} finished runs · not accepted deliveries"} values={success_per_day(@payload.usage)} span="14 days" tone="cyan" />
+            <.stat label="API estimate today" value={if @payload.usage.status == "ok", do: format_usd(@payload.usage.today[:usd_micro]), else: "n/a"} detail={budget_detail(@payload)} values={@payload.history.spend_micro} tone="gold" warn={over_budget?(@payload)} title={budget_title(@payload)} />
+          </div>
+          <div class="charts is-active">
+            <.runs_panel stats={@payload.run_stats} usage={@payload.usage} />
+            <.spend_panel usage={@payload.usage} usage_error={@payload.usage_error} stats={@payload.run_stats} />
+            <.cost_panel usage={@payload.usage} />
+            <.autopilot_panel :if={@payload.autopilot.enabled} payload={@payload} now={@now} />
+            <.health_panel payload={@payload} quota={@payload.quota} throttle={@payload[:throttle]} now={@now} />
+          </div>
+          <details class="worker-details"><summary>Worker slots and automatic retries</summary><.attention blocked={@payload.blocked} retrying={@payload.retrying} now={@now} /><.agent_card :for={entry <- @payload.running} entry={entry} now={@now} mixed={mixed?(@payload)} /><.free_slot :for={next <- free_slots(@payload)} next={next} idle={idle_reason(@payload, @now)} /></details>
+
+          <p :if={@payload[:priority_mode]} id="priority-mode" class="workspace-subtitle">Fast mode: <%= if @payload.priority_mode.enabled, do: "On", else: "Off" %><span :if={@payload.priority_mode.expires_at}> until <%= @payload.priority_mode.expires_at %></span><span :if={@payload.priority_mode.error}> · Policy unavailable; standard speed</span></p>
+        </aside>
+
+        <main class="issue-board-main">
+
+          <div :if={@section != "pictures"} class="board-toolbar">
+            <div class="board-view-filters" role="group" aria-label="Filter issues"><button :for={{value, label} <- [{"all", "All issues"}, {"blocked", "Blocked / retrying"}, {"pinned", "Pinned"}]} type="button" phx-click="board-filter" phx-value-filter={value} aria-pressed={to_string(@board_filter == value)} class={@board_filter == value && "is-active"}><%= label %></button></div>
+            <form phx-change="search" class="board-search"><label class="sr-only" for="issue-query">Find an issue</label><input id="issue-query" type="search" name="query" value={@query} phx-debounce="150" placeholder="Find an issue…" /></form>
+          </div>
+          <p :if={@day_error} class="board-day-note" role="status"><%= @day_error %></p>
+          <div :if={@board.partial} class="board-day-note" role="status"><strong>Snapshot incomplete.</strong> Counts are unknown. Showing only observed project data.<p :for={error <- @payload[:snapshot_errors] || []}><%= error.project %>: <%= error.status %></p></div>
+          <p class="board-day-note"><strong><%= @day %> · UTC</strong> · Completed outcomes are filtered by day. Current unfinished work carries forward; historical queue state is unavailable. History is retained, never cleared.<span :if={@board.undated_cards != []}> <%= length(@board.undated_cards) %> terminal items have no recorded day; see History.</span></p>
+          <div :if={@section in ["board", "stats"]} class="board-lanes" aria-label="Issue board">
+            <section :for={lane <- @board.lanes} class="issue-lane" aria-label={"#{lane.title} issues"}>
+              <header class="lane-heading"><h2><%= lane.title %></h2><span class="count"><%= length(lane.cards) %></span><small><%= lane_hint(lane.id) %></small></header>
+              <div class="issue-cards"><p :if={lane.cards == []} class="board-empty">No matching observed issues.<br />Try another filter or UTC day.</p><.issue_card :for={card <- lane.cards} card={card} selected={@selected_card != nil and @selected_card.key == card.key} pinned={MapSet.member?(@pins, card.key)} /></div>
+            </section>
+          </div>
+          <p :if={@section == "pictures"} class="board-day-note">Pictures show the newest retained media in this project scope. Day and issue filters apply to Board and History stories.</p>
+          <Gallery.gallery :if={@section == "pictures"} payload={@payload} now={@now} mixed={mixed?(@payload)} active={true} />
+          <div :if={@section == "history"} class="board-history"><p class="board-day-note">Retained events: at most 2,000 per selected project. Media: newest 120 within three days. Daily charts: 14 days. Older or missing observations are unavailable.</p><details :if={@board.undated_cards != []}><summary>Terminal items with no recorded day</summary><div class="board-history-cards"><.issue_card :for={card <- @board.undated_cards} card={card} selected={@selected_card != nil and @selected_card.key == card.key} pinned={MapSet.member?(@pins, card.key)} /></div></details><h2>Retained issue stories</h2><p class="mediahint">Issue filters apply to these stories. The source timeline below keeps its project and work-category scope. These observations do not establish a current queue state or accepted delivery.</p><div class="board-history-cards"><.issue_card :for={card <- @board.history_cards} card={card} selected={@selected_card != nil and @selected_card.key == card.key} pinned={MapSet.member?(@pins, card.key)} /></div><Timeline.timeline payload={@payload} now={@now} mixed={mixed?(@payload)} active={true} show={@show} /></div>
+          <p class="board-view-note"><span>Select an issue to follow its story</span><span>Pins affect this view only · never scheduling</span></p>
+        </main>
+
+        <aside id="issue-detail" class={["issue-detail", @detail_open && @selected_card && "is-open"]} aria-label="Selected issue details" tabindex="-1">
+          <%= if @selected_card do %>
+            <.issue_story card={@selected_card} now={@now} />
+          <% else %>
+            <div class="issue-detail-top"><h2>Issue story</h2><button type="button" phx-click="close-issue" class="issue-detail-close">Close</button></div><p class="board-empty">Select an observed issue to see its runs, outcomes and media.</p>
+          <% end %>
+        </aside>
+      </div>
+      <footer class="workspace-footer"><div><span class="board-live-dot" aria-hidden="true"></span><strong><%= @day %> UTC</strong><span><%= if @board.partial, do: "Daily totals unavailable: snapshot incomplete", else: daily_rollup(@daily) %></span></div><button type="button" phx-click="section" phx-value-id="history">History &amp; sources</button><span>Updated <%= @payload.generated_at %> · view only</span></footer>
     </section>
     """
   end
+
+  defp view_defaults(assigns) do
+    defaults = [
+      now: DateTime.utc_now(),
+      section: "board",
+      show: nil,
+      project: nil,
+      selected: nil,
+      detail_open: false,
+      board_filter: "all",
+      query: "",
+      area: "all",
+      date: nil,
+      day_error: nil,
+      pins: MapSet.new()
+    ]
+
+    Enum.reduce(defaults, assigns, fn {key, value}, assigns -> assign_new(assigns, key, fn -> value end) end)
+  end
+
+  defp personal_filter(board, assigns) do
+    query = String.downcase(assigns.query)
+
+    keep = fn card ->
+      text = Enum.join([card.issue_identifier, card.project, card.title, card.phase, card.summary, card.area], " ") |> String.downcase()
+      matches = (query == "" or String.contains?(text, query)) and (assigns.area == "all" or assigns.area == card.area)
+
+      matches and
+        case assigns.board_filter do
+          "pinned" -> MapSet.member?(assigns.pins, card.key)
+          "blocked" -> blocked_card?(card)
+          _ -> true
+        end
+    end
+
+    cards = Enum.filter(board.cards, keep)
+
+    %{
+      board
+      | cards: cards,
+        history_cards: Enum.filter(board.history_cards, keep),
+        undated_cards: Enum.filter(board.undated_cards, keep),
+        lanes: Enum.map(board.lanes, fn lane -> %{lane | cards: Enum.filter(cards, &(&1.lane == lane.id))} end)
+    }
+  end
+
+  defp lane_hint("intake"), do: "Waiting / scoped"
+  defp lane_hint("active"), do: "Observed phase"
+  defp lane_hint("done"), do: "Terminal outcomes"
+
+  defp blocked_card?(card) do
+    reasons = ["startup admission blocked", "dependency blocked", "operator blocked", "retry scheduled"]
+
+    card.blocked != [] or card.retrying != [] or card.state in ["blocked", "Blocked"] or
+      Enum.any?(card.waiting, &(&1[:reason] in reasons))
+  end
+
+  defp daily_rollup(nil), do: "Daily observation unavailable"
+  defp daily_rollup(day), do: "#{day[:completed] || 0} turns completed · #{day[:failed] || 0} failed · #{day[:stopped] || 0} stopped · not acceptance"
+
+  attr(:card, :map, required: true)
+  attr(:selected, :boolean, default: false)
+  attr(:pinned, :boolean, default: false)
+
+  defp issue_card(assigns) do
+    ~H"""
+    <article class={["issue-card", @selected && "is-selected"]}>
+      <div class="issue-card-top"><span class="issue-card-id"><%= @card.issue_identifier %><span :if={@card.project}> · <%= @card.project %></span></span><button type="button" class={["issue-pin", @pinned && "is-pinned"]} phx-click="pin-issue" phx-value-key={@card.key} aria-pressed={to_string(@pinned)} aria-label={"#{if @pinned, do: "Unpin", else: "Pin"} #{@card.issue_identifier} in your view"} title="View only; no scheduling change">◇</button></div>
+      <button type="button" class="issue-card-select" phx-click="select-issue" phx-value-key={@card.key} aria-pressed={to_string(@selected)} aria-label={"Open #{@card.issue_identifier}: #{@card.title}"}>
+        <h3 class="issue-card-title"><%= @card.title || @card.issue_identifier %></h3>
+        <p :if={@card.summary} class="issue-card-summary"><%= @card.summary %></p>
+        <span class={["issue-phase", "phase-#{@card.lane}"]}><%= @card.phase || "Phase unavailable" %></span>
+        <div :if={@card.media != []} class="issue-card-media"><img :for={image <- Enum.take(@card.media, 2)} src={image.src} alt={"Image associated with #{@card.issue_identifier}"} loading="lazy" /></div>
+      </button>
+      <div class="issue-card-meta"><span><%= if is_integer(@card.run_count), do: "#{@card.run_count} recorded runs", else: "Run count unavailable" %></span><span><%= @card.state || "State unavailable" %><span :if={@card.merged}> · PR merge observed</span></span></div>
+    </article>
+    """
+  end
+
+  attr(:card, :map, required: true)
+  attr(:now, :any, required: true)
+
+  defp issue_story(assigns) do
+    ~H"""
+    <div class="issue-detail-top"><span class="workspace-eyebrow">ISSUE STORY</span><button type="button" phx-click="close-issue" class="issue-detail-close" aria-label="Close issue details">Close ×</button><.issue_identifier identifier={@card.issue_identifier} url={@card.issue_url} /></div>
+    <span class={["issue-phase", "phase-#{@card.lane}"]}><%= @card.phase || "Phase unavailable" %></span>
+    <h2 class="issue-story-title"><%= @card.title || @card.issue_identifier %></h2>
+    <p class="issue-story-summary"><%= @card.summary || "No user-facing phase summary is available." %></p>
+    <div class="issue-outcome"><strong><%= if @card.merged, do: "PR merge observed", else: "Delivery outcome" %></strong><p>Issue state: <%= @card.state || "unavailable" %>. Acceptance proof: <%= @card.acceptance || "unavailable" %>. Disposition: <%= @card.disposition || "unavailable" %>. Reported full completion: <%= known_boolean(@card.canonical_outcome_complete) %>.</p><p>Worker completion, validation, issue closure and merge are separate observations.</p></div>
+    <details open><summary>Agent runs &amp; reviews</summary><p :if={@card.runs == []} class="mediahint">No explicit worker run IDs are available.</p><ul class="issue-run-list"><li :for={run <- @card.runs}><strong><%= run[:run_id] %></strong><span><%= run[:status] || "Outcome unavailable" %></span><time>Started <%= run_time(run, :started) %> · finished <%= run_time(run, :finished) %></time></li></ul><p :if={@card.helpers != []} class="mediahint"><%= length(@card.helpers) %> explicitly associated helpers</p><.link :for={entry <- @card.running} navigate={agent_path(entry)} class="issue-inspector-link">Open live <%= @card.issue_identifier %> inspector →</.link><p class="mediahint">Recorded runs are observed IDs, not a promised total. Validation status is unavailable in this projection; inspect the linked source records for evidence.</p></details>
+    <details :if={@card.external_reports != [] || @card.review_verifications != []} open><summary>Independent reports &amp; verification</summary><p class="mediahint">External reports are unverified CLI reports. They do not add verified worker runs, acceptance or billing totals.</p><ul><li :for={report <- @card.external_reports}><strong><%= report[:role] || "Role unavailable" %></strong> · <%= report[:run_id] || "Report ID unavailable" %><br /><time><%= report[:observed_at] || "Time unavailable" %></time><br />Parent run: <%= report[:parent_run_id] || "unavailable" %></li><li :for={review <- @card.review_verifications}><strong>Verification recorded</strong> · <%= review[:verification_id] || "ID unavailable" %><br /><time><%= epoch_time(review[:reviewed_s]) %></time></li></ul></details>
+    <details open><summary>Issue grouping</summary><p class="mediahint">Project: <%= @card.project || "unavailable" %><br />Parent issue: <%= @card.parent_issue || "unavailable" %>. Prerequisites and handoff owners are not inferred parents.</p><ul><li :for={pull <- @card.pull_requests}><a :if={pull[:pr_url] || pull[:url]} href={pull[:pr_url] || pull[:url]} target="_blank" rel="noopener noreferrer">PR <%= pull[:pr_number] || pull[:number] || "unavailable" %> ↗</a><span :if={!pull[:pr_url] && !pull[:url]}>PR relationship recorded; link unavailable</span></li></ul></details>
+    <h3>Detailed timeline</h3><p :if={@card.events == []} class="mediahint">No retained events for this issue.</p><ol class="issue-detail-events"><li :for={event <- @card.events} class="issue-detail-event"><time><%= event[:at] || "Time unavailable" %></time><strong><%= event_label(event) %><span :if={event[:pr_number]}> · PR-<%= event.pr_number %></span></strong><p :if={event_summary(event)}><%= event_summary(event) %></p></li></ol>
+    <p class="mediahint">Original event timestamps are retained. Recorded observations may lag the underlying event; no cross-clock duration is inferred.</p>
+    <details open><summary>Evidence &amp; media · <%= length(@card.media) %></summary><div class="issue-detail-media"><a :for={image <- @card.media} href={image.src} target="_blank" rel="noopener noreferrer" aria-label={"Open original image associated with #{@card.issue_identifier}"}><img src={image.src} alt={"Original issue-associated image for #{@card.issue_identifier}"} loading="lazy" /></a></div><p class="mediahint"><%= if @card.media == [], do: "No retained media available.", else: "Original issue-associated images. Worker-run attribution unavailable; these images alone do not establish acceptance or a before/after comparison." %></p></details>
+    """
+  end
+
+  defp event_label(event), do: Timeline.describe_event(event).label
+
+  defp event_summary(event) do
+    Timeline.describe_event(event).title ||
+      Enum.find_value([:reason, :error], fn key -> if is_binary(event[key]), do: String.slice(event[key], 0, 240) end)
+  end
+
+  defp run_time(run, :started), do: run[:started_at] || epoch_time(run[:started_s])
+  defp run_time(run, :finished), do: run[:finished_at] || epoch_time(run[:finished_s])
+
+  defp epoch_time(seconds) when is_integer(seconds) do
+    case DateTime.from_unix(seconds) do
+      {:ok, at} -> DateTime.to_iso8601(at)
+      _ -> "unavailable"
+    end
+  end
+
+  defp epoch_time(_seconds), do: "unavailable"
+  defp known_boolean(true), do: "confirmed"
+  defp known_boolean(false), do: "not established"
+  defp known_boolean(_value), do: "unavailable"
 
   attr(:label, :string, required: true)
   attr(:value, :any, required: true)
@@ -496,7 +690,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     """
   end
 
-  defp load_payload(project), do: Presenter.payload(project: project, orchestrator: orchestrator(), timeout: snapshot_timeout_ms())
+  defp load_payload(project), do: Presenter.payload(project: project, orchestrator: orchestrator(), timeout: snapshot_timeout_ms(), history: true)
 
   # Lists that mix projects name each item's project; one project needs neither filter nor names.
   defp mixed?(payload), do: length(payload[:projects] || []) > 1 and is_nil(payload[:project])
@@ -551,6 +745,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       else: "API-equivalent worker usage today (UTC). Account billing and accepted-delivery cost are unverified."
   end
 
+  defp section_count(%{error: _error}, _section), do: nil
   defp section_count(payload, "timeline"), do: payload.counts.ready
   defp section_count(payload, "pictures"), do: if(Map.get(payload.usage, :images, []) == [], do: nil, else: length(payload.usage.images))
   defp section_count(payload, "stats"), do: if(healthy?(payload.health), do: nil, else: "!")

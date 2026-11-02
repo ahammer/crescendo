@@ -36,6 +36,76 @@ defmodule SymphonyElixirWeb.Layouts do
             // Keeps an agent transcript pinned to its newest entry, like a chat,
             // unless the reader has scrolled up to look at something older.
             var hooks = {
+              BoardView: {
+                mounted: function () {
+                  var hook = this;
+                  var storageKey = "crescendo.issue-board.pins.v1";
+                  try {
+                    var keys = JSON.parse(localStorage.getItem(storageKey) || "[]");
+                    if (Array.isArray(keys)) hook.pushEvent("restore-pins", {keys: keys});
+                  } catch (_) { /* Storage is optional; view state still works. */ }
+                  hook.handleEvent("board-pins", function (data) {
+                    try { localStorage.setItem(storageKey, JSON.stringify(data.keys)); } catch (_) {}
+                  });
+                  hook.el.addEventListener("click", function (event) {
+                    var button = event.target.closest('[phx-click="select-issue"]');
+                    if (button) hook.lastSelectedKey = button.getAttribute("phx-value-key");
+                  });
+                  hook.handleEvent("board-selection", function () {
+                    requestAnimationFrame(function () {
+                      hook.syncDrawer();
+                      if (window.matchMedia("(max-width: 720px)").matches) {
+                        hook.el.querySelector(".issue-detail.is-open")?.focus();
+                      }
+                    });
+                  });
+                  hook.handleEvent("board-close", function () {
+                    requestAnimationFrame(function () {
+                      hook.syncDrawer();
+                      if (hook.lastSelectedKey) {
+                        hook.el.querySelector('[phx-click="select-issue"][phx-value-key="' +
+                          CSS.escape(hook.lastSelectedKey) + '"]')?.focus();
+                      }
+                    });
+                  });
+                  hook.el.addEventListener("keydown", function (event) {
+                    var drawer = hook.el.querySelector(".issue-detail.is-open");
+                    if (event.key === "Escape" && drawer) {
+                      event.preventDefault();
+                      hook.pushEvent("close-issue", {});
+                    }
+                    if (event.key === "Tab" && drawer && window.matchMedia("(max-width: 720px)").matches) {
+                      var controls = Array.from(drawer.querySelectorAll(
+                        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), summary, [tabindex="0"]'
+                      )).filter(function (element) { return element.getClientRects().length > 0; });
+                      var first = controls[0];
+                      var last = controls[controls.length - 1];
+                      if (!first) { event.preventDefault(); drawer.focus(); }
+                      else if (event.shiftKey && (document.activeElement === first || document.activeElement === drawer)) {
+                        event.preventDefault(); last.focus();
+                      } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === drawer)) {
+                        event.preventDefault(); first.focus();
+                      }
+                    }
+                  });
+                  hook.onResize = function () { hook.syncDrawer(); };
+                  window.addEventListener("resize", hook.onResize);
+                  hook.syncDrawer();
+                },
+                updated: function () { this.syncDrawer(); },
+                destroyed: function () { window.removeEventListener("resize", this.onResize); },
+                syncDrawer: function () {
+                  var drawer = this.el.querySelector(".issue-detail");
+                  var modal = drawer?.classList.contains("is-open") && window.matchMedia("(max-width: 720px)").matches;
+                  if (drawer) {
+                    if (modal) { drawer.setAttribute("role", "dialog"); drawer.setAttribute("aria-modal", "true"); }
+                    else { drawer.removeAttribute("role"); drawer.removeAttribute("aria-modal"); }
+                  }
+                  this.el.querySelectorAll(
+                    ".workspace-top, .workspace-heading, .workspace-footer, .issue-board-main, .board-stats"
+                  ).forEach(function (element) { element.inert = Boolean(modal); });
+                }
+              },
               ChatScroll: {
                 mounted: function () {
                   var el = this.el;

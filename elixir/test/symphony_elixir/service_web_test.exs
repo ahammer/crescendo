@@ -767,14 +767,17 @@ defmodule SymphonyElixir.ServiceWebTest do
       assert healthy(alpha) == 1
       assert SymphonyElixirWeb.Presenter.payload(timeout: 100, project: "beta").snapshot_status == "partial"
 
-      {:ok, _view, html} = live(build_conn(), "/")
+      {:ok, view, html} = live(build_conn(), "/")
       assert html =~ "Snapshot incomplete"
       assert html =~ "beta: timeout"
       assert html =~ "—/2"
-      assert html =~ "Queue unknown."
-      assert html =~ "Running work unknown."
+      assert has_element?(view, ".issue-card-select", "Held work")
       refute html =~ "Free slot"
       refute html =~ "No agent is running."
+
+      history = view |> element(".section-tab[phx-value-id='history']", "History") |> render_click()
+      assert history =~ "Queue unknown."
+      assert history =~ "Running work unknown."
     after
       :ok = Governor.release("beta", "held-slot")
       :ok = :sys.resume(beta)
@@ -812,10 +815,200 @@ defmodule SymphonyElixir.ServiceWebTest do
     end
   end
 
+  test "issue board keeps project-scoped cards and filters waiting work without implying it is blocked" do
+    put_board_blocked_issue()
+    {:ok, view, html} = live(build_conn(), "/")
+
+    assert html |> Floki.parse_document!() |> Floki.find(".issue-card") |> length() == 3
+    assert has_element?(view, ".issue-lane[aria-label='Intake issues']", "Held work")
+    assert has_element?(view, ".issue-card-select", "Private work")
+    assert has_element?(view, ".issue-lane[aria-label='Active issues']", "No matching observed issues")
+    assert has_element?(view, ".issue-lane[aria-label='Done issues']", "No matching observed issues")
+
+    view |> element(".issue-card-select", "Review GPU recovery") |> render_click()
+    assert has_element?(view, "#issue-detail.is-open .issue-story-title", "Review GPU recovery")
+    assert has_element?(view, "#issue-detail", "Waiting for validation evidence")
+    assert has_element?(view, "#issue-detail", "No explicit worker run IDs are available")
+
+    view |> form("form[phx-change='search']", query: "gpu") |> render_change()
+    assert has_element?(view, ".issue-card-select", "Review GPU recovery")
+    refute has_element?(view, ".issue-card-select", "Held work")
+    refute has_element?(view, ".issue-card-select", "Private work")
+    view |> form("form[phx-change='search']", query: "") |> render_change()
+    view |> element("button[phx-value-filter='blocked']") |> render_click()
+    assert has_element?(view, ".issue-card-select", "Review GPU recovery")
+    refute has_element?(view, ".issue-card-select", "Held work")
+    view |> element("button[phx-value-filter='all']") |> render_click()
+    assert has_element?(view, ".issue-card-select", "Held work")
+  end
+
+  test "issue pins and reset change only the personal view" do
+    put_board_blocked_issue()
+    alpha = Project.via("alpha", :orchestrator)
+    fields = [:running, :retry_attempts, :blocked, :polled_issues, :claimed]
+    coordinator = Map.take(:sys.get_state(alpha), fields)
+    governor_fields = [:slots, :busy, :projects, :reservation, :research_hold, :draining, :helpers]
+    governor = Map.take(Governor.snapshot(), governor_fields)
+    {:ok, view, _html} = live(build_conn(), "/?project=alpha")
+
+    view |> element("button[aria-label='Pin MT-7 in your view']") |> render_click()
+    assert_push_event(view, "board-pins", %{keys: [_key]})
+    view |> element("button[phx-value-filter='pinned']") |> render_click()
+    assert has_element?(view, ".issue-card-select", "Held work")
+    refute has_element?(view, ".issue-card-select", "Review GPU recovery")
+    assert has_element?(view, "button[aria-label='Unpin MT-7 in your view'][aria-pressed='true']")
+
+    view |> element("button[phx-click='reset-view']") |> render_click()
+    assert_push_event(view, "board-pins", %{keys: []})
+    assert has_element?(view, "button[phx-value-filter='all'][aria-pressed='true']")
+    assert has_element?(view, "button[aria-label='Pin MT-7 in your view'][aria-pressed='false']")
+    assert has_element?(view, ".issue-card-select", "Review GPU recovery")
+    assert Map.take(:sys.get_state(alpha), fields) == coordinator
+    assert Map.take(Governor.snapshot(), governor_fields) == governor
+  end
+
+  test "UTC day changes retain unfinished work and history while rejecting invalid or future days" do
+    table = :sys.get_state(Project.via("alpha", :orchestrator)).operations
+    yesterday = Date.add(Date.utc_today(), -1) |> Date.to_iso8601()
+    at = yesterday <> "T12:00:00Z"
+
+    sequence =
+      case :dets.lookup(table, :sequence) do
+        [{:sequence, value}] -> value + 1
+        _ -> 1
+      end
+
+    event = %{kind: "pr_merged", issue_identifier: "PR-77", pr_number: 77, summary: "Previously merged work", at: at}
+    :ok = :dets.insert(table, [{:sequence, sequence}, {{:event, sequence}, event}])
+    {:ok, view, _html} = live(build_conn(), "/?project=alpha")
+    refute has_element?(view, ".issue-card-select", "Previously merged work")
+
+    view |> form("form[phx-change='day']", date: yesterday) |> render_change()
+    assert has_element?(view, ".issue-lane[aria-label='Done issues']", "Previously merged work")
+    assert has_element?(view, ".issue-lane[aria-label='Intake issues']", "Held work")
+    assert has_element?(view, ".board-day-note", "historical queue state is unavailable")
+    assert has_element?(view, "#board-day[value='#{yesterday}']")
+
+    render_change(view, "day", %{"date" => "not-a-day"})
+    assert has_element?(view, ".board-day-note", "Choose a valid UTC day")
+    future = Date.add(Date.utc_today(), 1) |> Date.to_iso8601()
+    render_change(view, "day", %{"date" => future})
+    assert has_element?(view, ".board-day-note", "Future days are unavailable")
+    assert has_element?(view, "#board-day[value='#{yesterday}']")
+
+    view |> element("button[phx-click='today']") |> render_click()
+    refute has_element?(view, ".issue-card-select", "Previously merged work")
+    assert has_element?(view, ".issue-card-select", "Held work")
+    assert :dets.lookup(table, {:event, sequence}) == [{{:event, sequence}, event}]
+  end
+
+  test "project changes close selected details and clear an area that belongs to the previous project" do
+    put_board_blocked_issue()
+    alpha = Project.via("alpha", :orchestrator)
+
+    :sys.replace_state(alpha, fn state ->
+      issues =
+        Enum.map(state.polled_issues, fn issue ->
+          if issue.identifier == "MT-7", do: %{issue | labels: ["hold", "area:runtime"]}, else: issue
+        end)
+
+      # Work labels are exposed on active runs; admission queue rows do not project them.
+      issue = Enum.find(issues, &(&1.identifier == "MT-7"))
+
+      entry = %{
+        identifier: issue.identifier,
+        issue: issue,
+        run_id: "alpha-area-run",
+        session_id: nil,
+        codex_app_server_pid: nil,
+        codex_input_tokens: 0,
+        codex_output_tokens: 0,
+        codex_total_tokens: 0,
+        started_at: DateTime.utc_now(),
+        last_codex_timestamp: nil,
+        last_codex_message: nil,
+        last_codex_event: nil
+      }
+
+      %{state | polled_issues: issues, running: %{issue.id => entry}}
+    end)
+
+    {:ok, view, _html} = live(build_conn(), "/?project=alpha")
+    view |> form("form[phx-change='area']", area: "runtime") |> render_change()
+    refute has_element?(view, ".issue-card-select", "Review GPU recovery")
+    view |> element(".issue-card-select", "Held work") |> render_click()
+    assert has_element?(view, "#issue-detail.is-open .issue-story-title", "Held work")
+
+    render_patch(view, "/?project=beta")
+    assert has_element?(view, ".issue-card-select", "Private work")
+    refute has_element?(view, ".issue-card-select", "Held work")
+    refute has_element?(view, "#issue-detail.is-open")
+    render_patch(view, "/?project=alpha")
+    assert has_element?(view, "#board-area option[value='all'][selected]")
+    assert has_element?(view, ".issue-card-select", "Held work")
+    assert has_element?(view, ".issue-card-select", "Review GPU recovery")
+    refute has_element?(view, "#issue-detail.is-open")
+  end
+
+  test "issue board preserves private-project redaction through partial snapshots and recovery" do
+    beta = Project.via("beta", :orchestrator)
+
+    :sys.replace_state(beta, fn state ->
+      [issue] = state.polled_issues
+      issue = %{issue | title: "Beta confidential rollout"}
+
+      entry = %{
+        identifier: issue.identifier,
+        issue: issue,
+        run_id: "beta-secret-run",
+        session_id: nil,
+        codex_app_server_pid: nil,
+        codex_input_tokens: 0,
+        codex_output_tokens: 0,
+        codex_total_tokens: 0,
+        started_at: DateTime.utc_now(),
+        last_codex_timestamp: nil,
+        last_codex_message: "beta-secret-summary",
+        last_codex_event: nil
+      }
+
+      %{state | polled_issues: [issue], running: %{issue.id => entry}}
+    end)
+
+    table = :sys.get_state(beta).operations
+    :ok = Operations.record_image(table, %{src: "/artifacts/beta-secret/image.png", issue_identifier: "MT-7"})
+    :ok = Operations.event(table, "dispatch", %{issue_identifier: "MT-7", run_id: "beta-secret-run"})
+    {:ok, view, html} = live(build_conn(), "/")
+    assert has_element?(view, ".issue-card-select", "Private work")
+    refute html =~ "Beta confidential rollout"
+    refute html =~ "beta-secret"
+
+    alpha = GenServer.whereis(Project.via("alpha", :orchestrator))
+    :ok = :sys.suspend(alpha)
+
+    try do
+      send(view.pid, :observability_updated)
+      wait_for(fn -> has_element?(view, ".board-day-note", "Snapshot incomplete") end)
+      assert has_element?(view, ".board-day-note", "Counts are unknown")
+      assert has_element?(view, ".issue-card-select", "Private work")
+      refute has_element?(view, ".issue-card-select", "Held work")
+      refute render(view) =~ "Beta confidential rollout"
+      refute render(view) =~ "beta-secret"
+    after
+      :ok = :sys.resume(alpha)
+    end
+
+    send(view.pid, :observability_updated)
+    wait_for(fn -> not has_element?(view, ".board-day-note", "Snapshot incomplete") end)
+    assert has_element?(view, ".issue-card-select", "Held work")
+    refute render(view) =~ "beta-secret"
+  end
+
   test "the dashboard filters by project in the URL and names projects in mixed lists" do
     {:ok, view, html} = live(build_conn(), "/")
     assert html =~ "project-filter"
-    assert html =~ ~s(<span class="project-chip">alpha</span>)
+    assert has_element?(view, ".issue-card-id span", "alpha")
+    assert has_element?(view, ".issue-card-id span", "beta")
 
     # Filters combine in the URL: each link keeps the other filter.
     html = render_patch(view, "/?project=alpha&show=review")
@@ -825,7 +1018,8 @@ defmodule SymphonyElixir.ServiceWebTest do
 
     html = render_patch(view, "/?project=beta")
     assert html =~ ~s(class="project-pill is-active")
-    refute html =~ ~s(<span class="project-chip">)
+    assert has_element?(view, ".issue-card-id span", "beta")
+    refute has_element?(view, ".issue-card-id span", "alpha")
     assert render_patch(view, "/?project=beta") =~ ~s(class="project-pill is-active")
 
     {:ok, _view, html} = live(build_conn(), "/agents/alpha/MT-7")
@@ -860,6 +1054,22 @@ defmodule SymphonyElixir.ServiceWebTest do
     {:ok, _view, html} = live(build_conn(), "/")
     assert html =~ "is-failed"
     assert html =~ "missing workflow"
+  end
+
+  defp put_board_blocked_issue do
+    issue = %Issue{
+      id: "board-blocked",
+      identifier: "MT-8",
+      title: "Review GPU recovery",
+      state: "In Progress",
+      labels: ["hold", "area:product"],
+      dispatchable: true
+    }
+
+    :sys.replace_state(Project.via("alpha", :orchestrator), fn state ->
+      blocked = %{identifier: issue.identifier, issue: issue, error: "Waiting for validation evidence"}
+      %{state | polled_issues: state.polled_issues ++ [issue], blocked: Map.put(state.blocked, issue.id, blocked)}
+    end)
   end
 
   defp wait_for(check, attempts \\ 100) do

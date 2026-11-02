@@ -971,13 +971,14 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     assert :sys.get_state(pid).retry_attempts[issue.id].attempt == 2
     assert Governor.snapshot().busy == 0
 
+    # Remove first-turn markers while admission is still held. Releasing the
+    # drain may let the normal retry resume before this process reads its state.
+    File.rm!(Path.join(fixture.root, "turn-started"))
+    File.rm!(Path.join(fixture.root, "finish-turn"))
     Port.command(owner, "exit\n")
     assert_receive {^owner, {:exit_status, 0}}, 5_000
     assert Governor.draining?() == false
-    File.rm!(Path.join(fixture.root, "turn-started"))
-    File.rm!(Path.join(fixture.root, "finish-turn"))
-    retry = :sys.get_state(pid).retry_attempts[issue.id]
-    send(pid, {:retry_issue, issue.id, retry.retry_token})
+    if retry = :sys.get_state(pid).retry_attempts[issue.id], do: send(pid, {:retry_issue, issue.id, retry.retry_token})
     eventually(fn -> File.exists?(Path.join(fixture.root, "turn-started")) end)
     resumed = :sys.get_state(pid).running[issue.id]
     assert resumed.item_attempt == entry.item_attempt

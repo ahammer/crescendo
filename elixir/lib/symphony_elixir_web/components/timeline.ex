@@ -72,7 +72,7 @@ defmodule SymphonyElixirWeb.Timeline do
           </li>
 
           <li class="tl-group tl-now">Now</li>
-          <li :if={@running == []} class="tl-empty"><%= if @payload[:snapshot_status] == "partial", do: "Running work unknown.", else: "No agent is running." %></li>
+          <li :if={@running == []} class="tl-empty"><%= if @payload[:snapshot_status] == "partial", do: "Running work unknown.", else: "No matching agent is running." %></li>
           <li :for={entry <- @running} class="tl-row tl-phase-now">
             <.link navigate={agent_path(entry)} class="tl-link" aria-label={"Inspect #{entry.issue_identifier}"}>
               <.tl_node icon={category_icon(entry.issue_identifier)} tone="live" />
@@ -164,6 +164,22 @@ defmodule SymphonyElixirWeb.Timeline do
       _task -> "autopilot"
     end
   end
+
+  @doc "The source event's outcome label and safe title, shared by issue stories and history."
+  @spec describe_event(map()) :: %{label: String.t(), title: String.t() | nil}
+  def describe_event(event) do
+    event =
+      %{kind: "unknown", issue_identifier: nil, disposition: "unknown"}
+      |> Map.merge(event)
+      |> Map.update!(:kind, &text_or(&1, "unknown"))
+      |> Map.update!(:disposition, &text_or(&1, "unknown"))
+
+    title = event_title(event)
+    %{label: event_label(event), title: if(is_binary(title), do: String.slice(title, 0, 240))}
+  end
+
+  defp text_or(value, _fallback) when is_binary(value), do: value
+  defp text_or(_value, fallback), do: fallback
 
   defp event_group(%{kind: kind}) when kind in ["pr_merged", "pr_closed", "pr_opened", "pr_reopened", "item_disposition", "issue_terminal", "retired", "blocked"], do: "prs"
   defp event_group(event), do: group(event[:issue_identifier])
