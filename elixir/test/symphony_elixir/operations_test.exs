@@ -24,7 +24,7 @@ defmodule SymphonyElixir.OperationsTest do
 
     {:ok, table} = Operations.open(path, :symphony_operations_test)
     snapshot = Operations.snapshot(table)
-    assert snapshot.recorded.usd_micro == 1_050_000
+    assert snapshot.recorded.usd_micro == 2_100_000
     # The throttle's budget check reads the same total without folding the whole ledger.
     assert Operations.spend_today(table) == snapshot.today.usd_micro
     assert Operations.spend_today(nil) == 0
@@ -61,8 +61,8 @@ defmodule SymphonyElixir.OperationsTest do
     Operations.disposition(table, accepted)
     Operations.finish_run(table, "accepted-run", "stopped", %{issue_identifier: "GH-2"})
     Operations.finish_run(table, "accepted-run", "failed", %{issue_identifier: "GH-2"})
-    assert %{usd_micro: 1_000_000, runs: 1} = Operations.item_usage(table, "GH-2")
-    assert Enum.any?(Operations.snapshot(table).activity, &match?(%{kind: "stopped", seconds: seconds, usd_micro: 1_000_000} when is_integer(seconds), &1))
+    assert %{usd_micro: 2_000_000, runs: 1} = Operations.item_usage(table, "GH-2")
+    assert Enum.any?(Operations.snapshot(table).activity, &match?(%{kind: "stopped", seconds: seconds, usd_micro: 2_000_000} when is_integer(seconds), &1))
 
     Operations.disposition(table, %{identifier: "GH-3", url: nil, labels: ["crescendo:delivery:split"]})
     Operations.disposition(table, %{identifier: "GH-4", url: nil, labels: [], state_reason: "not_planned"})
@@ -558,7 +558,7 @@ defmodule SymphonyElixir.OperationsTest do
     assert rates["gpt-7"] == {1_500_000, 150_000, 6_000_000}
     assert rates["gpt-6-astra"] == Operations.rates(nil)["gpt-6-astra"]
     assert Operations.price_date(settings.pricing) == "2026-10-01"
-    assert Operations.price_date(nil) == "2026-09-24"
+    assert Operations.price_date(nil) == "2026-11-07"
 
     path = Path.join(System.tmp_dir!(), "symphony-operations-pricing-#{System.unique_integer([:positive])}.dets")
     on_exit(fn -> File.rm(path) end)
@@ -585,12 +585,12 @@ defmodule SymphonyElixir.OperationsTest do
     :ok = Operations.usage(table, "run-3", "mystery-model", delta, "GH-9")
     :ok = Operations.usage(table, "run-4", "gpt-6-sol", %{input_tokens: 0}, "GH-9")
 
-    # gpt-6-sol $1.50 + gpt-6-luna $0.075 for the same run.
-    assert %{usd_micro: 1_575_000, total_tokens: 2_200_000, unpriced_tokens: 0} = Operations.run_usage(table, "run-1")
+    # gpt-6-sol $3.00 + gpt-6-luna $0.15 for the same run.
+    assert %{usd_micro: 3_150_000, total_tokens: 2_200_000, unpriced_tokens: 0} = Operations.run_usage(table, "run-1")
     assert %{usd_micro: 0, total_tokens: 0} = Operations.run_usage(table, "missing")
 
     item = Operations.item_usage(table, "GH-9")
-    assert %{usd_micro: 3_075_000, total_tokens: 4_400_000, unpriced_tokens: 1_100_000, runs: 3} = item
+    assert %{usd_micro: 6_150_000, total_tokens: 4_400_000, unpriced_tokens: 1_100_000, runs: 3} = item
     assert item.since == Date.utc_today() |> Date.to_iso8601()
     assert %{runs: 0, since: nil} = Operations.item_usage(table, "GH-404")
 
@@ -719,12 +719,12 @@ defmodule SymphonyElixir.OperationsTest do
     snapshot = Operations.snapshot(table)
 
     assert snapshot.by_task == [
-             %{model: "gpt-6.1-sol", category: "delivery", runs: 1, usd_micro: 1_000_000, timed: 1, seconds: 0},
+             %{model: "gpt-6.1-sol", category: "delivery", runs: 1, usd_micro: 2_000_000, timed: 1, seconds: 0},
              %{model: "gpt-6.1-sol", category: "marketing", runs: 1, usd_micro: 0, timed: 0, seconds: 0},
              %{model: "unknown", category: "review", runs: 1, usd_micro: 0, timed: 0, seconds: 0}
            ]
 
-    assert %{kind: "completed", title: "Fix it", category: "delivery", seconds: 0, usd_micro: 1_000_000} =
+    assert %{kind: "completed", title: "Fix it", category: "delivery", seconds: 0, usd_micro: 2_000_000} =
              Enum.find(snapshot.activity, &(&1[:issue_identifier] == "GH-1" and &1.kind == "completed"))
 
     assert Enum.map(["PR-9", "research-qa", "research-marketing", "GH-3", nil], &Operations.task_category/1) ==

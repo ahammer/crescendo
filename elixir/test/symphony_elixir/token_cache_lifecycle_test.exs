@@ -150,10 +150,10 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
       assert_received {:late, %{event: :account_usage, model: "gpt-6-astra"}}
 
       snapshot = Operations.snapshot(table)
-      assert [%{model: "gpt-6-astra", total_tokens: 240, usd_micro: 1_280}] = snapshot.by_model
+      assert [%{model: "gpt-6-astra", total_tokens: 240, usd_micro: 2_560}] = snapshot.by_model
       assert snapshot.recorded.unpriced_tokens == 0
       assert snapshot.accounting.terminal_observed == 1
-      assert Enum.all?(snapshot.activity, &(&1.usd_micro == 1_280))
+      assert Enum.all?(snapshot.activity, &(&1.usd_micro == 2_560))
     end
   end
 
@@ -598,7 +598,7 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     assert {:ok, %{total_tokens: 0, cached_input_tokens: 80}} =
              Operations.thread_usage(table, key, "two", "gpt-6-sol", late, "GH-1", rates)
 
-    assert Operations.run_usage(table, "one").usd_micro == 128
+    assert Operations.run_usage(table, "one").usd_micro == 256
 
     next = %{
       first
@@ -679,12 +679,12 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     Operations.start_run(table, "one", %{issue_identifier: "GH-1"})
     Operations.thread_usage(table, key, "one", "gpt-6-sol", first, "GH-1", Operations.rates(nil))
     Operations.finish_run(table, "one", "completed", %{issue_identifier: "GH-1", model: "gpt-6-sol"})
-    assert hd(Operations.snapshot(table).by_task).usd_micro == 200
+    assert hd(Operations.snapshot(table).by_task).usd_micro == 400
     changed_rates = %{"gpt-6-sol" => {99_000_000, 0, 99_000_000}}
     late = %{first | total: Usage.normalize(%{input_tokens: 100, output_tokens: 20, cached_input_tokens: 80})}
     Operations.thread_usage(table, key, "two", "gpt-6-sol", late, "GH-1", changed_rates)
-    assert Operations.run_usage(table, "one").usd_micro == 128
-    assert hd(Operations.snapshot(table).by_task).usd_micro == 128
+    assert Operations.run_usage(table, "one").usd_micro == 256
+    assert hd(Operations.snapshot(table).by_task).usd_micro == 256
   end
 
   test "native account snapshots replace cumulative values and null is unknown" do
@@ -904,6 +904,63 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     end)
 
     assert Enum.count(requests(fixture), &(&1["method"] == "turn/start")) == 3
+  end
+
+  test "Astra permission loss yields a real worker without spending its logical attempt" do
+    fixture = native_fixture()
+    issue = %{fixture.issue | state: "In Progress", dispatchable: true, labels: ["symphony:model:astra"]}
+    change_fixture(fixture, %{"wait_turn" => true})
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.join(fixture.root, "workspaces"),
+      codex_command: "python3 #{Path.join(fixture.root, "server.py")}",
+      max_turns: 3,
+      codex_routing: %{
+        "label_prefix" => "symphony:model:",
+        "default" => %{"model" => "gpt-6.1-sol", "effort" => "high"},
+        "labels" => %{"symphony:model:astra" => %{"model" => "gpt-6-astra", "effort" => "low"}}
+      }
+    )
+
+    start_supervised!({WorkflowStore, name: Project.via("permission-test", :workflow_store), project: "permission-test", path: Workflow.workflow_file_path()})
+    {:ok, service} = Service.parse(%{"paths" => %{"state" => "permission-state"}, "projects" => %{"permission-test" => %{}}}, Path.join(fixture.root, "service.yml"))
+    previous = Service.current()
+    Service.put_current(service)
+    on_exit(fn -> :persistent_term.put({Service, :current}, previous) end)
+    assert {:ok, _} = SymphonyElixir.SmartassMode.set(service, %{"enabled" => true})
+    start_supervised!({Governor, service})
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    supervisor = start_supervised!(Task.Supervisor)
+
+    pid =
+      start_supervised!(
+        {Orchestrator,
+         task_supervisor: supervisor,
+         name: Project.via("permission-test", :orchestrator),
+         project: "permission-test",
+         operations_path: Path.join(fixture.root, "permission.dets"),
+         operations_table: :permission_worker_test}
+      )
+
+    eventually(fn -> File.exists?(Path.join(fixture.root, "turn-started")) end)
+    entry = :sys.get_state(pid).running[issue.id]
+    assert {:ok, _} = SymphonyElixir.SmartassMode.set(service, %{"enabled" => false})
+    File.write!(Path.join(fixture.root, "finish-turn"), "")
+    eventually(fn -> :sys.get_state(pid).running == %{} end)
+    state = :sys.get_state(pid)
+    assert state.autopilot.item_attempts == %{}
+    assert Governor.snapshot().busy == 0
+    assert state.retry_attempts[issue.id].attempt == 0
+    assert [{_, %{status: "interrupted", reason: "model_policy_hold", item_attempt: 1}}] = :dets.lookup(:permission_worker_test, {:lineage_run, entry.run_id})
+    assert Enum.count(requests(fixture), &(&1["method"] == "turn/start")) == 1
+    send(pid, {:DOWN, entry.ref, :process, entry.pid, {:shutdown, :model_policy_hold}})
+    assert :sys.get_state(pid).autopilot.item_attempts == %{}
+    assert {:ok, _} = SymphonyElixir.SmartassMode.set(service, %{"enabled" => true})
+    File.rm!(Path.join(fixture.root, "turn-started"))
+    retry = :sys.get_state(pid).retry_attempts[issue.id]
+    send(pid, {:retry_issue, issue.id, retry.retry_token})
+    eventually(fn -> File.exists?(Path.join(fixture.root, "turn-started")) end)
   end
 
   test "a real service worker yields at a completed turn and resumes the same logical attempt" do

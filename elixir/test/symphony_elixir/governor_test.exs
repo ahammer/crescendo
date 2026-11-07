@@ -89,6 +89,22 @@ defmodule SymphonyElixir.GovernorTest do
     end
   end
 
+  test "configuration failure stops repeated requests for its parent", %{service: service, state_root: root} do
+    {service, context} = helper_fixture(service, root, 2)
+    start_supervised!({Governor, service})
+    Governor.checkin("a", 0, 0)
+    Governor.checkin("b", 0, 0)
+    Governor.acquire("a", "parent", :issue)
+    failure = fn _, _, _ -> {:error, {:helper_configuration, :inspection_timeout}} end
+    Application.put_env(:symphony_elixir, :helper_runner, failure)
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :helper_runner) end)
+    assert {:ok, child} = Governor.helper_start(context, %{"question" => "Inspect"})
+    assert_eventually(fn -> Governor.snapshot().helpers.busy == 0 end)
+    assert {:error, :helper_configuration_disabled_for_parent} = Governor.helper_start(context, %{"question" => "Inspect again"})
+    assert {:ok, %{status: "failed", result: %{error: message}}} = Governor.helper_status(child.helper_id)
+    assert message =~ "inspection_timeout"
+  end
+
   test "helper history is bounded, raw exits fail visibly, and start errors do not consume capacity", %{service: service, state_root: root} do
     {service, context} = helper_fixture(service, root, 2)
     start_supervised!({Governor, service})

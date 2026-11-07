@@ -1,6 +1,51 @@
 defmodule SymphonyElixir.AppServerTest do
   use SymphonyElixir.TestSupport
 
+  test "Astra requires explicit permission and expiry stops the next native turn" do
+    root = Path.join(System.tmp_dir!(), "smartass-native-#{System.unique_integer([:positive])}")
+    workspace = Path.join(root, "workspaces/ASTRA-1")
+    binary = Path.join(root, "codex.py")
+    observed = Path.join(root, "messages")
+    File.mkdir_p!(workspace)
+    previous = SymphonyElixir.Service.current()
+    service = %SymphonyElixir.Service{state_root: root}
+
+    on_exit(fn ->
+      :persistent_term.put({SymphonyElixir.Service, :current}, previous)
+      File.rm_rf(root)
+    end)
+
+    File.write!(binary, """
+    import json, sys
+    with open(sys.argv[1], 'a') as log:
+      for line in sys.stdin:
+        m=json.loads(line); log.write(line); log.flush()
+        method=m.get('method')
+        if method == 'initialize': result={}
+        elif method == 'thread/start': result={'thread':{'id':'astra'},'model':'gpt-6-astra'}
+        elif method == 'turn/start': result={'turn':{'id':'one'}}
+        else: continue
+        print(json.dumps({'id':m['id'],'result':result}),flush=True)
+        if method == 'turn/start': print(json.dumps({'method':'turn/completed','params':{'turn':{'status':'completed'}}}),flush=True)
+    """)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: Path.join(root, "workspaces"), codex_command: "python3 #{binary} #{observed}")
+    SymphonyElixir.Service.put_current(service)
+    route = %{"model" => "gpt-6-astra", "effort" => "low"}
+    assert {:error, :smartass_required} = AppServer.start_session(workspace, model_route: route)
+    refute File.exists?(observed)
+    assert {:ok, _} = SymphonyElixir.SmartassMode.set(service, %{"enabled" => true})
+    assert {:error, :smartass_required} = AppServer.start_session(workspace)
+    assert {:error, :smartass_required} = AppServer.start_session(workspace, model_route: %{"model" => "gpt-6.1-sol"})
+    assert {:ok, session} = AppServer.start_session(workspace, model_route: route)
+    assert {:ok, _} = AppServer.run_turn(session, "work", %Issue{id: "astra", identifier: "ASTRA-1"})
+    File.write!(Path.join(root, "smartass-mode.json"), Jason.encode!(%{enabled: true, expires_at: "2000-01-01T00:00:00Z", updated_at: "2000-01-01T00:00:00Z"}))
+    assert {:error, :smartass_required} = AppServer.run_turn(session, "later", %Issue{id: "astra", identifier: "ASTRA-1"})
+    AppServer.stop_session(session)
+    turns = File.read!(observed) |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1) |> Enum.filter(&(&1["method"] == "turn/start"))
+    assert length(turns) == 1
+  end
+
   test "service Fast defaults reach every agent kind and existing sessions return to standard on disable or expiry" do
     root = Path.join(System.tmp_dir!(), "crescendo-tier-session-#{System.unique_integer([:positive])}")
     workspace = Path.join(root, "workspaces/FAST-1")

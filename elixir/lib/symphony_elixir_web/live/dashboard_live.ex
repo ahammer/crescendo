@@ -228,6 +228,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </div>
           <details class="worker-details"><summary>Worker slots and automatic retries</summary><.attention blocked={@payload.blocked} retrying={@payload.retrying} now={@now} /><.agent_card :for={entry <- @payload.running} entry={entry} now={@now} mixed={mixed?(@payload)} /><.free_slot :for={next <- free_slots(@payload)} next={next} idle={idle_reason(@payload, @now)} /></details>
 
+          <p :if={@payload[:smartass_mode]} id="smartass-mode" class="workspace-subtitle">Astra permission: <%= if @payload.smartass_mode.enabled, do: "On", else: "Off" %><span :if={@payload.smartass_mode.expires_at}> until <%= @payload.smartass_mode.expires_at %></span></p>
           <p :if={@payload[:priority_mode]} id="priority-mode" class="workspace-subtitle">Fast mode: <%= if @payload.priority_mode.enabled, do: "On", else: "Off" %><span :if={@payload.priority_mode.expires_at}> until <%= @payload.priority_mode.expires_at %></span><span :if={@payload.priority_mode.error}> · Policy unavailable; standard speed</span></p>
         </aside>
 

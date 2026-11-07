@@ -5,7 +5,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, Governor, ModelRouting, Project, PromptBuilder, QuietContinuation}
+  alias SymphonyElixir.{Config, Governor, ModelRouting, Project, PromptBuilder, QuietContinuation, SmartassMode}
   alias SymphonyElixir.{Startup, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
@@ -29,6 +29,9 @@ defmodule SymphonyElixir.AgentRunner do
     case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
       :ok ->
         :ok
+
+      {:error, :smartass_required} ->
+        exit({:shutdown, :model_policy_hold})
 
       {:yield, :deployment_drain} ->
         exit({:shutdown, :deployment_drain})
@@ -74,6 +77,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp startup_step(phase, fun) do
     case fun.() do
+      {:error, :smartass_required} = hold -> hold
       {:error, reason} -> {:error, {:startup_failed, Startup.diagnostic(phase, reason)}}
       result -> result
     end
@@ -196,6 +200,7 @@ defmodule SymphonyElixir.AgentRunner do
            select_route(issue, Keyword.get(opts, :item_attempt, 1))
          end) do
       {:wait, reason} -> {:error, {:model_route_waiting, reason}}
+      {:ok, route} -> with :ok <- SmartassMode.admit_route(route), do: {:ok, route}
       result -> result
     end
   end
@@ -228,9 +233,10 @@ defmodule SymphonyElixir.AgentRunner do
     model = (route || %{})["model"]
 
     session =
-      case SymphonyElixir.Helpers.enabled?() do
-        true -> SymphonyElixir.Helpers.lead_session(codex, model)
-        false -> {:ok, codex, nil}
+      cond do
+        SymphonyElixir.Helpers.enabled?() -> SymphonyElixir.Helpers.lead_session(codex, model)
+        Project.current() != nil -> {:ok, codex, %{"features.multi_agent" => false, "features.multi_agent_v2" => false, "agents.max_threads" => 1}}
+        true -> {:ok, codex, nil}
       end
 
     with {:ok, codex, config} <- session do
@@ -251,7 +257,9 @@ defmodule SymphonyElixir.AgentRunner do
        ) do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
 
-    with :ok <- persist_checkpoint(app_session, issue, codex_update_recipient, opts, %{eligible: false}),
+    with :ok <- SmartassMode.admit_route(app_session.model_route),
+         :ok <- SmartassMode.admit_effective(app_session.model_route, app_session.metadata[:model]),
+         :ok <- persist_checkpoint(app_session, issue, codex_update_recipient, opts, %{eligible: false}),
          {:ok, turn_session} <-
            AppServer.run_turn(
              app_session,

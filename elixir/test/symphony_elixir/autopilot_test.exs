@@ -17,6 +17,18 @@ defmodule SymphonyElixir.AutopilotTest do
 
   @empty %{pr_handled: %{}, tasks: %{}, item_attempts: %{}, handoff_owners: %{}, retired_items: %{}}
 
+  test "policy interrupted PRs return only the admitted slot and preserve handled history" do
+    issue = %Issue{kind: :pull_request, id: "policy-pr"}
+    state = %{pr_handled: %{"policy-pr" => %{runs: 2, head_sha: "prior", handled_at_ms: 5}}, tasks: %{}, item_attempts: %{}}
+    result = Autopilot.record_pull_interrupted(state, issue)
+    assert result.pr_handled["policy-pr"] == %{runs: 1, head_sha: "prior", handled_at_ms: 5}
+    assert Autopilot.record_pull_interrupted(result, %Issue{kind: :issue}) == result
+    empty = %{state | pr_handled: %{}}
+    assert Autopilot.record_pull_interrupted(empty, issue).pr_handled["policy-pr"].runs == 0
+    interrupted = Autopilot.record_pull_interrupted(empty, issue)
+    assert Autopilot.record_pull_interrupted(interrupted, issue).pr_handled["policy-pr"].runs == 0
+  end
+
   test "unchanged preflight advances only its cheap check cursor, survives persistence, and reopens after a day" do
     settings = %{@settings | channels: %{"grooming" => %{"focus" => "Groom", "every" => "30m", "when" => "anytime", "exclusive" => "none", "skip_unchanged" => true}}}
     time = ~U[2026-10-07 00:00:00Z]
@@ -1259,7 +1271,7 @@ defmodule SymphonyElixir.AutopilotTest do
 
       operations = Orchestrator.snapshot(name, 5_000).operations
       assert %{completed: 1, stopped: 1, blocked_attempts: 1, accepted_deliveries: 1} = List.last(operations.daily)
-      assert operations.recorded.usd_micro == 1_000_000
+      assert operations.recorded.usd_micro == 2_000_000
       send(pid, :run_poll_cycle)
       assert Orchestrator.snapshot(name, 5_000).operations.daily == operations.daily
 

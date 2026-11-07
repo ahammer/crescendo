@@ -69,3 +69,7 @@ kept as published; Crescendo's extensions are documented in [docs/crescendo.md](
 
 This project is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for
 attribution.
+
+Ordinary work can use Luna, Terra and Sol by task size. Astra is an explicit operator-selected
+route requiring timed smartass permission. More agents overlap reasoning and inspection; heavy
+GPU/build/test work continues to share one machine lease. See [operations](docs/crescendo.md).

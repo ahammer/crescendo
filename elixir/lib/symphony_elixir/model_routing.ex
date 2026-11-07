@@ -138,6 +138,17 @@ defmodule SymphonyElixir.ModelRouting do
   # changed selection; `tier` and `start_tier` record the climb.
   defp escalate(%{"ladder" => ladder, "escalation" => offsets}, %{} = route, item_attempt) do
     start = tier(ladder, route)
+
+    if is_nil(start) do
+      route
+    else
+      escalate_step(ladder, offsets, route, item_attempt, start)
+    end
+  end
+
+  defp escalate(_routing, route, _item_attempt), do: route
+
+  defp escalate_step(ladder, offsets, route, item_attempt, start) do
     offset = Enum.at(offsets, min(max(item_attempt, 1), length(offsets)) - 1)
     step = min(start + offset, length(ladder) - 1)
 
@@ -146,8 +157,6 @@ defmodule SymphonyElixir.ModelRouting do
     |> Map.merge(Map.take(route, ["label", "size"]))
     |> Map.merge(%{"tier" => step, "start_tier" => start})
   end
-
-  defp escalate(_routing, route, _item_attempt), do: route
 
   defp back_off(_routing, nil, _avoid), do: {:ok, nil}
 
@@ -216,7 +225,7 @@ defmodule SymphonyElixir.ModelRouting do
     do: [routing["default"] | Map.values(routing["labels"])] ++ Map.values(routing["sizes"] || %{}) ++ (routing["ladder"] || [])
 
   defp validate_ladder(%{"ladder" => [_ | _] = ladder, "escalation" => escalation} = routing) do
-    starts = [routing["default"] | Map.values(routing["labels"])] ++ Map.values(routing["sizes"] || %{})
+    starts = [routing["default"] | Map.values(routing["sizes"] || %{})]
 
     cond do
       Enum.any?(ladder, &validate_route_entry/1) ->
@@ -229,7 +238,7 @@ defmodule SymphonyElixir.ModelRouting do
         {:error, "escalation must be a non-empty, non-decreasing list of non-negative integers"}
 
       Enum.any?(starts, &is_nil(tier(ladder, &1))) ->
-        {:error, "the default and every label and size route must be a ladder step"}
+        {:error, "the default and every size route must be a ladder step"}
 
       true ->
         :ok

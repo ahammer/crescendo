@@ -11,15 +11,15 @@ defmodule SymphonyElixir.Operations do
   # no older than the artifact store keeps their files.
   @image_limit 400
   @image_days 3
-  @price_date "2026-09-24"
+  @price_date "2026-11-07"
   # Standard, short-context API prices in micro-USD per million tokens
   # (input, cached input, output); `pricing.models` overrides or adds models.
   @rates %{
-    # Placeholder at Sol 6.0's prices until `pricing.models` sets the real ones.
-    "gpt-6.1-sol" => {1_000_000, 100_000, 5_000_000},
-    "gpt-6-astra" => {5_000_000, 500_000, 25_000_000},
-    "gpt-6-sol" => {1_000_000, 100_000, 5_000_000},
-    "gpt-6-luna" => {50_000, 5_000, 250_000},
+    "gpt-6.1-sol" => {2_000_000, 100_000, 10_000_000},
+    "gpt-6.1-terra" => {1_000_000, 50_000, 5_000_000},
+    "gpt-6-astra" => {10_000_000, 1_000_000, 50_000_000},
+    "gpt-6-sol" => {2_000_000, 200_000, 10_000_000},
+    "gpt-6-luna" => {100_000, 10_000, 500_000},
     "gpt-5.6-sol" => {4_000_000, 400_000, 20_000_000},
     "gpt-5.6-terra" => {2_000_000, 200_000, 12_000_000},
     "gpt-5.6-luna" => {200_000, 20_000, 1_200_000},
