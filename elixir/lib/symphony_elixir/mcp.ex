@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.MCP do
   @moduledoc "Local stdio MCP for operator controls; it never starts an orchestrator or exposes a web mutation."
 
-  alias SymphonyElixir.{PriorityMode, Service}
+  alias SymphonyElixir.{PriorityMode, Service, SmartassMode}
 
   @versions ~w(2025-11-25 2025-06-18 2025-03-26 2024-11-05)
 
@@ -61,10 +61,30 @@ defmodule SymphonyElixir.MCP do
   defp call("crescendo_priority_mode_get", args, service, _operator) when args == %{}, do: {:ok, PriorityMode.status(service)}
   defp call("crescendo_priority_mode_set", _args, _service, false), do: {:error, "priority changes require an operator session"}
   defp call("crescendo_priority_mode_set", args, service, true) when is_map(args), do: PriorityMode.set(service, args)
+  defp call("crescendo_smartass_mode_get", args, service, _operator) when args == %{}, do: {:ok, SmartassMode.status(service)}
+  defp call("crescendo_smartass_mode_set", _args, _service, false), do: {:error, "smartass changes require an operator session"}
+  defp call("crescendo_smartass_mode_set", args, service, true) when is_map(args), do: SmartassMode.set(service, args)
   defp call(_name, _args, _service, _operator), do: {:error, "unknown tool or invalid arguments"}
 
   defp tools do
     [
+      %{
+        name: "crescendo_smartass_mode_get",
+        description: "Read the service-wide Astra permission and expiry.",
+        inputSchema: %{type: "object", properties: %{}, additionalProperties: false},
+        annotations: %{readOnlyHint: true}
+      },
+      %{
+        name: "crescendo_smartass_mode_set",
+        description: "Operator-only timed Astra permission. Defaults to 60 minutes; ordinary routes and Fast mode stay separate.",
+        inputSchema: %{
+          type: "object",
+          properties: %{enabled: %{type: "boolean"}, expires_at: %{type: "string", format: "date-time"}},
+          required: ["enabled"],
+          additionalProperties: false
+        },
+        annotations: %{readOnlyHint: false, destructiveHint: false, idempotentHint: false}
+      },
       %{
         name: "crescendo_priority_mode_get",
         description: "Read the service-wide OpenAI Fast-mode default and its expiry for all Crescendo agents.",

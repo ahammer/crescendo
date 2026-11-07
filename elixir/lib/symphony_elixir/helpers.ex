@@ -301,11 +301,8 @@ defmodule SymphonyElixir.Helpers do
     tokens = OptionParser.split(context.codex_settings.command)
     prefix = Enum.take_while(tokens, &(&1 != "app-server"))
 
-    with true <- "app-server" in tokens,
-         [executable | args] <- prefix,
-         {json, 0} <- command(context.workspace, System.find_executable(executable), args ++ ["mcp", "list", "--json"]),
-         {:ok, servers} when is_list(servers) <- Jason.decode(json),
-         true <- Enum.all?(servers, &is_binary(&1["name"])),
+    with {:ok, executable, args} <- configuration_command(tokens, prefix),
+         {:ok, servers} <- configuration_servers(context.workspace, executable, args),
          {:ok, catalog} <- model_catalog(:helper) do
       disabled = Map.new(servers, &{&1["name"], %{"enabled" => false}})
 
@@ -317,8 +314,40 @@ defmodule SymphonyElixir.Helpers do
 
       {:ok, catalog_command(context.codex_settings.command, catalog, config), config}
     else
-      _ -> {:error, :helper_tool_configuration_unknown}
+      {:error, reason} -> {:error, {:helper_configuration, reason}}
     end
+  end
+
+  defp configuration_command(tokens, [executable | args]) do
+    case {"app-server" in tokens, System.find_executable(executable)} do
+      {true, path} when is_binary(path) -> {:ok, path, args}
+      _ -> {:error, :command_unavailable}
+    end
+  end
+
+  defp configuration_command(_tokens, _prefix), do: {:error, :command_unavailable}
+
+  defp configuration_servers(workspace, executable, args) do
+    case command(workspace, executable, args ++ ["mcp", "list", "--json"]) do
+      {_, 124} ->
+        {:error, :inspection_timeout}
+
+      {json, 0} ->
+        case Jason.decode(json) do
+          {:ok, servers} when is_list(servers) ->
+            validate_servers(servers)
+
+          _ ->
+            {:error, :invalid_mcp_configuration}
+        end
+
+      _ ->
+        {:error, :inspection_failed}
+    end
+  end
+
+  defp validate_servers(servers) do
+    if Enum.all?(servers, &(is_map(&1) and is_binary(&1["name"]))), do: {:ok, servers}, else: {:error, :invalid_mcp_configuration}
   end
 
   defp shell_escape(value), do: "'" <> String.replace(value, "'", "'\"'\"'") <> "'"

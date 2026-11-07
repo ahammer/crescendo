@@ -191,9 +191,9 @@ defmodule SymphonyElixir.TerminalUsageTest do
     assert delta.total_tokens == 60
     assert [%{model: "gpt-6-astra", total_tokens: 180}] = Operations.snapshot(table).by_model
     yesterday = Enum.find(Operations.snapshot(table).daily, &(&1.date == date))
-    assert yesterday.spend_by_model == %{"gpt-6-astra" => 500}
+    assert yesterday.spend_by_model == %{"gpt-6-astra" => 1_000}
     assert Operations.snapshot(table).today.total_tokens == 120
-    assert Operations.run_usage(table, "run").usd_micro == 1_500
+    assert Operations.run_usage(table, "run").usd_micro == 3_000
   end
 
   test "pinned deployed schema supplies cumulative events but no thread-read usage snapshot" do

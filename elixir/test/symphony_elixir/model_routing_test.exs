@@ -40,6 +40,19 @@ defmodule SymphonyElixir.ModelRoutingTest do
     "labels" => %{"symphony:model:sol" => @sol_medium, "symphony:model:astra" => @astra_medium}
   }
 
+  test "an explicit fixed label stays outside the automatic ladder" do
+    routing = @ladder_routing |> Map.put("ladder", [@sol_medium, @sol_xhigh])
+    assert :ok = ModelRouting.validate(routing)
+
+    for attempt <- 1..4 do
+      assert {:ok, %{"model" => "gpt-6-astra", "effort" => "medium"} = route} =
+               ModelRouting.select_for_run(routing, %{}, %Issue{kind: :issue, labels: ["symphony:model:astra"]}, attempt)
+
+      refute Map.has_key?(route, "tier")
+      assert {:ok, %{"model" => "gpt-6-sol"}} = ModelRouting.select_for_run(routing, %{}, %Issue{kind: :issue, labels: []}, attempt)
+    end
+  end
+
   test "explicit routes, default, and fail-closed labels" do
     assert :ok = ModelRouting.validate(@routing)
 
@@ -137,8 +150,7 @@ defmodule SymphonyElixir.ModelRoutingTest do
           {&Map.put(&1, "escalation", [0, 2, 1]), "non-decreasing"},
           {&Map.put(&1, "escalation", [-1, 0]), "non-decreasing"},
           {&Map.put(&1, "escalation", 1), "non-decreasing"},
-          {&Map.put(&1, "default", %{"model" => "gpt-6-luna", "effort" => "max"}), "ladder step"},
-          {&put_in(&1, ["labels", "symphony:model:astra"], %{"model" => "gpt-6-astra", "effort" => "high"}), "ladder step"}
+          {&Map.put(&1, "default", %{"model" => "gpt-6-luna", "effort" => "max"}), "ladder step"}
         ] do
       assert {:error, error} = ModelRouting.validate(change.(@ladder_routing))
       assert error =~ message

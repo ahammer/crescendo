@@ -161,6 +161,7 @@ defmodule SymphonyElixir.Governor do
       not valid_helper_owner?(state, context) -> {:reply, {:error, :parent_not_running}, state}
       helpers_paused?(state) -> {:reply, {:error, :service_draining_or_starting}, state}
       research_reserved?(state) -> {:reply, {:error, :quiet_research_reserved}, state}
+      helper_configuration_failed?(state, owner) -> {:reply, {:error, :helper_configuration_disabled_for_parent}, state}
       helper_busy(state) >= state.service.helpers.slots -> {:reply, {:error, :helper_capacity}, state}
       helpers_throttled?(state) -> {:reply, {:error, :helper_throttled}, state}
       true -> start_helper(state, owner, prepared)
@@ -199,6 +200,7 @@ defmodule SymphonyElixir.Governor do
     {:reply,
      %{
        observed_at: DateTime.to_iso8601(now),
+       smartass_mode: SymphonyElixir.SmartassMode.status(state.service),
        slots: state.schedule.slots,
        busy: Scheduling.used(state.schedule),
        projects: projects,
@@ -262,6 +264,7 @@ defmodule SymphonyElixir.Governor do
   def handle_info({:helper_result, id, result}, state) do
     result =
       case result do
+        {:error, {:helper_configuration, _}} = error -> error
         {:error, reason} -> {:error, Helpers.error_text(reason)}
         other -> other
       end
@@ -471,12 +474,20 @@ defmodule SymphonyElixir.Governor do
   defp helpers_paused?(state), do: draining?(state) or warming_up?(state) or quiet_window(state).phase == "active"
 
   defp retain_helpers(helpers) when map_size(helpers) > 128 do
-    completed = for {id, %{pid: nil}} <- helpers, do: id
+    completed = for {id, %{pid: nil} = helper} <- helpers, not (match?({:error, {:helper_configuration, _}}, helper.result) and Process.alive?(helper.owner)), do: id
     Map.drop(helpers, Enum.take(completed, map_size(helpers) - 128))
   end
 
   defp retain_helpers(helpers), do: helpers
   defp helper_busy(state), do: Enum.count(state.helpers, fn {_id, helper} -> is_pid(helper.pid) end)
+
+  defp helper_configuration_failed?(state, owner) do
+    Enum.any?(state.helpers, fn
+      {_, %{owner: ^owner, result: {:error, {:helper_configuration, _}}}} -> true
+      _ -> false
+    end)
+  end
+
   defp helper_view(helper), do: Map.merge(helper.details, %{helper_id: helper.id, status: helper.status, result: public_helper_result(helper.result)})
   defp public_helper_result({:ok, value}), do: value
   defp public_helper_result({:error, reason}), do: %{error: Helpers.error_text(reason)}
@@ -489,6 +500,7 @@ defmodule SymphonyElixir.Governor do
 
   defp cancel_helper(helper), do: helper
   defp helper_outcome(%{result: {:ok, value}}, :normal), do: {"completed", value}
+  defp helper_outcome(%{result: {:error, {:helper_configuration, _} = reason}}, _), do: {"failed", reason}
   defp helper_outcome(%{result: {:error, reason}}, _), do: {"failed", Helpers.error_text(reason)}
   defp helper_outcome(%{status: "cancelling"}, _), do: {"stopped", "cancelled"}
   defp helper_outcome(_helper, reason), do: {"failed", Helpers.error_text(reason)}

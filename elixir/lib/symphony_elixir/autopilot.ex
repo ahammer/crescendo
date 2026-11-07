@@ -67,6 +67,14 @@ defmodule SymphonyElixir.Autopilot do
 
   def record_pull_dispatch(state, %Issue{}), do: state
 
+  @doc "Returns an admitted but policy-interrupted review slot without marking its head handled."
+  @spec record_pull_interrupted(state(), Issue.t()) :: state()
+  def record_pull_interrupted(state, %Issue{kind: :pull_request, id: id}) do
+    update_in(state, [:pr_handled, Access.key(id, %{})], &Map.update(&1, :runs, 0, fn runs -> max(runs - 1, 0) end))
+  end
+
+  def record_pull_interrupted(state, %Issue{}), do: state
+
   @doc """
   Marks the head commit a review pass was dispatched at, so the pull request
   waits for a new push (by its author or by the reviewer's own fixes) or for

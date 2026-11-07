@@ -13,13 +13,14 @@ defmodule SymphonyElixir.RunEnv do
 
   alias SymphonyElixir.{Config, HttpServer, Project}
 
-  @spec vars(String.t() | nil, String.t() | nil, String.t() | nil) :: [{String.t(), String.t()}]
-  def vars(work_item, route_label \\ nil, run_id \\ nil) do
+  @spec vars(String.t() | nil, String.t() | nil, String.t() | nil, String.t() | nil) :: [{String.t(), String.t()}]
+  def vars(work_item, route_label \\ nil, run_id \\ nil, size \\ nil) do
     project = Project.current()
     state_url = state_url(HttpServer.bound_port())
 
     [
       pair("SYMPHONY_SELECTED_MODEL_LABEL", route_label),
+      pair("SYMPHONY_SELECTED_SIZE", if(route_label, do: size || "")),
       pair("SYMPHONY_WORK_ITEM", work_item),
       pair("CRESCENDO_RUN_ID", run_id),
       pair("CRESCENDO_WORK_ITEM", qualified(project, work_item)),

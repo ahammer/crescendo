@@ -40,6 +40,22 @@ defmodule SymphonyElixir.HelpersTest do
     %{root: root, context: context}
   end
 
+  test "configuration diagnostics are bounded and distinguish command, MCP and timeout failures", %{context: context} do
+    assert {:ok, prepared} = Helpers.prepare(context, %{"question" => "Inspect one owner"})
+    details = %{run_id: "probe", issue_identifier: "helper-probe"}
+
+    for {command, reason} <- [
+          {"/bin/false app-server", :inspection_failed},
+          {"/bin/echo app-server", :invalid_mcp_configuration},
+          {"python3 -c 'print(42)' app-server", :invalid_mcp_configuration},
+          {~s|python3 -c 'print("[4]")' app-server|, :invalid_mcp_configuration},
+          {"python3 -c 'import time; time.sleep(10)' app-server", :inspection_timeout},
+          {"", :command_unavailable}
+        ] do
+      assert {:error, {:helper_configuration, ^reason}} = Helpers.run(put_in(prepared.context.codex_settings.command, command), details, %Service.Helpers{})
+    end
+  end
+
   test "lead catalogs suppress forced delegation while keeping native editing", %{root: root} do
     Service.put_current(%Service{state_root: root})
     assert {:ok, codex, config} = Helpers.lead_session(Config.settings!().codex)
@@ -151,10 +167,10 @@ defmodule SymphonyElixir.HelpersTest do
 
     codex = %{codex | command: "python3 '#{peer}' '#{observed}' approval app-server"}
     assert {:error, {:approval_required, _}} = Helpers.run(put_in(prepared.context.codex_settings, codex), details, %Service.Helpers{})
-    assert {:error, :helper_tool_configuration_unknown} = Helpers.run(put_in(prepared.context.codex_settings.command, "invalid"), details, %Service.Helpers{})
+    assert {:error, {:helper_configuration, :command_unavailable}} = Helpers.run(put_in(prepared.context.codex_settings.command, "invalid"), details, %Service.Helpers{})
     assert {:ok, _} = Helpers.run(put_in(prepared.context.recipient, nil), details, %Service.Helpers{})
     File.write!(Path.join(System.get_env("CODEX_HOME"), "models_cache.json"), "invalid")
-    assert {:error, :helper_tool_configuration_unknown} = Helpers.run(prepared, details, %Service.Helpers{})
+    assert {:error, {:helper_configuration, :helper_model_catalog_unknown}} = Helpers.run(prepared, details, %Service.Helpers{})
   end
 
   test "Git reads cannot keep a helper alive beyond their command deadline", %{root: root, context: context} do

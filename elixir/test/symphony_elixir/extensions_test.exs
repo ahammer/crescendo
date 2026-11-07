@@ -364,7 +364,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              "throttle" => nil,
              "usage" => %{
                "status" => "unavailable",
-               "pricing_as_of" => "2026-09-24",
+               "pricing_as_of" => "2026-11-07",
                "cost_basis" => "api_equivalent_estimate",
                "external" => %{
                  "attribution" => "unverified_cli_report",

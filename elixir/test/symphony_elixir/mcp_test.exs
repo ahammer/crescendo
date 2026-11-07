@@ -33,7 +33,7 @@ defmodule SymphonyElixir.MCPTest do
     replies = data |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
     assert [init, tools, set, get, invalid] = replies
     assert init["result"]["protocolVersion"] == "2025-11-25"
-    assert Enum.map(tools["result"]["tools"], & &1["name"]) == ["crescendo_priority_mode_get", "crescendo_priority_mode_set"]
+    assert Enum.map(tools["result"]["tools"], & &1["name"]) == ["crescendo_smartass_mode_get", "crescendo_smartass_mode_set", "crescendo_priority_mode_get", "crescendo_priority_mode_set"]
     assert set["result"]["structuredContent"]["service_tier"] == "fast"
     assert get["result"]["structuredContent"]["enabled"] == true
     assert invalid["error"]["code"] == -32_700
@@ -90,6 +90,15 @@ defmodule SymphonyElixir.MCPTest do
       end)
 
     assert {:error, "could not read MCP input"} = MCP.run(path, device, :stdio)
+  end
+
+  test "Astra permission is operator-owned and does not enable Fast mode", %{service: service} do
+    call = request(1, "tools/call", %{name: "crescendo_smartass_mode_set", arguments: %{enabled: true}})
+    assert {%{result: %{isError: true}}, true} = MCP.handle(call, service, true, false)
+    assert {%{result: %{structuredContent: %{enabled: true}}}, true} = MCP.handle(call, service, true, true)
+    refute PriorityMode.status(service).enabled
+    get = request(2, "tools/call", %{name: "crescendo_smartass_mode_get"})
+    assert {%{result: %{structuredContent: %{enabled: true}}}, true} = MCP.handle(get, service, true, false)
   end
 
   defp request(id, method, params), do: Jason.decode!(Jason.encode!(%{jsonrpc: "2.0", id: id, method: method, params: params}))

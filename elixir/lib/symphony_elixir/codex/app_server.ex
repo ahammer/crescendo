@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Codex.Usage, Config, PathSafety, PriorityMode, SSH}
+  alias SymphonyElixir.{Codex.DynamicTool, Codex.Usage, Config, PathSafety, PriorityMode, SmartassMode, SSH}
 
   @initialize_id 1
   @thread_start_id 2
@@ -66,7 +66,8 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     policies = Keyword.get(opts, :session_policies)
 
-    with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
+    with :ok <- SmartassMode.admit_route(model_route),
+         {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, port} <- start_port(expanded_workspace, worker_host, dynamic_tool_binding, session_env) do
       :ok = SymphonyElixir.ProcessGroup.protect(port)
       metadata = port_metadata(port, worker_host)
@@ -83,7 +84,8 @@ defmodule SymphonyElixir.Codex.AppServer do
                model_route,
                codex,
                opts
-             ) do
+             ),
+           :ok <- SmartassMode.admit_effective(model_route, native.metadata[:model]) do
         session = %{
           port: port,
           metadata: Map.merge(metadata, native.metadata),
@@ -381,7 +383,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   # Every command in the run inherits these: the delivery helper checks the
   # route label, and machine-wide tooling attributes work to the work item.
   defp session_vars(%{route: route, work_item: work_item, run_id: run_id}),
-    do: SymphonyElixir.RunEnv.vars(if(is_binary(work_item), do: work_item), route && route["label"], run_id)
+    do: SymphonyElixir.RunEnv.vars(if(is_binary(work_item), do: work_item), route && route["label"], run_id, route && route["size"])
 
   defp tracker_secret_port_env(dynamic_tool_binding) do
     dynamic_tool_binding.secret_environment_names
@@ -764,6 +766,13 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp start_turn(port, thread_id, prompt, workspace, approval_policy, turn_sandbox_policy, model_route) do
+    with :ok <- SmartassMode.admit_route(model_route),
+         :ok <- SmartassMode.admit_effective(model_route, Process.get({port, :metadata}, %{})[:model]) do
+      start_allowed_turn(port, thread_id, prompt, workspace, approval_policy, turn_sandbox_policy, model_route)
+    end
+  end
+
+  defp start_allowed_turn(port, thread_id, prompt, workspace, approval_policy, turn_sandbox_policy, model_route) do
     send_message(port, %{
       "method" => "turn/start",
       "id" => @turn_start_id,

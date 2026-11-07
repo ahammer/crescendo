@@ -960,3 +960,31 @@ and preserves the daily budget and weekly quota pause.
 
 The state API also serves `GET /api/v1/state?view=control` (optionally `&project=<id>`)
 for bounded live reconciliation. It excludes historical usage; see the [API contract](../docs/crescendo.md#dashboard-and-api).
+
+## Model tiers and timed Astra permission
+
+Ordinary delivery can start on Luna high for tiny work, Terra medium for small work,
+Sol high for medium/unclassified work, and Sol xhigh for large work. Explicit fixed
+model-label routes may live outside the automatic ladder and do not escalate. Size
+routes remain ladder starts. `SYMPHONY_SELECTED_SIZE` freezes size for delivery tools;
+model and size changes require a new run with the original logical budget.
+
+Astra requires explicit selection plus operator-owned timed smartass permission.
+`crescendo_smartass_mode_get/set` use local stdio MCP; enabling without `expires_at`
+expires after sixty minutes. Missing, invalid, unreadable or expired permission is off.
+The state API exposes `smartass_mode`; there is no HTTP mutation. Fast mode is separate.
+Dispatch and native thread/turn checks reject unselected/default Astra and ladder-derived
+Astra even when permission is on. Expiry lets the current turn finish, then yields
+without spending an implementation attempt, research round or PR review allowance.
+
+Managed leads disable native delegation; the separate helper pool remains read-only
+Luna max. Helper configuration errors identify command, inspection or catalog failure,
+and disable repeated requests for that parent lifetime. Agent environment selection
+must never run GPU preflight merely to inspect helper configuration.
+
+The initial rollout targets three primary workers and two helpers on one workstation.
+All heavy commands still serialize through the existing machine lease, including native
+journeys and measurements. Increase the workflow admission cap from one to two to three
+only after the documented accepted-delivery comparison; no simultaneous heavy GPU work
+is authorized. Current Standard short-context API estimates include Terra and updated
+Sol/Astra/Luna rates; historical atomic allocations retain their recorded prices.

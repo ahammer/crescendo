@@ -4,7 +4,7 @@ defmodule SymphonyElixirWeb.Presenter do
   """
 
   alias SymphonyElixir.{Config, Governor, Operations, Orchestrator, Project, Projects, Quota, Service}
-  alias SymphonyElixir.{PriorityMode, SourceRevision, StatusDashboard, Transcript, Workspace}
+  alias SymphonyElixir.{PriorityMode, SmartassMode, SourceRevision, StatusDashboard, Transcript, Workspace}
   alias SymphonyElixirWeb.{Redaction, ServiceSnapshot}
 
   # Quota older than this is shown as stale (throttling settings refine it).
@@ -67,6 +67,7 @@ defmodule SymphonyElixirWeb.Presenter do
     |> build(service_settings(service, selected, project), service_runtime(selected, project), now, opts)
     |> Map.merge(%{project: project, projects: project_list(service, snapshots)})
     |> Map.put(:priority_mode, PriorityMode.status(service))
+    |> Map.put(:smartass_mode, SmartassMode.status(service))
     |> Redaction.payload(redacted(service))
   end
 

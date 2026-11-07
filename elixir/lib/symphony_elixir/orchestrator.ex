@@ -525,7 +525,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp startup_exit_evidence(entry, {:shutdown, :deployment_drain}), do: entry
+  defp startup_exit_evidence(entry, {:shutdown, reason}) when reason in [:deployment_drain, :model_policy_hold], do: entry
 
   defp startup_exit_evidence(%{model_admitted: false} = entry, reason) when reason != :normal do
     Map.put_new(entry, :startup_failure, Startup.diagnostic(:worker_start, reason))
@@ -548,6 +548,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp worker_outcome(:normal), do: {"completed", "Worker finished", nil}
 
+  defp worker_outcome({:shutdown, :model_policy_hold}),
+    do: {"interrupted", "Worker yielded for Astra permission", "model_policy_hold"}
+
   defp worker_outcome({:shutdown, :deployment_drain}),
     do: {"interrupted", "Worker yielded for deployment drain", "deployment_drain"}
 
@@ -560,7 +563,19 @@ defmodule SymphonyElixir.Orchestrator do
     startup_failed(state, issue_id, entry, diagnostic)
   end
 
-  defp handle_agent_down({:shutdown, :deployment_drain}, state, issue_id, running_entry, _session_id) do
+  defp handle_agent_down({:shutdown, :model_policy_hold}, state, issue_id, %{issue: %Issue{kind: :research}} = entry, _session) do
+    channel = entry.issue.research.channel
+    settings = Config.settings!().autopilot
+    autopilot = Autopilot.record_research_finished(state.autopilot, channel, :interrupted, now(), settings)
+    state |> put_autopilot(autopilot) |> release_issue_claim(issue_id)
+  end
+
+  defp handle_agent_down({:shutdown, :model_policy_hold}, state, issue_id, %{issue: %Issue{kind: :pull_request}} = entry, _session) do
+    autopilot = if entry[:model_admitted], do: Autopilot.record_pull_interrupted(state.autopilot, entry.issue), else: state.autopilot
+    state |> put_autopilot(autopilot) |> release_issue_claim(issue_id)
+  end
+
+  defp handle_agent_down({:shutdown, reason}, state, issue_id, running_entry, _session_id) when reason in [:deployment_drain, :model_policy_hold] do
     schedule_issue_retry(state, issue_id, Map.get(running_entry, :retry_attempt, 0), %{
       identifier: running_entry.identifier,
       issue_url: running_entry.issue.url,
@@ -3531,7 +3546,13 @@ defmodule SymphonyElixir.Orchestrator do
 
     item_attempt = Autopilot.failed_attempts(state.autopilot, Autopilot.delivery_key(issue)) + 1
     avoid = if is_map(state.throttle), do: state.throttle.avoid, else: %{}
-    ModelRouting.select_for_run(settings.codex.routing, fixed_routes, issue, item_attempt, avoid: avoid)
+
+    with {:ok, route} <- ModelRouting.select_for_run(settings.codex.routing, fixed_routes, issue, item_attempt, avoid: avoid) do
+      case SymphonyElixir.SmartassMode.admit_route(route) do
+        :ok -> {:ok, route}
+        {:error, :smartass_required} -> {:wait, "Astra requires an explicit fixed route and active smartass permission"}
+      end
+    end
   end
 
   defp selected_route({:ok, %{} = route}), do: route
