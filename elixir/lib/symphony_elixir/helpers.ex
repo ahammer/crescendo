@@ -18,6 +18,17 @@ defmodule SymphonyElixir.Helpers do
   """
 
   @limit 16_384
+  @configuration_probe """
+  import os, sys
+  args = sys.argv[1:]
+  try:
+      index = args.index('app-server')
+      os.execvp(args[0], args[:index] + args[index + 1:] + ['mcp', 'list', '--json'])
+  except FileNotFoundError:
+      sys.exit(127)
+  except OSError:
+      sys.exit(126)
+  """
   @names ~w(helper_start helper_status helper_cancel)
   @disabled ~w(shell_tool shell_snapshot unified_exec code_mode apps enable_mcp_apps plugins remote_plugin browser_use browser_use_external browser_use_full_cdp_access in_app_browser in_app_local_automation computer_use image_generation view_image multi_agent multi_agent_v2 hooks skill_search skill_mcp_dependency_install workspace_dependencies worktrees goals sleep_tool)
   # fd-relative O_NOFOLLOW traversal binds the root and every component even
@@ -287,7 +298,7 @@ defmodule SymphonyElixir.Helpers do
 
   defp catalog_command(command, catalog, config) do
     overrides = Enum.flat_map(config, fn {key, value} -> ["--config", key <> "=" <> config_value(value)] end)
-    argv = ["python3", "-c", @catalog_bootstrap, catalog] ++ OptionParser.split(command) ++ overrides
+    argv = ["python3", "-c", @catalog_bootstrap, catalog, "bash", "-c", "exec " <> command <> " \"$@\"", "crescendo-model-route"] ++ overrides
     Enum.map_join(argv, " ", &shell_escape/1)
   end
 
@@ -299,9 +310,8 @@ defmodule SymphonyElixir.Helpers do
 
   defp native_command(context) do
     tokens = OptionParser.split(context.codex_settings.command)
-    prefix = Enum.take_while(tokens, &(&1 != "app-server"))
 
-    with {:ok, executable, args} <- configuration_command(tokens, prefix),
+    with {:ok, executable, args} <- configuration_command(context.codex_settings.command, tokens),
          {:ok, servers} <- configuration_servers(context.workspace, executable, args),
          {:ok, catalog} <- model_catalog(:helper) do
       disabled = Map.new(servers, &{&1["name"], %{"enabled" => false}})
@@ -318,17 +328,20 @@ defmodule SymphonyElixir.Helpers do
     end
   end
 
-  defp configuration_command(tokens, [executable | args]) do
-    case {"app-server" in tokens, System.find_executable(executable)} do
-      {true, path} when is_binary(path) -> {:ok, path, args}
+  defp configuration_command(command, tokens) do
+    # Expand the configured command through the same shell contract as AppServer,
+    # then replace the exact subcommand in argv without reparsing quoted paths.
+    case {"app-server" in tokens, System.find_executable("bash")} do
+      {true, bash} when is_binary(bash) -> {:ok, bash, ["-c", "exec python3 -c " <> shell_escape(@configuration_probe) <> " " <> command]}
       _ -> {:error, :command_unavailable}
     end
   end
 
-  defp configuration_command(_tokens, _prefix), do: {:error, :command_unavailable}
-
   defp configuration_servers(workspace, executable, args) do
-    case command(workspace, executable, args ++ ["mcp", "list", "--json"]) do
+    case command(workspace, executable, args) do
+      {_, 127} ->
+        {:error, :command_unavailable}
+
       {_, 124} ->
         {:error, :inspection_timeout}
 

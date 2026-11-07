@@ -50,6 +50,7 @@ defmodule SymphonyElixir.HelpersTest do
           {"python3 -c 'print(42)' app-server", :invalid_mcp_configuration},
           {~s|python3 -c 'print("[4]")' app-server|, :invalid_mcp_configuration},
           {"python3 -c 'import time; time.sleep(10)' app-server", :inspection_timeout},
+          {"/missing-native-codex app-server", :command_unavailable},
           {"", :command_unavailable}
         ] do
       assert {:error, {:helper_configuration, ^reason}} = Helpers.run(put_in(prepared.context.codex_settings.command, command), details, %Service.Helpers{})
@@ -66,6 +67,28 @@ defmodule SymphonyElixir.HelpersTest do
     assert byte_size(Helpers.error_text(String.duplicate("é", 30_000))) <= 16_384
     File.write!(Path.join(System.get_env("CODEX_HOME"), "models_cache.json"), "invalid")
     assert {:error, :helper_model_catalog_unknown} = Helpers.lead_session(Config.settings!().codex)
+  end
+
+  test "sealed lead launch preserves quoted environment paths and literal arguments", %{root: root, context: context} do
+    directory = Path.join(root, "native tools")
+    File.mkdir_p!(directory)
+
+    File.write!(Path.join(directory, "probe.py"), """
+    import fcntl, json, os, sys
+    assert fcntl.fcntl(198, fcntl.F_GET_SEALS) & fcntl.F_SEAL_WRITE
+    with open('/proc/self/fd/198') as source:
+        catalog = json.load(source)
+    print(json.dumps({'args': sys.argv[1:], 'models': [m['slug'] for m in catalog['models']]}))
+    """)
+
+    prior = System.get_env("CRESCENDO_TEST_LAUNCH_ROOT")
+    System.put_env("CRESCENDO_TEST_LAUNCH_ROOT", directory)
+    on_exit(fn -> restore_env("CRESCENDO_TEST_LAUNCH_ROOT", prior) end)
+    command = ~s|python3 "$CRESCENDO_TEST_LAUNCH_ROOT/probe.py" '$literal' app-server|
+    assert {:ok, codex, _} = Helpers.lead_session(%{context.codex_settings | command: command}, "gpt-6.1-sol")
+    assert {output, 0} = System.cmd("bash", ["-c", codex.command])
+    assert %{"args" => ["$literal", "app-server" | overrides], "models" => ["gpt-6.1-sol"]} = Jason.decode!(output)
+    assert "model_catalog_json=\"/proc/self/fd/198\"" in overrides
   end
 
   test "source reads use the captured commit and reject traversal, pathspecs, links and oversized files", %{context: context} do
@@ -138,9 +161,18 @@ defmodule SymphonyElixir.HelpersTest do
     assert :ok = Helpers.cancel_owned()
 
     details = %{run_id: "child", issue_identifier: "helper-child"}
-    observed = Path.join(root, "observed.jsonl")
+    observed = Path.join(root, "observed log.jsonl")
     peer = Path.expand("../fixtures/helper_app_server.py", __DIR__)
-    codex = %{context.codex_settings | command: "python3 '#{peer}' '#{observed}' helper app-server"}
+    File.cp!(peer, Path.join(root, "native peer.py"))
+    prior = System.get_env("CRESCENDO_TEST_HELPER_ROOT")
+    System.put_env("CRESCENDO_TEST_HELPER_ROOT", root)
+    on_exit(fn -> restore_env("CRESCENDO_TEST_HELPER_ROOT", prior) end)
+
+    codex = %{
+      context.codex_settings
+      | command: ~s|python3 "$CRESCENDO_TEST_HELPER_ROOT/native peer.py" "$CRESCENDO_TEST_HELPER_ROOT/observed log.jsonl" helper app-server --config 'mcp_servers.tail.command="unused"'|
+    }
+
     {:ok, prepared} = Helpers.prepare(%{context | codex_settings: codex}, %{"question" => "Inspect"})
     assert {:ok, %{summary: summary}} = Helpers.run(prepared, details, %Service.Helpers{})
     assert String.starts_with?(summary, "Pinned source observations") and byte_size(summary) <= 16_384
@@ -160,6 +192,7 @@ defmodule SymphonyElixir.HelpersTest do
     assert thread["config"]["mcp_servers"] == %{
              "inherited-server" => %{"enabled" => false},
              "dotted.server" => %{"enabled" => false},
+             "tail" => %{"enabled" => false},
              "quoted\"server" => %{"enabled" => false}
            }
 
