@@ -6,6 +6,8 @@ import tomllib
 
 observed, mode = sys.argv[1:3]
 inherited_servers = ["inherited-server", "dotted.server", 'quoted"server']
+if any(arg.startswith('mcp_servers.tail.command=') for arg in sys.argv):
+    inherited_servers.append('tail')
 if sys.argv[-3:] == ["mcp", "list", "--json"]:
     print(json.dumps([{"name": name, "enabled": True} for name in inherited_servers]))
     sys.exit(0)
