@@ -20,6 +20,22 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
     json(conn, payload)
   end
 
+  @spec model_route(Conn.t(), map()) :: Conn.t()
+  def model_route(conn, params) do
+    if conn.remote_ip in [{127, 0, 0, 1}, {0, 0, 0, 0, 0, 0, 0, 1}] do
+      server = SymphonyElixir.Project.via(params["project"], :orchestrator)
+
+      case GenServer.call(server, {:model_route, params["run_id"], params["role"], params["source_sha"] || ""}, 2_000) do
+        {:ok, decision} -> json(conn, decision)
+        {:error, reason} -> error_response(conn, 409, "route_unavailable", inspect(reason))
+      end
+    else
+      error_response(conn, 403, "local_launchers_only", "Route decisions require a local launcher")
+    end
+  catch
+    :exit, _ -> error_response(conn, 503, "project_unavailable", "Project is unavailable")
+  end
+
   @spec issue(Conn.t(), map()) :: Conn.t()
   def issue(conn, %{"issue_identifier" => issue_identifier} = params) do
     opts = [project: params["project"], orchestrator: orchestrator(), timeout: snapshot_timeout_ms()]

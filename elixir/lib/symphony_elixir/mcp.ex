@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.MCP do
   @moduledoc "Local stdio MCP for operator controls; it never starts an orchestrator or exposes a web mutation."
 
-  alias SymphonyElixir.{PriorityMode, Service, SmartassMode}
+  alias SymphonyElixir.{IntelligencePolicy, PriorityMode, Service, SmartassMode}
 
   @versions ~w(2025-11-25 2025-06-18 2025-03-26 2024-11-05)
 
@@ -58,6 +58,9 @@ defmodule SymphonyElixir.MCP do
     end
   end
 
+  defp call("crescendo_intelligence_gain_get", args, service, _) when args == %{}, do: {:ok, IntelligencePolicy.status(service)}
+  defp call("crescendo_intelligence_gain_set", _, _, false), do: {:error, "gain changes require an operator session"}
+  defp call("crescendo_intelligence_gain_set", args, service, true), do: IntelligencePolicy.set(service, args)
   defp call("crescendo_priority_mode_get", args, service, _operator) when args == %{}, do: {:ok, PriorityMode.status(service)}
   defp call("crescendo_priority_mode_set", _args, _service, false), do: {:error, "priority changes require an operator session"}
   defp call("crescendo_priority_mode_set", args, service, true) when is_map(args), do: PriorityMode.set(service, args)
@@ -68,6 +71,18 @@ defmodule SymphonyElixir.MCP do
 
   defp tools do
     [
+      %{
+        name: "crescendo_intelligence_gain_get",
+        description: "Read the global gain, policy revision and activation state.",
+        inputSchema: %{type: "object", properties: %{}, additionalProperties: false},
+        annotations: %{readOnlyHint: true}
+      },
+      %{
+        name: "crescendo_intelligence_gain_set",
+        description: "Operator-only gain 0..2. Smartass and Fast remain separate.",
+        inputSchema: gain_schema(),
+        annotations: %{readOnlyHint: false}
+      },
       %{
         name: "crescendo_smartass_mode_get",
         description: "Read the service-wide Astra permission and expiry.",
@@ -104,6 +119,11 @@ defmodule SymphonyElixir.MCP do
         annotations: %{readOnlyHint: false, destructiveHint: false, idempotentHint: true}
       }
     ]
+  end
+
+  defp gain_schema do
+    properties = %{gain: %{type: "number", minimum: 0, maximum: 2}}
+    %{type: "object", properties: properties, required: ["gain"], additionalProperties: false}
   end
 
   defp result(id, value), do: %{jsonrpc: "2.0", id: id, result: value}

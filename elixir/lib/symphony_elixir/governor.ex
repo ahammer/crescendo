@@ -384,10 +384,34 @@ defmodule SymphonyElixir.Governor do
   end
 
   defp start_helper(state, owner, prepared) do
+    case helper_policy(prepared, state.service.helpers) do
+      {:ok, prepared, settings} -> start_resolved_helper(state, owner, prepared, settings)
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp helper_policy(prepared, settings) do
+    alias SymphonyElixir.IntelligencePolicy
+
+    if IntelligencePolicy.enabled?() do
+      context = prepared.context
+      profile = context[:routing_profile] || IntelligencePolicy.role_profile("helper")
+
+      identity = {context.project, context[:identifier] || context.issue_id, prepared.question}
+
+      with {:ok, route} <- IntelligencePolicy.resolve(profile, "helper", identity) do
+        context = Map.put(context, :resolved_route, route)
+        {:ok, %{prepared | context: context}, %{settings | model: route["model"], effort: route["effort"]}}
+      end
+    else
+      {:ok, prepared, settings}
+    end
+  end
+
+  defp start_resolved_helper(state, owner, prepared, settings) do
     context = prepared.context
     id = Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
     governor = self()
-    settings = state.service.helpers
 
     details = %{
       run_id: id,
@@ -397,6 +421,7 @@ defmodule SymphonyElixir.Governor do
       parent_issue_id: context.issue_id,
       project: context.project,
       source_sha: prepared.source_sha,
+      routing_decision: context[:resolved_route],
       model: settings.model,
       effort: settings.effort
     }

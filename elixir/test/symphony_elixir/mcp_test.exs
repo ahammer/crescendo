@@ -17,6 +17,14 @@ defmodule SymphonyElixir.MCPTest do
     %{path: path, service: service}
   end
 
+  test "gain is writable only by operators", %{service: service} do
+    call = request(1, "tools/call", %{name: "crescendo_intelligence_gain_set", arguments: %{gain: 0.75}})
+    assert {%{result: %{isError: true}}, true} = MCP.handle(call, service, true, false)
+    assert {%{result: %{isError: false}}, true} = MCP.handle(call, service, true, true)
+    assert SymphonyElixir.IntelligencePolicy.status(service).gain == 0.75
+    assert {%{result: %{isError: false}}, true} = MCP.handle(request(2, "tools/call", %{name: "crescendo_intelligence_gain_get", arguments: %{}}), service, true, false)
+  end
+
   test "stdio initialization, tool discovery and operator changes return JSON-RPC only", %{path: path, service: service} do
     messages = [
       request(1, "initialize", %{protocolVersion: "2025-11-25"}),
@@ -33,7 +41,16 @@ defmodule SymphonyElixir.MCPTest do
     replies = data |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
     assert [init, tools, set, get, invalid] = replies
     assert init["result"]["protocolVersion"] == "2025-11-25"
-    assert Enum.map(tools["result"]["tools"], & &1["name"]) == ["crescendo_smartass_mode_get", "crescendo_smartass_mode_set", "crescendo_priority_mode_get", "crescendo_priority_mode_set"]
+
+    assert Enum.map(tools["result"]["tools"], & &1["name"]) == [
+             "crescendo_intelligence_gain_get",
+             "crescendo_intelligence_gain_set",
+             "crescendo_smartass_mode_get",
+             "crescendo_smartass_mode_set",
+             "crescendo_priority_mode_get",
+             "crescendo_priority_mode_set"
+           ]
+
     assert set["result"]["structuredContent"]["service_tier"] == "fast"
     assert get["result"]["structuredContent"]["enabled"] == true
     assert invalid["error"]["code"] == -32_700

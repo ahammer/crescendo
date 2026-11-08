@@ -30,6 +30,9 @@ defmodule SymphonyElixir.AgentRunner do
       :ok ->
         :ok
 
+      {:error, {:gain_policy_hold, _budget}} ->
+        exit({:shutdown, :gain_policy_hold})
+
       {:error, :smartass_required} ->
         exit({:shutdown, :model_policy_hold})
 
@@ -120,7 +123,9 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     send_worker_phase(codex_update_recipient, issue, :codex)
-    max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
+    continuation = opts[:gain_continuation] || %{}
+    max_turns = continuation[:max_turns] || Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
+    first_turn = continuation[:next_turn] || 1
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
 
     codex = Keyword.get(opts, :codex_settings, Config.settings!().codex)
@@ -152,7 +157,9 @@ defmodule SymphonyElixir.AgentRunner do
       }
     ]
 
-    with {:ok, route} <- model_route(issue, opts),
+    opts = Keyword.put(opts, :gain_session_opts, session_opts)
+
+    with {:ok, route} <- startup_step(:session_start, fn -> adaptive_route(workspace, issue, opts, session_opts) end),
          :ok <- log_route(issue, route),
          :ok <- send_worker_message(codex_update_recipient, issue, :worker_model_route, route, opts),
          {:ok, session} <-
@@ -160,6 +167,8 @@ defmodule SymphonyElixir.AgentRunner do
              start_session(workspace, route, session_opts)
            end) do
       send_worker_message(codex_update_recipient, issue, :worker_admitted, %{}, opts)
+
+      Process.put(:gain_sessions, [session])
 
       try do
         do_run_codex_turns(
@@ -169,17 +178,303 @@ defmodule SymphonyElixir.AgentRunner do
           codex_update_recipient,
           Keyword.put(opts, :resumed, session.resumed),
           issue_state_fetcher,
-          1,
+          first_turn,
           max_turns
         )
       after
         try do
-          AppServer.read_account_usage(session, on_message: on_message)
+          current = List.first(Process.get(:gain_sessions, [session]))
+          if Port.info(current.port), do: AppServer.read_account_usage(current, on_message: on_message)
         after
-          AppServer.stop_session(session)
+          Enum.each(Process.delete(:gain_sessions) || [session], &AppServer.stop_session/1)
           SymphonyElixir.Helpers.cancel_owned()
         end
       end
+    end
+  end
+
+  defp adaptive_route(workspace, issue, opts, session_opts) do
+    runtime = Path.join(workspace, "tools/symphony-codex.py")
+    compatible = not File.regular?(runtime) or String.contains?(File.read!(runtime), "GAIN_PROTOCOL = 1")
+
+    if SymphonyElixir.IntelligencePolicy.enabled?() and not compatible do
+      {:error, :workspace_routing_protocol_outdated}
+    else
+      adaptive_host_route(issue, opts, session_opts)
+    end
+  end
+
+  defp adaptive_host_route(issue, opts, session_opts) do
+    cond do
+      not SymphonyElixir.IntelligencePolicy.enabled?() -> model_route(issue, opts)
+      is_binary(session_opts[:worker_host]) -> {:error, :remote_intelligence_policy_unavailable}
+      true -> gain_route_for_issue(issue, opts, session_opts)
+    end
+  end
+
+  defp gain_route_for_issue(issue, opts, session_opts) do
+    alias SymphonyElixir.IntelligencePolicy
+
+    role =
+      case issue.kind do
+        :research -> "scorecard"
+        :pull_request -> "reviewer"
+        _ -> "delivery"
+      end
+
+    identity = {Project.current(), issue.identifier}
+
+    with {:ok, profile} <- task_profile(issue, role, opts, session_opts),
+         contract = IntelligencePolicy.digest({issue.title, issue.description}),
+         {:ok, profile} <- baseline_hints(Map.put(profile, "contract", contract), issue),
+         feedback = difficulty_feedback(opts, issue, profile),
+         {:ok, route} <- IntelligencePolicy.resolve(profile, role, identity, feedback: feedback) do
+      {:ok, Map.put(route, "size", legacy_size(issue))}
+    end
+  end
+
+  defp task_profile(issue, role, opts, session_opts) do
+    alias SymphonyElixir.{IntelligencePolicy, Operations}
+
+    case IntelligencePolicy.profile(issue) do
+      %{} = profile -> {:ok, profile}
+      nil when role == "scorecard" -> {:ok, IntelligencePolicy.role_profile(role)}
+      nil -> Operations.routing_profile(issue, fn -> classify_profile(issue, opts, session_opts) end)
+    end
+  end
+
+  defp classify_profile(issue, opts, session_opts) do
+    alias SymphonyElixir.{Helpers, IntelligencePolicy}
+
+    identity = {Project.current(), issue.identifier}
+    profile = IntelligencePolicy.role_profile("classifier")
+
+    with {:ok, route} <- IntelligencePolicy.resolve(profile, "classifier", identity),
+         context = Map.put(session_opts[:helper_context], :resolved_route, route),
+         {:ok, prepared} <- Helpers.prepare(context, %{"question" => classification_question()}),
+         prepared = add_task_contract(prepared, issue),
+         settings = %SymphonyElixir.Service.Helpers{model: route["model"], effort: route["effort"], timeout_ms: 120_000},
+         {:ok, result} <- run_classifier(prepared, classification_details(issue, opts, route, prepared), settings),
+         {:ok, profile} when is_map(profile) <- Jason.decode(String.trim(result.summary) |> String.replace(~r/\A```(?:json)?\s*|\s*```\z/, "")) do
+      {:ok, Map.put(Map.take(profile, ~w(complexity risk reason evidence_refs)), "source_sha", result.source_sha)}
+    else
+      {:ok, _} -> {:error, :classification_not_an_object}
+      error -> error
+    end
+  end
+
+  defp classification_question do
+    "Classify cognitive complexity and risk, not line count or priority. Read evidence ID task-contract for full title and acceptance; " <>
+      "inspect source owners as needed. Return ONLY JSON: complexity (routine,standard,complex,exceptional), risk (low,normal,high), " <>
+      "reason (named mental coupling/uncertainty for complex/exceptional), evidence_refs (source locations)."
+  end
+
+  defp add_task_contract(prepared, issue) do
+    contract = "Task: " <> issue.title <> "\n" <> (issue.description || "")
+    evidence = %{content: contract, digest: SymphonyElixir.IntelligencePolicy.digest(contract)}
+    %{prepared | evidence: Map.put(prepared.evidence, "task-contract", evidence)}
+  end
+
+  defp classification_details(issue, opts, route, prepared) do
+    id = "classifier-" <> SymphonyElixir.IntelligencePolicy.digest({issue.id, opts[:run_id]})
+
+    %{
+      run_id: id,
+      issue_id: id,
+      issue_identifier: id,
+      model: route["model"],
+      effort: route["effort"],
+      role: "classifier",
+      routing_decision: route,
+      parent_run_id: opts[:run_id],
+      parent_issue_id: issue.id,
+      project: Project.current(),
+      source_sha: prepared.source_sha
+    }
+  end
+
+  defp run_classifier(prepared, details, settings) do
+    started = DateTime.utc_now()
+    recipient = prepared.context[:recipient]
+    if is_pid(recipient), do: send(recipient, {:helper_update, details, %{event: :helper_started, timestamp: started}})
+
+    task = Task.async(fn -> classifier_result(prepared, details, settings) end)
+
+    result =
+      case Task.yield(task, settings.timeout_ms) || Task.shutdown(task, :brutal_kill) do
+        {:ok, value} -> value
+        _ -> {:error, :classification_timeout}
+      end
+
+    if is_pid(recipient),
+      do:
+        send(
+          recipient,
+          {:helper_update, details,
+           %{
+             event: :helper_finished,
+             timestamp: DateTime.utc_now(),
+             status: if(match?({:ok, _}, result), do: "completed", else: "failed"),
+             reason: if(match?({:ok, _}, result), do: nil, else: inspect(result))
+           }}
+        )
+
+    result
+  end
+
+  defp classifier_result(prepared, details, settings) do
+    SymphonyElixir.Helpers.run(prepared, details, settings)
+  rescue
+    error -> {:error, Exception.message(error)}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  defp baseline_hints(profile, issue) do
+    case ModelRouting.select(Config.settings!().codex.routing, issue) do
+      {:ok, %{"label" => label} = hint} when label != "default" ->
+        prefix = Config.settings!().codex.routing["label_prefix"]
+        profile = Map.put(profile, "legacy_label", label)
+        if String.starts_with?(label, prefix), do: {:ok, Map.put(profile, "baseline", Map.take(hint, ["model", "effort"]))}, else: {:ok, profile}
+
+      {:ok, _} ->
+        {:ok, profile}
+
+      error ->
+        error
+    end
+  end
+
+  defp difficulty_feedback(opts, issue, profile) do
+    case get_in(opts[:gain_session_opts] || [], [:helper_context, :recipient]) do
+      pid when is_pid(pid) -> GenServer.call(pid, {:routing_feedback, issue.id, profile["contract"]}, 2_000)
+      _ -> %{}
+    end
+  catch
+    :exit, _ -> %{}
+  end
+
+  defp legacy_size(issue) do
+    prefix = Config.settings!().labels.prefix <> ":size:"
+
+    Enum.find_value(Issue.label_names(issue), fn label ->
+      if String.starts_with?(label, prefix), do: String.replace_prefix(label, prefix, "")
+    end)
+  end
+
+  defp boundary_session(session, workspace, issue, opts) do
+    adaptive = SymphonyElixir.IntelligencePolicy.enabled?() and get_in(session, [:model_route, "profile"])
+    if adaptive, do: resolve_boundary(session, workspace, issue, opts), else: {:ok, session}
+  end
+
+  defp resolve_boundary(session, workspace, issue, opts) do
+    old = session.model_route
+
+    feedback = difficulty_feedback(opts, issue, old["profile"])
+
+    with {:ok, route} <- SymphonyElixir.IntelligencePolicy.resolve(old["profile"], old["role"], old["identity"], feedback: feedback),
+         :ok <- SymphonyElixir.IntelligencePolicy.admit_native(route) do
+      apply_boundary(session, Map.merge(route, Map.take(old, ["label", "size"])), workspace, issue, opts)
+    else
+      {:error, reason} -> wait_policy_boundary(session, workspace, issue, opts, reason)
+    end
+  end
+
+  defp wait_policy_boundary(session, workspace, issue, opts, reason) do
+    now = System.monotonic_time(:millisecond)
+    deadline = opts[:policy_deadline]
+    wait_limit = if reason == :background_jobs_running, do: deadline, else: min(deadline, now + 30_000)
+    opts = Keyword.put_new(opts, :wait_deadline, wait_limit)
+
+    cond do
+      is_nil(Port.info(session.port)) ->
+        {:error, :port_closed}
+
+      System.monotonic_time(:millisecond) >= opts[:wait_deadline] and AppServer.quiescent?(session) ->
+        deadline_at = System.system_time(:millisecond) + opts[:wait_deadline] - System.monotonic_time(:millisecond)
+
+        budget = %{
+          next_turn: opts[:logical_turn],
+          max_turns: opts[:logical_max],
+          item_attempt: opts[:item_attempt] || 1,
+          contract: SymphonyElixir.IntelligencePolicy.digest({issue.title, issue.description}),
+          reason: inspect(reason),
+          final_attempt: opts[:final_attempt] || false,
+          wait_deadline_at: deadline_at
+        }
+
+        acknowledge_gain_hold(issue, opts, budget)
+
+      System.monotonic_time(:millisecond) >= opts[:policy_deadline] ->
+        {:error, :background_job_deadline_exceeded}
+
+      true ->
+        # Status is separate from native progress; this wait keeps its original absolute deadline.
+        send_worker_phase(opts[:gain_session_opts][:helper_context][:recipient], issue, :policy_boundary)
+        AppServer.wait_background(session)
+        boundary_session(session, workspace, issue, opts)
+    end
+  end
+
+  defp acknowledge_gain_hold(issue, opts, budget) do
+    recipient = opts[:gain_session_opts][:helper_context][:recipient]
+
+    if is_pid(recipient) do
+      case GenServer.call(recipient, {:hold_gain_run, issue.id, opts[:run_id], budget}) do
+        :ok -> {:error, {:gain_policy_hold, budget}}
+        {:error, _} = error -> error
+      end
+    else
+      {:error, {:gain_policy_hold, budget}}
+    end
+  end
+
+  defp apply_boundary(session, route, workspace, issue, opts) do
+    cond do
+      is_nil(Port.info(session.port)) ->
+        {:error, :port_closed}
+
+      route["model"] == session.model_route["model"] ->
+        {:ok, %{session | model_route: route}}
+
+      is_binary(session.worker_host) ->
+        {:error, :remote_policy_boundary_unavailable}
+
+      not AppServer.quiescent?(session) ->
+        wait_policy_boundary(session, workspace, issue, opts, :background_jobs_running)
+
+      true ->
+        swap_session(session, route, workspace, issue, opts)
+    end
+  end
+
+  defp swap_session(session, route, workspace, issue, opts) do
+    handoff =
+      "Resume the same task from the workspace, workpad, PR and evidence. Preserve acceptance, attempts and deadlines. " <> issue.identifier <> ": " <> issue.title <> "\n" <> (issue.description || "")
+
+    startup = Keyword.put(opts[:gain_session_opts], :checkpoint, nil)
+
+    AppServer.read_account_usage(session, on_message: opts[:on_message])
+
+    case start_session(workspace, route, startup) do
+      {:ok, replacement} ->
+        Process.put(:gain_sessions, [replacement | Process.get(:gain_sessions, [])])
+        AppServer.stop_session(session)
+        {:ok, Map.put(replacement, :gain_handoff, handoff)}
+
+      {:error, reason} ->
+        wait_policy_boundary(session, workspace, issue, opts, {:replacement_startup, reason})
+    end
+  end
+
+  defp policy_deadline(opts), do: System.monotonic_time(:millisecond) + opts[:codex_settings].turn_timeout_ms
+
+  defp boundary_prompt(session, issue, opts, turn, max_turns) do
+    if session[:gain_handoff] || opts[:gain_continuation] do
+      context = session[:gain_handoff] || "Resume #{issue.identifier}: #{issue.title}\n#{issue.description}"
+      opts[:initial_prompt] <> "\n\n" <> context <> "\nLogical turn #{turn} of #{max_turns}; do not reset budgets."
+    else
+      build_turn_prompt(issue, opts, turn, max_turns)
     end
   end
 
@@ -255,9 +550,16 @@ defmodule SymphonyElixir.AgentRunner do
          turn_number,
          max_turns
        ) do
-    prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
+    opts = opts |> Keyword.put(:logical_turn, turn_number) |> Keyword.put(:logical_max, max_turns)
+    opts = Keyword.put_new_lazy(opts, :policy_deadline, fn -> policy_deadline(opts) end)
 
-    with :ok <- SmartassMode.admit_route(app_session.model_route),
+    with {:ok, app_session} <- boundary_session(app_session, workspace, issue, Keyword.put(opts, :on_message, codex_message_handler(codex_update_recipient, issue, opts))),
+         prompt = boundary_prompt(app_session, issue, opts, turn_number, max_turns),
+         app_session = Map.delete(app_session, :gain_handoff),
+         opts = opts |> Keyword.delete(:gain_continuation) |> Keyword.delete(:wait_deadline) |> Keyword.put(:policy_deadline, policy_deadline(opts)),
+         :ok <- send_worker_phase(codex_update_recipient, issue, :codex),
+         :ok <- send_worker_message(codex_update_recipient, issue, :worker_model_route, app_session.model_route, opts),
+         :ok <- SmartassMode.admit_route(app_session.model_route),
          :ok <- SmartassMode.admit_effective(app_session.model_route, app_session.metadata[:model]),
          :ok <- persist_checkpoint(app_session, issue, codex_update_recipient, opts, %{eligible: false}),
          {:ok, turn_session} <-

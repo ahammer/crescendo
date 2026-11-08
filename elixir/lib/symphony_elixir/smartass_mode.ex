@@ -7,7 +7,7 @@ defmodule SymphonyElixir.SmartassMode do
   def admit_route(route) do
     model = (route || %{})["model"]
 
-    if astra?(model) and is_integer(route["tier"]) do
+    if astra?(model) and is_integer(route["tier"]) and is_nil(route["policy"]) do
       {:error, :smartass_required}
     else
       admit_model(model)

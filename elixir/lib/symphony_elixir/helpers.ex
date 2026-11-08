@@ -83,8 +83,22 @@ defmodule SymphonyElixir.Helpers do
     [
       spec(
         "helper_start",
-        "Start a lease-free Luna max helper for a bounded source/evidence investigation. It cannot run tests, edit, publish, or delegate. Returns immediately; poll helper_status while doing independent work.",
-        %{"question" => %{"type" => "string"}, "evidence_keys" => %{"type" => "array", "items" => %{"type" => "string"}, "maxItems" => 12}},
+        "Start a lease-free policy-selected read-only helper for a bounded source/evidence investigation. It cannot run tests, edit, publish, or delegate. Returns immediately; poll helper_status while doing independent work.",
+        %{
+          "question" => %{"type" => "string"},
+          "profile" => %{
+            "type" => "object",
+            "properties" => %{
+              "complexity" => %{"type" => "string", "enum" => ~w(routine standard complex exceptional)},
+              "risk" => %{"type" => "string", "enum" => ~w(low normal high)},
+              "reason" => %{"type" => "string"},
+              "evidence_refs" => %{"type" => "array", "items" => %{"type" => "string"}}
+            },
+            "required" => ~w(complexity risk reason evidence_refs),
+            "additionalProperties" => false
+          },
+          "evidence_keys" => %{"type" => "array", "items" => %{"type" => "string"}, "maxItems" => 12}
+        },
         ["question"]
       ),
       spec(
@@ -122,7 +136,9 @@ defmodule SymphonyElixir.Helpers do
   @spec prepare(map(), map()) :: {:ok, map()} | {:error, term()}
   def prepare(context, args) do
     with question when is_binary(question) and byte_size(question) in 1..8_192 <- args["question"],
-         true <- Map.keys(args) -- ["question", "evidence_keys"] == [],
+         true <- Map.keys(args) -- ["question", "evidence_keys", "profile"] == [],
+         true <- is_nil(args["profile"]) or (SymphonyElixir.IntelligencePolicy.validate_profile(args["profile"]) == :ok and Map.keys(args["profile"]) -- ~w(complexity risk reason evidence_refs) == []),
+         context = if(args["profile"], do: Map.put(context, :routing_profile, args["profile"]), else: context),
          nil <- context[:worker_host],
          {sha, 0} <- git(%{context: context}, ["rev-parse", "--verify", "HEAD^{commit}"]),
          true <- Regex.match?(~r/\A[0-9a-f]{40,64}\n?\z/, sha),
@@ -140,7 +156,7 @@ defmodule SymphonyElixir.Helpers do
     context = prepared.context
     Project.put(context.project)
     Process.put(:helper_answer, "")
-    route = %{"model" => settings.model, "effort" => settings.effort}
+    route = context[:resolved_route] || %{"model" => settings.model, "effort" => settings.effort}
 
     on_message = fn update ->
       capture_answer(update)
@@ -273,10 +289,10 @@ defmodule SymphonyElixir.Helpers do
     end
   end
 
-  defp model_catalog(role, model \\ nil) do
+  defp model_catalog(role, model) do
     home = System.get_env("CODEX_HOME") || Path.expand("~/.codex")
 
-    model = if role == :helper, do: "gpt-6-luna", else: model
+    model = if role == :helper and is_nil(model), do: "gpt-6-luna", else: model
 
     with {:ok, bytes} <- File.open(Path.join(home, "models_cache.json"), [:read, :binary], &IO.binread(&1, 4_194_305)),
          true <- is_binary(bytes) and byte_size(bytes) <= 4_194_304,
@@ -313,7 +329,7 @@ defmodule SymphonyElixir.Helpers do
 
     with {:ok, executable, args} <- configuration_command(context.codex_settings.command, tokens),
          {:ok, servers} <- configuration_servers(context.workspace, executable, args),
-         {:ok, catalog} <- model_catalog(:helper) do
+         {:ok, catalog} <- model_catalog(:helper, get_in(context, [:resolved_route, "model"])) do
       disabled = Map.new(servers, &{&1["name"], %{"enabled" => false}})
 
       config =

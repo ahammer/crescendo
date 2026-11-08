@@ -33,6 +33,7 @@ defmodule SymphonyElixirWeb.Router do
 
   scope "/", SymphonyElixirWeb do
     get("/api/v1/state", ObservabilityApiController, :state)
+    get("/api/v1/projects/:project/runs/:run_id/route", ObservabilityApiController, :model_route)
 
     # Read-only: the dashboard is served publicly, so nothing here changes state.
     match(:*, "/", ObservabilityApiController, :method_not_allowed)

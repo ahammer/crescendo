@@ -27,6 +27,16 @@ defmodule SymphonyElixir.ServiceTest do
     end
   end
 
+  test "gain rollout is explicit and rejects policy values in static configuration" do
+    base = %{"projects" => %{"a" => %{}}}
+    assert {:ok, %{intelligence_policy: %{"enabled" => false}}} = Service.parse(base, "/tmp/service.yml")
+    assert {:ok, %{intelligence_policy: %{"enabled" => true}}} = Service.parse(Map.put(base, "intelligence_policy", %{"enabled" => true}), "/tmp/service.yml")
+
+    for value <- [%{"gain" => 1}, %{"enabled" => "yes"}, true] do
+      assert {:error, _} = Service.parse(Map.put(base, "intelligence_policy", value), "/tmp/service.yml")
+    end
+  end
+
   test "leaf helpers are disabled by default and limited to five Luna max runs" do
     base = %{"projects" => %{"a" => %{}}}
     assert {:ok, %{helpers: %{slots: 0}}} = Service.parse(base, "/tmp/service.yml")

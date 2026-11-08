@@ -1050,3 +1050,72 @@ journeys and measurements. Increase the workflow admission cap from one to two t
 only after the documented accepted-delivery comparison; no simultaneous heavy GPU work
 is authorized. Current Standard short-context API estimates include Terra and updated
 Sol/Astra/Luna rates; historical atomic allocations retain their recorded prices.
+
+
+## Intelligence gain
+
+Enable the shared policy explicitly in the service file:
+
+```yaml
+intelligence_policy: {enabled: true}
+```
+
+Until enabled, existing routes retain their legacy behavior. The operator MCP tools
+`crescendo_intelligence_gain_get` and `crescendo_intelligence_gain_set` read/set `gain`
+from 0 to 2 (default 1). The atomic operator state is `intelligence-policy.json` in the
+service state directory. The public dashboard displays the policy; mutations remain
+operator-only MCP operations, so public viewers cannot change model spend.
+
+| Base work at gain 1 | Model | Effort ceiling |
+| --- | --- | --- |
+| Routine extraction | Luna low | medium |
+| Bounded known-pattern, low risk | Terra low | medium |
+| Ordinary implementation, review or coordination | Terra medium | medium |
+| Complex causal/invariant reasoning | Sol high | xhigh |
+| Exceptional mental difficulty | Sol xhigh | max |
+
+High-risk mechanical work has a Terra/medium baseline. Risk is not complexity, and
+GPU involvement, file count, failed builds and lease waits do not establish mental difficulty.
+Only grounded, independently reported capability feedback can promote retries. Promotions
+happen before gain; no retry or explicit baseline label bypasses gain zero or two.
+
+For model rank b (Luna=0, Terra=1, Sol=2, Astra=3), gain g maps to b*g below one and
+b+(g-1)*(3-b) above one. Stable task/role hashing rounds fractional scores; gain 0.75
+moves about a quarter of ordinary Terra work to Luna without rerolling on retries.
+Reasoning follows the same transform within each profile ceiling. High-risk reasoning
+retains a medium floor even at gain zero. Every role follows gain, including classifiers,
+helpers, reviews and standalone planners. Built-in delegation and ultra effort remain disabled.
+
+Smartass permission is separate. Without it, requested Astra is visibly capped to Sol;
+gain never grants permission or Fast mode. Unsupported or quota-avoided routes defer
+rather than silently switching model. Work without a profile receives one cached, bounded,
+read-only classification; malformed or failed classification defers without spending delivery
+attempts, with a five-minute failure cache. Cache identity follows task acceptance/scope,
+not gain, retry number or checkout SHA.
+
+Local agent sessions adopt changes after a completed turn and outstanding owned commands.
+Model changes create a fresh sealed session with full task/handoff context while retaining the
+logical run and turn budget. Same-model effort changes reuse the thread. Failed replacements
+keep the original session until a replacement succeeds. Once quiescent, bounded policy waits
+can release their slot through a synced held-run record; restart resumes the original run,
+attempt and next turn without creating a completed-task record. Background jobs retain their
+existing absolute command deadline. Policy status updates never renew native progress. Unverified child
+state keeps the change pending; current adaptive classification/handoff requires local workers.
+SSH-only projects must remain on legacy policy until their remote boundary can be verified.
+
+External reviewers/planners use the loopback-only read interface
+`GET /api/v1/projects/:project/runs/:identity/route?role=reviewer|planner&source_sha=SHA`.
+Review identities bind to a live parent; standalone planners can bind to a retained issue
+lifecycle such as GH-12. The endpoint only resolves existing profiles and never invokes a model.
+Returned decisions include base profile, gain revision, requested/effective settings and cap
+reason. Native launchers resolve immediately before execution and retain that receipt. Native
+observations remain separate from requested settings; unavailable actual CLI settings stay
+unknown. External prices follow the selected model's retained rate snapshot and remain estimates,
+not account debits. Classifier/helper/reviewer lineage and failed attempts remain associated with
+the delivery; process completion does not prove acceptance or counterfactual model quality.
+
+Deploy both coordinator and repository tooling before activation. A cached Metalrain workspace
+with an old launcher is held at startup; merge the accepted tooling changes normally without
+resetting its source, PR, evidence or deadlines. Keep gain disabled until every active launch
+path is compatible. Start at 1.0 with three primary slots, two helpers and one heavy-command
+lease; compare outcomes within task classes before making claims about quality or cost savings.

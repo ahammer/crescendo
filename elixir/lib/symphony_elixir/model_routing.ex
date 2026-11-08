@@ -20,6 +20,84 @@ defmodule SymphonyElixir.ModelRouting do
   @efforts ~w(minimal low medium high xhigh max)
   @fixed_labels %{research: "research", pull_request: "review"}
 
+  @models ~w(gpt-6-luna gpt-6.1-terra gpt-6.1-sol gpt-6-astra)
+  @gain_efforts ~w(low medium high xhigh max)
+
+  @doc "Pure, repeatable gain transform. Promotions precede gain, never bypassing endpoints."
+  @spec gain_route(map(), String.t(), term(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def gain_route(profile, role, identity, policy, opts \\ []) do
+    with true <- SymphonyElixir.IntelligencePolicy.valid_gain?(policy.gain),
+         :ok <- SymphonyElixir.IntelligencePolicy.validate_profile(profile) do
+      identity = if is_tuple(identity), do: Tuple.to_list(identity), else: identity
+      {:ok, gain_decision(profile, role, identity, policy, opts)}
+    else
+      false -> {:error, "invalid gain"}
+      error -> error
+    end
+  end
+
+  defp base_levels(%{"complexity" => complexity, "risk" => risk}) do
+    case complexity do
+      "routine" -> {0, 0, 1}
+      "standard" -> {1, if(risk == "low", do: 0, else: 1), 1}
+      "complex" -> {2, 2, 3}
+      "exceptional" -> {2, 3, 4}
+    end
+  end
+
+  defp profile_levels(profile, feedback) do
+    {model, effort, ceiling} = base_levels(profile)
+    baseline = profile["baseline"] || %{}
+    floor = if profile["risk"] == "high", do: 1, else: 0
+    model = max(Enum.find_index(@models, &(&1 == baseline["model"])) || model, floor)
+    effort = min(Enum.find_index(@gain_efforts, &(&1 == baseline["effort"])) || effort, ceiling)
+    {promote(model, 3, "model", feedback), promote(effort, ceiling, "reasoning", feedback), ceiling, floor}
+  end
+
+  defp valid_feedback?(feedback) do
+    feedback["kind"] in ["insufficient_reasoning", "insufficient_model"] and
+      is_binary(feedback["reason"]) and feedback["reason"] != "" and
+      is_list(feedback["evidence_refs"]) and feedback["evidence_refs"] != []
+  end
+
+  defp promote(base, ceiling, dimension, feedback) do
+    matching = feedback["kind"] == "insufficient_" <> dimension
+    steps = feedback[dimension <> "_steps"] || if(matching, do: 1, else: 0)
+    if valid_feedback?(feedback) and is_integer(steps) and steps > 0, do: min(base + steps, ceiling), else: base
+  end
+
+  defp gain_decision(profile, role, identity, policy, opts) do
+    feedback = Keyword.get(opts, :feedback, %{})
+    {model, effort, ceiling, floor} = profile_levels(profile, feedback)
+    model = rounded_gain(model, policy.gain, 3, {identity, role, :model})
+    effort = max(floor, rounded_gain(effort, policy.gain, ceiling, {identity, role, :effort}))
+    capped = model == 3 and not Keyword.get(opts, :smartass, false)
+    effective = if capped, do: 2, else: model
+
+    route = %{
+      "model" => Enum.at(@models, effective),
+      "effort" => Enum.at(@gain_efforts, effort),
+      "label" => profile["legacy_label"] || "default",
+      "profile" => profile,
+      "role" => role,
+      "identity" => identity,
+      "policy" => %{"version" => "gain-v1", "gain" => policy.gain, "revision" => policy.revision},
+      "requested_model" => Enum.at(@models, model),
+      "requested_effort" => Enum.at(@gain_efforts, effort),
+      "cap_reason" => if(capped, do: "smartass_off"),
+      "promotion" => if(valid_feedback?(feedback), do: feedback)
+    }
+
+    Map.put(route, "decision_id", SymphonyElixir.IntelligencePolicy.digest(route))
+  end
+
+  defp rounded_gain(base, gain, upper, key) do
+    target = if gain <= 1, do: base * gain, else: base + (gain - 1) * (upper - base)
+    lower = floor(target)
+    <<fraction::unsigned-64, _::binary>> = :crypto.hash(:sha256, :erlang.term_to_binary({"gain-v1", key}))
+    min(upper, lower + if(fraction / 18_446_744_073_709_551_616 < target - lower, do: 1, else: 0))
+  end
+
   @spec validate(map()) :: :ok | {:error, String.t()}
   def validate(%{"label_prefix" => prefix, "default" => default, "labels" => labels} = routing)
       when is_binary(prefix) and is_map(labels) do
@@ -73,8 +151,42 @@ defmodule SymphonyElixir.ModelRouting do
   @spec select_for_run(map() | nil, %{optional(atom()) => map() | nil}, Issue.t(), pos_integer(), keyword()) ::
           {:ok, map() | nil} | {:wait, String.t()} | {:error, String.t()}
   def select_for_run(routing, fixed_routes, %Issue{} = issue, item_attempt, opts \\ []) do
-    with {:ok, route} <- base_route(routing, fixed_routes, issue, item_attempt) do
-      back_off(routing, route, Keyword.get(opts, :avoid, %{}))
+    with {:ok, route} <- run_base_route(routing, fixed_routes, issue, item_attempt) do
+      apply_backoff(routing, route, Keyword.get(opts, :avoid, %{}))
+    end
+  end
+
+  defp apply_backoff(_routing, %{"policy" => _, "model" => model} = route, avoid) do
+    case Map.fetch(avoid, model) do
+      {:ok, reason} -> {:wait, reason}
+      :error -> {:ok, route}
+    end
+  end
+
+  defp apply_backoff(routing, route, avoid), do: back_off(routing, route, avoid)
+
+  defp run_base_route(routing, fixed_routes, issue, item_attempt) do
+    if SymphonyElixir.IntelligencePolicy.enabled?() do
+      role =
+        case issue.kind do
+          :research -> "scorecard"
+          :pull_request -> "reviewer"
+          _ -> "delivery"
+        end
+
+      published = SymphonyElixir.IntelligencePolicy.profile(issue)
+      profile = published || SymphonyElixir.Operations.cached_routing_profile(issue)
+      needs_profile = is_nil(profile) and role in ["delivery", "reviewer"]
+      selected_role = if needs_profile, do: "classifier", else: role
+
+      profile = profile || SymphonyElixir.IntelligencePolicy.role_profile(selected_role)
+      identity = {SymphonyElixir.Project.current(), issue.identifier}
+
+      with {:ok, route} <- SymphonyElixir.IntelligencePolicy.resolve(profile, selected_role, identity) do
+        {:ok, Map.merge(route, %{"needs_classification" => selected_role == "classifier", "size" => nil})}
+      end
+    else
+      base_route(routing, fixed_routes, issue, item_attempt)
     end
   end
 
