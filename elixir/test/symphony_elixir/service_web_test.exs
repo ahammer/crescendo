@@ -68,6 +68,13 @@ defmodule SymphonyElixir.ServiceWebTest do
   end
 
   test "local launchers receive JSON decisions bound to a retained task, while remote readers cannot", %{service: service} do
+    previous_home = System.get_env("CODEX_HOME")
+    catalog_home = Path.join(service.state_root, "test-models")
+    File.mkdir_p!(catalog_home)
+    model = %{"slug" => "gpt-6.1-terra", "supported_reasoning_levels" => [%{"effort" => "medium"}]}
+    File.write!(Path.join(catalog_home, "models_cache.json"), Jason.encode!(%{"models" => [model]}))
+    System.put_env("CODEX_HOME", catalog_home)
+    on_exit(fn -> restore_env("CODEX_HOME", previous_home) end)
     Service.put_current(%{service | intelligence_policy: %{"enabled" => true}})
     pid = GenServer.whereis(Project.via("alpha", :orchestrator))
     table = :sys.get_state(pid).operations
@@ -89,6 +96,30 @@ defmodule SymphonyElixir.ServiceWebTest do
     assert json_response(get(local, String.replace(url, "role=planner", "role=helper")), 409)
     assert json_response(get(local, String.replace(url, "source_sha=", "source_sha[]=")), 409)
     assert json_response(get(local, String.replace(url, "/alpha/", "/missing/")), 503)
+  end
+
+  test "an observer that cannot run before its deadline remains unknown" do
+    previous = Service.current()
+    :persistent_term.put({Service, :current}, nil)
+
+    peer =
+      spawn(fn ->
+        receive do
+          {:"$gen_call", {observer, _}, _request} ->
+            :erlang.suspend_process(observer)
+            receive do: (:stop -> :ok)
+        end
+      end)
+
+    try do
+      state = SymphonyElixirWeb.ControlState.payload(orchestrator: peer, timeout: 50)
+      assert state.snapshot_status == "partial"
+      assert state.counts.running == nil
+      assert [%{project: nil, status: :timeout}] = state.snapshot_errors
+    after
+      send(peer, :stop)
+      :persistent_term.put({Service, :current}, previous)
+    end
   end
 
   test "control observation is live, scoped and independent of retained analytics" do
