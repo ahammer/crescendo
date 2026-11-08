@@ -176,6 +176,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
     ~H"""
     <section id="issue-workspace" phx-hook="BoardView" class={["issue-workspace", "workspace-section-#{@section}", @payload[:error] && "dash-error"]}>
+      <aside :if={@payload[:intelligence_policy]} id="intelligence-policy" class="mediahint">
+        Intelligence gain <strong><%= @payload.intelligence_policy.gain %></strong> · <%= if @payload.intelligence_policy.enabled, do: "task-based routing", else: "legacy routing" %>
+        <span :if={@payload.intelligence_policy[:error]}><%= @payload.intelligence_policy.error %></span>
+        <span>Operator control: crescendo_intelligence_gain_set — gain from 0 to 2. Smartass permission remains separate.</span>
+      </aside>
       <header class="workspace-top">
         <div class="workspace-brand"><span class="brand-mark workspace-mark" aria-hidden="true">≋</span><strong>Crescendo</strong><span class="workspace-slash">/</span><span>Issue workspace</span></div>
         <span id="service-revision" class="workspace-subtitle"><%= if @payload.service.revision do %>Revision <a href={@payload.service.commit_url} title={@payload.service.revision}><%= String.slice(@payload.service.revision, 0, 7) %></a><% else %>Revision unknown<% end %></span>

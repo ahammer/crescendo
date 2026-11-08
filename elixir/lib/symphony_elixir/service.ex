@@ -137,6 +137,7 @@ defmodule SymphonyElixir.Service do
     field(:port, :integer)
     field(:state_root, :string)
     field(:slots, :integer, default: 3)
+    field(:intelligence_policy, :map, default: %{"enabled" => false})
     field(:defaults, :map, default: %{})
     field(:projects, :map, default: %{})
     embeds_one(:throttle, Throttle, on_replace: :update, defaults_to_struct: true)
@@ -166,13 +167,16 @@ defmodule SymphonyElixir.Service do
     attrs = flatten(raw)
 
     %__MODULE__{}
-    |> cast(attrs, [:host, :port, :state_root, :slots, :defaults, :projects], empty_values: [])
+    |> cast(attrs, [:host, :port, :state_root, :slots, :defaults, :projects, :intelligence_policy], empty_values: [])
     |> cast_embed(:throttle, with: &Throttle.changeset/2)
     |> cast_embed(:pricing, with: &Pricing.changeset/2)
     |> cast_embed(:helpers, with: &Helpers.changeset/2)
     |> cast_embed(:quiet_window, with: &QuietWindow.changeset/2)
     |> validate_number(:port, greater_than_or_equal_to: 0)
     |> validate_number(:slots, greater_than: 0)
+    |> validate_change(:intelligence_policy, fn :intelligence_policy, value ->
+      if is_map(value) and Map.keys(value) == ["enabled"] and is_boolean(value["enabled"]), do: [], else: [intelligence_policy: "requires only boolean enabled"]
+    end)
     |> validate_projects()
     |> apply_action(:validate)
     |> case do
@@ -225,7 +229,8 @@ defmodule SymphonyElixir.Service do
       "throttle" => raw["throttle"],
       "pricing" => raw["pricing"],
       "helpers" => raw["helpers"],
-      "quiet_window" => raw["quiet_window"]
+      "quiet_window" => raw["quiet_window"],
+      "intelligence_policy" => raw["intelligence_policy"]
     }
     |> Map.reject(fn {_key, value} -> is_nil(value) end)
   end

@@ -89,6 +89,36 @@ defmodule SymphonyElixir.GovernorTest do
     end
   end
 
+  test "helpers follow gain while a broken policy refuses a child without crashing the governor", %{service: service, state_root: root} do
+    {service, context} = helper_fixture(service, root, 2)
+    service = %{service | intelligence_policy: %{"enabled" => true}}
+    prior = Service.current()
+    Service.put_current(service)
+    on_exit(fn -> :persistent_term.put({Service, :current}, prior) end)
+    start_supervised!({Governor, service})
+    Governor.checkin("a", 0, 0)
+    Governor.checkin("b", 0, 0)
+    assert :ok = Governor.acquire("a", "parent", :issue)
+    parent = self()
+
+    Application.put_env(:symphony_elixir, :helper_runner, fn prepared, _, settings ->
+      send(parent, {:resolved_helper, prepared.context.resolved_route, settings})
+      {:ok, %{summary: "done"}}
+    end)
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :helper_runner) end)
+    assert {:ok, _} = Governor.helper_start(context, %{"question" => "Inspect"})
+    assert_receive {:resolved_helper, %{"model" => "gpt-6-luna", "effort" => "low"}, %{model: "gpt-6-luna", effort: "low"}}
+    assert_eventually(fn -> Governor.snapshot().helpers.busy == 0 end)
+    File.write!(Path.join(root, "intelligence-policy.json"), "broken")
+    assert {:error, "intelligence policy is invalid"} = Governor.helper_start(context, %{"question" => "Inspect"})
+    assert Governor.snapshot().busy == 1
+    native = %{"policy" => %{}, "model" => "gpt-6-astra", "effort" => "high"}
+    assert {:error, :model_quota_hold} = SymphonyElixir.IntelligencePolicy.admit_native(native)
+    native = %{native | "model" => "missing-model"}
+    assert {:error, :unsupported_intelligence_route} = SymphonyElixir.IntelligencePolicy.admit_native(native)
+  end
+
   test "configuration failure stops repeated requests for its parent", %{service: service, state_root: root} do
     {service, context} = helper_fixture(service, root, 2)
     start_supervised!({Governor, service})

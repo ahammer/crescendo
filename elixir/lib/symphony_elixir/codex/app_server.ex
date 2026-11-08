@@ -56,6 +56,86 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
+  defp effective_gain_model(%{"policy" => _, "model" => requested}, observed) when is_binary(observed) and observed != requested, do: {:error, :native_model_mismatch}
+  defp effective_gain_model(_, _), do: :ok
+
+  @doc "Unknown live child processes keep the current local session."
+  @spec quiescent?(session()) :: boolean()
+  def quiescent?(%{worker_host: host}) when is_binary(host), do: false
+
+  def quiescent?(session) do
+    pid =
+      case Port.info(session.port, :os_pid) do
+        {:os_pid, value} -> value
+        _ -> nil
+      end
+
+    script = """
+    import json, os, sys, glob
+    def quiet(pid, transport=False):
+        try:
+            children = set()
+            for path in glob.glob(f'/proc/{pid}/task/*/children'):
+                try:
+                    children.update(open(path).read().split())
+                except FileNotFoundError:
+                    continue
+        except FileNotFoundError:
+            return True
+        for child in children:
+            try:
+                args = open(f'/proc/{child}/cmdline','rb').read().split(b'\\0')
+            except FileNotFoundError:
+                continue
+            # Persistent managed MCP servers are transports, not running shell jobs.
+            managed = b'mcp' in args and any(os.path.basename(a) in (b'crescendo', b'symphony', b'metalrain') for a in args)
+            support = transport and os.path.basename(args[0]) in (b'erl_child_setup', b'inet_gethost')
+            if managed or support:
+                if not quiet(child, transport=True):
+                    return False
+                continue
+            return False
+        return True
+    print(json.dumps(quiet(sys.argv[1])))
+    """
+
+    with true <- is_integer(pid), {"true\n", 0} <- System.cmd("python3", ["-c", script, to_string(pid)], stderr_to_stdout: true), do: true, else: (_ -> false)
+  end
+
+  @doc "Drain background output at a policy boundary without spending another model turn."
+  @spec wait_background(session()) :: :ok
+  def wait_background(session) do
+    drain_background(session.port, System.monotonic_time(:millisecond) + 1_000)
+  end
+
+  defp drain_background(port, deadline) do
+    remaining = max(0, deadline - System.monotonic_time(:millisecond))
+
+    receive do
+      {^port, {:data, {kind, chunk}}} when kind in [:eol, :noeol] ->
+        line = Process.get({port, :gain_pending_line}, "") <> to_string(chunk)
+
+        cond do
+          byte_size(line) > @frame_limit ->
+            overflow(port, :frame_assembly, byte_size(line))
+
+          kind == :noeol ->
+            Process.put({port, :gain_pending_line}, line)
+
+          true ->
+            Process.delete({port, :gain_pending_line})
+            decode_notification(port, line)
+        end
+
+        if remaining > 0, do: drain_background(port, deadline), else: :ok
+
+      {^port, {:exit_status, _}} ->
+        :ok
+    after
+      remaining -> :ok
+    end
+  end
+
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
@@ -66,7 +146,8 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     policies = Keyword.get(opts, :session_policies)
 
-    with :ok <- SmartassMode.admit_route(model_route),
+    with :ok <- SymphonyElixir.IntelligencePolicy.admit_native(model_route),
+         :ok <- SmartassMode.admit_route(model_route),
          {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, port} <- start_port(expanded_workspace, worker_host, dynamic_tool_binding, session_env) do
       :ok = SymphonyElixir.ProcessGroup.protect(port)
@@ -85,6 +166,7 @@ defmodule SymphonyElixir.Codex.AppServer do
                codex,
                opts
              ),
+           :ok <- effective_gain_model(model_route, native.metadata[:observed_model]),
            :ok <- SmartassMode.admit_effective(model_route, native.metadata[:model]) do
         session = %{
           port: port,
@@ -140,6 +222,15 @@ defmodule SymphonyElixir.Codex.AppServer do
       Keyword.get(opts, :tool_executor, fn tool, arguments ->
         DynamicTool.execute(tool, arguments, dynamic_tool_binding, issue: issue)
       end)
+
+    if model_route && model_route["policy"] do
+      current = Process.get({port, :metadata}, metadata)
+
+      Process.put(
+        {port, :metadata},
+        Map.merge(current, %{requested_model: model_route["model"], requested_effort: model_route["effort"], effort: model_route["effort"], observed_effort: nil, routing_decision: model_route})
+      )
+    end
 
     Process.put({port, :on_message}, on_message)
     Process.put({port, :turn_handler}, {tool_executor, auto_approve_requests})
@@ -356,13 +447,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp remote_launch_command(workspace, dynamic_tool_binding, session_env) when is_binary(workspace) do
     exports =
-      case session_vars(session_env) do
-        [] ->
-          nil
-
-        vars ->
-          "export " <> Enum.map_join(vars, " ", fn {name, value} -> "#{name}=#{shell_escape(value)}" end)
-      end
+      "export " <> Enum.map_join(session_vars(session_env), " ", fn {name, value} -> "#{name}=#{shell_escape(value)}" end)
 
     [
       "cd #{shell_escape(workspace)}",
@@ -383,7 +468,9 @@ defmodule SymphonyElixir.Codex.AppServer do
   # Every command in the run inherits these: the delivery helper checks the
   # route label, and machine-wide tooling attributes work to the work item.
   defp session_vars(%{route: route, work_item: work_item, run_id: run_id}),
-    do: SymphonyElixir.RunEnv.vars(if(is_binary(work_item), do: work_item), route && route["label"], run_id, route && route["size"])
+    do:
+      SymphonyElixir.RunEnv.vars(if(is_binary(work_item), do: work_item), route && route["label"], run_id, route && route["size"]) ++
+        [{"CRESCENDO_INTELLIGENCE_POLICY", to_string(SymphonyElixir.IntelligencePolicy.enabled?())}]
 
   defp tracker_secret_port_env(dynamic_tool_binding) do
     dynamic_tool_binding.secret_environment_names
@@ -468,7 +555,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         policies: policies,
         thread_config: Process.get({port, :thread_config}),
         tools_hash: fingerprint(binding.tool_specs),
-        route: route,
+        route: if(route && route["policy"], do: Map.take(route, ["model", "effort", "label", "size"]), else: route),
         codex_hash: fingerprint(Map.from_struct(codex)),
         native: initialized,
         contract: Keyword.get(opts, :contract_hash)
@@ -514,6 +601,10 @@ defmodule SymphonyElixir.Codex.AppServer do
       user_agent: initialized["userAgent"],
       codex_version: native_version(initialized["userAgent"]),
       model: result["model"] || (route && route["model"]),
+      observed_model: result["model"],
+      thread_effort: result["reasoningEffort"],
+      observed_effort: nil,
+      requested_effort: route && route["effort"],
       requested_model: route && route["model"],
       model_provider: result["modelProvider"],
       effort: (route && route["effort"]) || result["reasoningEffort"],
@@ -766,7 +857,9 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp start_turn(port, thread_id, prompt, workspace, approval_policy, turn_sandbox_policy, model_route) do
-    with :ok <- SmartassMode.admit_route(model_route),
+    with :ok <- SymphonyElixir.IntelligencePolicy.admit_native(model_route),
+         :ok <- effective_gain_model(model_route, Process.get({port, :metadata}, %{})[:model]),
+         :ok <- SmartassMode.admit_route(model_route),
          :ok <- SmartassMode.admit_effective(model_route, Process.get({port, :metadata}, %{})[:model]) do
       start_allowed_turn(port, thread_id, prompt, workspace, approval_policy, turn_sandbox_policy, model_route)
     end

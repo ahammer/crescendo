@@ -399,7 +399,8 @@ defmodule SymphonyElixir.Orchestrator do
         {:noreply, state}
 
       entry ->
-        entry = entry |> Map.put(:model, route && route["model"]) |> Map.put(:route, route_summary(route))
+        if route && route["policy"], do: Operations.routing_decision(state.operations, entry.run_id, route)
+        entry = entry |> Map.put(:model, route && route["model"]) |> Map.put(:route, route_summary(route)) |> Map.put(:routing_decision, route)
         {:noreply, %{state | running: Map.put(state.running, issue_id, entry)}}
     end
   end
@@ -432,6 +433,11 @@ defmodule SymphonyElixir.Orchestrator do
         :model,
         :model_provider,
         :requested_model,
+        :requested_effort,
+        :observed_model,
+        :observed_effort,
+        :thread_effort,
+        :routing_decision,
         :effort,
         :effort_source,
         :service_tier,
@@ -467,6 +473,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp account_thread_update(table, entry, update) do
+    fields = Map.take(update, [:requested_model, :requested_effort, :observed_model, :observed_effort, :routing_decision])
+    entry = Map.update(entry, :codex_provenance, fields, &Map.merge(&1, fields))
+
     case Operations.reconcile_usage(table, entry.issue.id, entry[:run_id], update, true) do
       {:ok, delta} ->
         {entry, Map.put(update, :accounted_delta, delta)}
@@ -481,6 +490,25 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_worker_down(ref, reason, running, state) do
+    issue_id = find_issue_id_for_ref(running, ref)
+
+    case state.running[issue_id] do
+      %{gain_held: true} = entry ->
+        {_entry, state} = pop_running_entry(state, issue_id)
+        :ok = release_slot(issue_id)
+        state = record_session_completion_totals(state, entry)
+        if reason != {:shutdown, :gain_policy_hold}, do: Operations.event(state.operations, "gain_hold_cleanup_error", %{run_id: entry.run_id, summary: inspect(reason, limit: 10)})
+        session = running_entry_session_id(entry)
+        state = handle_agent_down({:shutdown, :model_policy_hold}, state, issue_id, entry, session)
+        notify_dashboard()
+        {:noreply, state}
+
+      _ ->
+        ordinary_worker_down(ref, reason, running, state)
+    end
+  end
+
+  defp ordinary_worker_down(ref, reason, running, state) do
     case find_issue_id_for_ref(running, ref) do
       nil ->
         {:noreply, state}
@@ -1104,7 +1132,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms) do
-    if Map.has_key?(state.blocked, issue_id) or Map.get(running_entry, :phase) in [:workspace, :cleanup] do
+    if Map.has_key?(state.blocked, issue_id) or Map.get(running_entry, :phase) in [:workspace, :cleanup, :policy_boundary] do
       state
     else
       restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms)
@@ -1703,10 +1731,11 @@ defmodule SymphonyElixir.Orchestrator do
       end
 
     selected = selected_route(route)
-    run_id = Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
     codex = Config.settings!().codex
     {candidate, claim} = claim_checkpoint(state.operations, issue, item_attempt, worker_host, codex)
-    candidate = if prepared, do: nil, else: candidate
+    {run_id, candidate, continuation} = gain_worker_resume(state.operations, issue, item_attempt, candidate, prepared)
+    final_attempt = resume_value(continuation, :final_attempt, final_attempt)
+    next_turn = resume_value(continuation, :next_turn, 1)
 
     spawn_result =
       with :ok <- claim do
@@ -1720,7 +1749,8 @@ defmodule SymphonyElixir.Orchestrator do
             run_id: run_id,
             codex_settings: codex,
             checkpoint: candidate,
-            quiet_continuation: prepared
+            quiet_continuation: prepared,
+            gain_continuation: continuation
           )
         end)
       end
@@ -1757,30 +1787,19 @@ defmodule SymphonyElixir.Orchestrator do
             model: selected && selected["model"],
             route: route_summary(selected),
             pricing_rates: Operations.rates(Config.settings!().pricing),
-            turn_count: 0,
+            turn_count: next_turn - 1,
             retry_attempt: normalize_retry_attempt(attempt),
             # Reconciliation refreshes `issue`; the reviewed head stays the dispatched one.
             dispatched_head: Autopilot.dispatched_head(issue),
             item_attempt: item_attempt,
+            gain_continuation: continuation,
             final_attempt: final_attempt,
             started_at: DateTime.utc_now()
           })
 
         entry = Map.fetch!(running, issue.id)
 
-        Operations.start_run(state.operations, entry.run_id, %{
-          issue_id: issue.id,
-          issue_identifier: issue.identifier,
-          issue_url: issue.url,
-          kind: issue.kind,
-          delivery_key: issue.delivery_key,
-          handoff: Handoff.record(issue),
-          reduced_scope: "#{Config.settings!().labels.prefix}:delivery:split" in issue.labels,
-          review_head: entry.dispatched_head,
-          requested_route: entry.route,
-          item_attempt: item_attempt,
-          summary: "Dispatched to #{worker_host || "local"}"
-        })
+        register_gain_run(state.operations, entry, issue, continuation)
 
         %{
           state
@@ -1803,6 +1822,63 @@ defmodule SymphonyElixir.Orchestrator do
 
         startup_failed(state, issue.id, entry, Startup.diagnostic(:worker_spawn, reason))
     end
+  end
+
+  defp resume_value(nil, _key, fallback), do: fallback
+  defp resume_value(budget, key, _fallback), do: Map.fetch!(budget, key)
+
+  defp register_gain_run(table, entry, issue, continuation) do
+    if continuation do
+      :ok = Operations.resume_run(table, entry.run_id)
+    else
+      Operations.start_run(table, entry.run_id, %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_url: issue.url,
+        kind: issue.kind,
+        delivery_key: issue.delivery_key,
+        handoff: Handoff.record(issue),
+        reduced_scope: "#{Config.settings!().labels.prefix}:delivery:split" in issue.labels,
+        review_head: entry.dispatched_head,
+        requested_route: entry.route,
+        item_attempt: entry.item_attempt,
+        summary: "Dispatched to #{entry.worker_host || "local"}"
+      })
+    end
+  end
+
+  defp gain_worker_resume(table, issue, attempt, checkpoint, prepared) do
+    case gain_continuation(table, issue, attempt) do
+      %{run_id: id, budget: budget} -> {id, nil, budget}
+      nil -> {Base.encode16(:crypto.strong_rand_bytes(12), case: :lower), if(prepared, do: nil, else: checkpoint), nil}
+    end
+  end
+
+  defp gain_continuation(table, issue, attempt) do
+    if SymphonyElixir.IntelligencePolicy.enabled?() do
+      resolve_held_run(table, issue, attempt, Operations.latest_item_run(table, issue.identifier))
+    end
+  end
+
+  defp resolve_held_run(table, issue, attempt, %{run_id: run_id, status: "held", gain_budget: budget} = run) do
+    if held_contract_matches?(run, issue, attempt) do
+      %{run_id: run_id, budget: budget}
+    else
+      details = %{reason: "gain_contract_changed", issue_identifier: issue.identifier}
+      Operations.finish_run(table, run_id, "interrupted", details)
+      nil
+    end
+  end
+
+  defp resolve_held_run(_table, _issue, _attempt, _run), do: nil
+
+  defp held_contract_matches?(run, issue, attempt) do
+    budget = run.gain_budget
+    contract = SymphonyElixir.IntelligencePolicy.digest({issue.title, issue.description})
+
+    budget.item_attempt == attempt and budget.contract == contract and budget.next_turn <= budget.max_turns and
+      run.issue_id == issue.id and run[:delivery_key] == issue.delivery_key and
+      run[:handoff] == Handoff.record(issue) and run[:review_head] == Autopilot.dispatched_head(issue)
   end
 
   defp start_worker_task(supervisor, fun) do
@@ -2980,6 +3056,28 @@ defmodule SymphonyElixir.Orchestrator do
     {:reply, {snapshot, state.operations, Project.current()}, state}
   end
 
+  def handle_call({:routing_feedback, issue_id, contract}, _from, state) do
+    {:reply, Operations.routing_feedback(state.operations, issue_id, contract), state}
+  end
+
+  def handle_call({:hold_gain_run, issue_id, run_id, budget}, {pid, _}, state) do
+    case state.running[issue_id] do
+      %{pid: ^pid, run_id: ^run_id} = entry ->
+        case Operations.hold_run(state.operations, run_id, budget) do
+          :ok -> {:reply, :ok, put_in(state.running[issue_id], Map.put(entry, :gain_held, true))}
+          error -> {:reply, error, state}
+        end
+
+      _ ->
+        {:reply, {:error, :stale_gain_hold}, state}
+    end
+  end
+
+  def handle_call({:model_route, identity, role, sha}, _from, state) do
+    result = external_model_route(state, identity, role, sha)
+    {:reply, result, state}
+  end
+
   def handle_call(:request_refresh, _from, state) do
     coalesced = poll_due?(state)
     state = if coalesced, do: state, else: schedule_tick(state, 0)
@@ -3559,7 +3657,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp selected_route(_result), do: nil
 
   defp route_summary(%{} = route) do
-    %{
+    legacy = %{
       model: route["model"],
       effort: route["effort"],
       label: route["label"],
@@ -3567,6 +3665,18 @@ defmodule SymphonyElixir.Orchestrator do
       size: route["size"],
       backoff: route["backoff"]
     }
+
+    if route["policy"] do
+      Map.merge(legacy, %{
+        profile: route["profile"],
+        policy: route["policy"],
+        decision_id: route["decision_id"],
+        requested_model: route["requested_model"],
+        cap_reason: route["cap_reason"]
+      })
+    else
+      legacy
+    end
   end
 
   defp route_summary(_route), do: nil
@@ -4084,4 +4194,45 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp safe_pull_error({:github_api_status, status}) when is_integer(status), do: "GitHub HTTP #{status}"
   defp safe_pull_error(_), do: "GitHub fetch failed"
+
+  defp external_model_route(state, identity, role, sha) do
+    cond do
+      not SymphonyElixir.IntelligencePolicy.enabled?() -> {:ok, %{enabled: false}}
+      role not in ["reviewer", "planner"] -> {:error, "invalid role"}
+      not is_binary(sha) -> {:error, "invalid source"}
+      not Regex.match?(~r/\A[0-9a-f]{40,64}\z/, sha) -> {:error, "invalid source"}
+      true -> bound_model_route(state, identity, role, sha)
+    end
+  end
+
+  defp bound_model_route(state, identity, role, sha) do
+    run = Operations.bound_run(state.operations, identity) || planner_lifecycle(state, identity, role)
+    active = Enum.any?(state.running, fn {_, entry} -> entry.run_id == identity end)
+
+    cond do
+      is_nil(run) -> {:error, "unknown task lifecycle"}
+      role == "reviewer" and not active -> {:error, "review parent is not active"}
+      true -> resolve_bound_model(run, identity, role, sha)
+    end
+  end
+
+  defp planner_lifecycle(state, identity, "planner"), do: Operations.latest_item_run(state.operations, identity)
+  defp planner_lifecycle(_state, _identity, _role), do: nil
+
+  defp resolve_bound_model(run, identity, role, sha) do
+    alias SymphonyElixir.IntelligencePolicy
+    profile = get_in(run, [:routing_decision, "profile"]) || planner_profile(role)
+
+    with true <- is_map(profile),
+         {:ok, route} <- IntelligencePolicy.resolve(profile, role, {Project.current(), run.issue_identifier}),
+         :ok <- IntelligencePolicy.admit_native(route) do
+      {:ok, Map.merge(route, %{"enabled" => true, "parent_run_id" => run[:run_id] || identity, "source_sha" => sha, "work_item" => run[:issue_identifier]})}
+    else
+      false -> {:error, "classification is required"}
+      error -> error
+    end
+  end
+
+  defp planner_profile("planner"), do: SymphonyElixir.IntelligencePolicy.role_profile("planner")
+  defp planner_profile(_), do: nil
 end

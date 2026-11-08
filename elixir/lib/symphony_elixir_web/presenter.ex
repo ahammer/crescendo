@@ -68,6 +68,7 @@ defmodule SymphonyElixirWeb.Presenter do
     |> Map.merge(%{project: project, projects: project_list(service, snapshots)})
     |> Map.put(:priority_mode, PriorityMode.status(service))
     |> Map.put(:smartass_mode, SmartassMode.status(service))
+    |> Map.put(:intelligence_policy, SymphonyElixir.IntelligencePolicy.status(service))
     |> Redaction.payload(redacted(service))
   end
 

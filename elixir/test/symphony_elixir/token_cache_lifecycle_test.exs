@@ -4,6 +4,136 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
   alias SymphonyElixir.Codex.Usage
   alias SymphonyElixir.{Governor, Operations, Project, Service}
 
+  test "gain changes replace native sessions without renewing logical turns or losing the task" do
+    fixture = native_fixture()
+    change_fixture(fixture, %{"use_requested_model" => true, "teardown_usage" => true})
+    route = %{model: "gpt-6.1-sol", effort: "xhigh"}
+    routing = %{label_prefix: "symphony:model:", default: route, labels: %{"symphony:model:sol" => route}, size_label_prefix: "symphony:size:", sizes: %{large: route}}
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: Path.join(fixture.root, "workspaces"), codex_command: Config.settings!().codex.command, codex_routing: routing)
+    service = enable_gain(fixture)
+
+    issue = %{
+      fixture.issue
+      | state: "In Progress",
+        dispatchable: true,
+        description: "Preserve the original acceptance and workpad",
+        labels: ["symphony:complexity:standard", "symphony:risk:normal", "symphony:size:large"]
+    }
+
+    fetcher = fn _ ->
+      assert {:ok, _} = SymphonyElixir.IntelligencePolicy.set(service, %{"gain" => 0})
+      {:ok, [issue]}
+    end
+
+    assert :ok = AgentRunner.run(issue, self(), max_turns: 2, issue_state_fetcher: fetcher, run_id: "same-logical-run")
+    starts = Enum.filter(requests(fixture), &(&1["method"] == "thread/start"))
+    turns = Enum.filter(requests(fixture), &(&1["method"] == "turn/start"))
+    assert {length(starts), length(turns)} == {2, 2}
+    assert Enum.map(starts, & &1["params"]["model"]) == ["gpt-6.1-terra", "gpt-6-luna"]
+    prompt = List.last(turns)["params"]["input"] |> Enum.map_join(& &1["text"])
+    assert prompt =~ issue.description
+    assert prompt =~ "Logical turn 2 of 2"
+    assert prompt =~ "Preserve acceptance"
+    updates = gain_updates([])
+
+    old_tail =
+      Enum.find_index(updates, fn update ->
+        update[:model] == "gpt-6.1-terra" and match?(%{total: %{total_tokens: 240}}, Usage.snapshot(update))
+      end)
+
+    replacement = Enum.find_index(updates, &(&1[:event] == :thread_initialized and &1[:model] == "gpt-6-luna"))
+    assert is_integer(old_tail) and is_integer(replacement) and old_tail < replacement
+  end
+
+  for mode <- [:same_contract, :changed_delivery] do
+    @tag gain_resume: mode
+    test "failed gain replacement survives restart with #{mode}", %{gain_resume: mode} do
+      fixture = native_fixture()
+      issue = %{fixture.issue | state: "In Progress", dispatchable: true, description: "Keep acceptance", labels: ["symphony:complexity:standard", "symphony:risk:normal"]}
+      change_fixture(fixture, %{"use_requested_model" => true, "wait_turn" => true, "reject_luna" => true})
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: Path.join(fixture.root, "workspaces"),
+        codex_command: "python3 #{Path.join(fixture.root, "server.py")}",
+        max_turns: 2,
+        hook_after_run: "sleep 0.4",
+        codex_turn_timeout_ms: 1_000,
+        poll_interval_ms: 3_600_000
+      )
+
+      start_supervised!({WorkflowStore, name: Project.via("gain-test", :workflow_store), project: "gain-test", path: Workflow.workflow_file_path()})
+      {:ok, service} = Service.parse(%{"paths" => %{"state" => "service-state"}, "projects" => %{"gain-test" => %{}}}, Path.join(fixture.root, "service.yml"))
+      service = enable_gain(fixture, service)
+      start_supervised!({Governor, service})
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      supervisor = start_supervised!(Task.Supervisor)
+
+      options = [
+        task_supervisor: supervisor,
+        name: Project.via("gain-test", :orchestrator),
+        project: "gain-test",
+        operations_path: Path.join(fixture.root, "gain.dets"),
+        operations_table: :gain_worker_test
+      ]
+
+      pid = start_supervised!({Orchestrator, options})
+      eventually(fn -> File.exists?(Path.join(fixture.root, "turn-started")) end)
+      entry = :sys.get_state(pid).running[issue.id]
+      assert {:ok, _} = SymphonyElixir.IntelligencePolicy.set(service, %{"gain" => 0})
+      File.write!(Path.join(fixture.root, "finish-turn"), "")
+      eventually(fn -> File.exists?(Path.join(fixture.root, "replacement-failed")) end)
+      assert File.read!(Path.join(fixture.root, "replacement-failed")) == "True"
+      File.write!(Path.join(service.state_root, "drain"), "test")
+      eventually(fn -> get_in(:sys.get_state(pid).running, [issue.id, :gain_held]) == true end, 500)
+      send(pid, {:DOWN, entry.ref, :process, entry.pid, {:cleanup_failure, :fixture}})
+      eventually(fn -> :sys.get_state(pid).running == %{} end, 500)
+      eventually(fn -> not Process.alive?(entry.pid) end, 500)
+      held = Operations.bound_run(:gain_worker_test, entry.run_id)
+      assert held.status == "held" and held.gain_budget.next_turn == 2 and held.gain_budget.max_turns == 2
+      assert :dets.lookup(:gain_worker_test, {:task, entry.run_id}) == []
+      assert Governor.snapshot().busy == 0
+      assert :sys.get_state(pid).autopilot.item_attempts == %{}
+      stop_supervised!(Orchestrator)
+      File.rm!(Path.join(fixture.root, "turn-started"))
+      File.rm!(Path.join(fixture.root, "finish-turn"))
+      change_fixture(fixture, %{"reject_luna" => false})
+      File.rm!(Path.join(service.state_root, "drain"))
+      changed = if mode == :changed_delivery, do: %{issue | delivery_key: "replacement-owner"}, else: issue
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [changed])
+      pid = start_supervised!({Orchestrator, options})
+      eventually(fn -> File.exists?(Path.join(fixture.root, "turn-started")) end, 500)
+      resumed = :sys.get_state(pid).running[issue.id]
+      assert resumed.item_attempt == entry.item_attempt
+
+      if mode == :same_contract do
+        assert resumed.run_id == entry.run_id
+        assert Operations.bound_run(:gain_worker_test, entry.run_id).started_s == held.started_s
+      else
+        assert resumed.run_id != entry.run_id
+        prior = Operations.bound_run(:gain_worker_test, entry.run_id)
+        assert prior.status == "interrupted" and prior.reason == "gain_contract_changed"
+        refute Map.has_key?(prior, :gain_budget)
+      end
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | state: "Done"}])
+      File.write!(Path.join(fixture.root, "finish-turn"), "")
+      eventually(fn -> :sys.get_state(pid).running == %{} end)
+      turns = Enum.filter(requests(fixture), &(&1["method"] == "turn/start"))
+      assert length(turns) == 2
+      prompt = List.last(turns)["params"]["input"] |> Enum.map_join(& &1["text"])
+
+      if mode == :same_contract do
+        assert prompt =~ "Logical turn 2 of 2"
+        assert prompt =~ "Keep acceptance"
+      else
+        refute prompt =~ "Logical turn 2 of 2"
+      end
+
+      assert :sys.get_state(pid).autopilot.item_attempts == %{}
+    end
+  end
+
   test "startup notifications survive RPC waits and terminal success requires the matching native turn" do
     fixture = native_fixture()
     parent = self()
@@ -1278,6 +1408,38 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     {table, path}
   end
 
+  defp gain_updates(acc) do
+    receive do
+      {:codex_worker_update, _, "same-logical-run", update} -> gain_updates([update | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  defp enable_gain(fixture, service \\ nil) do
+    previous = Service.current()
+    home = System.get_env("CODEX_HOME")
+    codex_home = Path.join(fixture.root, "models")
+    File.mkdir_p!(codex_home)
+
+    File.write!(
+      Path.join(codex_home, "models_cache.json"),
+      Jason.encode!(%{"models" => Enum.map(~w(gpt-6-luna gpt-6.1-terra gpt-6.1-sol), &%{"slug" => &1, "supported_reasoning_levels" => [%{"effort" => "low"}, %{"effort" => "medium"}]})})
+    )
+
+    System.put_env("CODEX_HOME", codex_home)
+    service = service || %Service{state_root: Path.join(fixture.root, "gain-state")}
+    service = %{service | intelligence_policy: %{"enabled" => true}}
+    Service.put_current(service)
+
+    on_exit(fn ->
+      :persistent_term.put({Service, :current}, previous)
+      restore_env("CODEX_HOME", home)
+    end)
+
+    service
+  end
+
   defp native_fixture do
     root = Path.join(System.tmp_dir!(), "native-fixture-#{System.unique_integer([:positive])}")
     workspace = Path.join(root, "workspaces/GH-1")
@@ -1297,7 +1459,7 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
     script = Path.join(root, "server.py")
 
     File.write!(script, """
-    import json, sys, time
+    import json, sys, time, os
     from pathlib import Path
     root = Path(#{inspect(root)})
     workspace = #{inspect(workspace)}
@@ -1355,14 +1517,24 @@ defmodule SymphonyElixir.TokenCacheLifecycleTest do
         elif method == 'mcpServerStatus/list':
             result = {'data':cfg.get('tools',[]),'nextCursor':None}
         elif method in ('thread/start','thread/resume'):
+            if cfg.get('reject_luna') and params.get('model') == 'gpt-6-luna':
+                try:
+                    os.kill(int((root/'original-pid').read_text()), 0)
+                    alive = True
+                except ProcessLookupError:
+                    alive = False
+                (root/'replacement-failed').write_text(str(alive))
+                emit({'id':request['id'],'error':{'code':-1,'message':'replacement unavailable'}})
+                continue
             if method == 'thread/start':
                 state['threads'] = state.get('threads',0)+1
                 thread = 'thread-'+str(state['threads'])
+                if state['threads'] == 1: (root/'original-pid').write_text(str(os.getpid()))
                 emit({'method':'thread/started','params':{'thread':{'id':thread}}})
             else:
                 thread = params['threadId']
                 if cfg.get('restore_usage',True): emit(usage(thread, state))
-            result = {'thread':{'id':thread,'status':{'type':'idle'}},'model':'resolved-model','modelProvider':'fixture','reasoningEffort':'high','serviceTier':None,'instructionSources':[workspace+'/AGENTS.md'],'cwd':workspace,'approvalPolicy':params['approvalPolicy'],'sandbox':params['sandbox']}
+            result = {'thread':{'id':thread,'status':{'type':'idle'}},'model':(params.get('model') if cfg.get('use_requested_model') else 'resolved-model'),'modelProvider':'fixture','reasoningEffort':'high','serviceTier':None,'instructionSources':[workspace+'/AGENTS.md'],'cwd':workspace,'approvalPolicy':params['approvalPolicy'],'sandbox':params['sandbox']}
         elif method == 'thread/turns/list':
             result = {'data':[{'id':state.get('last_turn','turn-1'),'status':cfg.get('last_status','completed')}]}
         elif method == 'thread/read':

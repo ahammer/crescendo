@@ -67,6 +67,30 @@ defmodule SymphonyElixir.ServiceWebTest do
     {:ok, service: service, quiet_issue: issue}
   end
 
+  test "local launchers receive JSON decisions bound to a retained task, while remote readers cannot", %{service: service} do
+    Service.put_current(%{service | intelligence_policy: %{"enabled" => true}})
+    pid = GenServer.whereis(Project.via("alpha", :orchestrator))
+    table = :sys.get_state(pid).operations
+    profile = SymphonyElixir.IntelligencePolicy.role_profile("planner")
+    {:ok, route} = SymphonyElixir.IntelligencePolicy.resolve(profile, "delivery", {"alpha", "MT-7"})
+    Operations.start_run(table, "gain-parent", %{issue_id: "issue-held", issue_identifier: "MT-7", kind: :issue})
+    Operations.routing_decision(table, "gain-parent", route)
+    url = "/api/v1/projects/alpha/runs/MT-7/route?role=planner&source_sha=" <> String.duplicate("a", 40)
+    local = %{build_conn() | remote_ip: {127, 0, 0, 1}}
+    decision = json_response(get(local, url), 200)
+    assert decision["parent_run_id"] == "gain-parent"
+    assert decision["source_sha"] == String.duplicate("a", 40)
+    assert decision["model"] == "gpt-6.1-terra"
+    assert decision["identity"] == ["alpha", "MT-7"]
+    assert decision["policy"]["gain"] == 1
+    assert decision["profile"] == profile
+    assert json_response(get(%{build_conn() | remote_ip: {10, 0, 0, 1}}, url), 403)
+    assert json_response(get(local, String.replace(url, "role=planner", "role=reviewer")), 409)
+    assert json_response(get(local, String.replace(url, "role=planner", "role=helper")), 409)
+    assert json_response(get(local, String.replace(url, "source_sha=", "source_sha[]=")), 409)
+    assert json_response(get(local, String.replace(url, "/alpha/", "/missing/")), 503)
+  end
+
   test "control observation is live, scoped and independent of retained analytics" do
     alpha = GenServer.whereis(Project.via("alpha", :orchestrator))
     :erlang.trace_pattern({Operations, :snapshot, 2}, true, [])

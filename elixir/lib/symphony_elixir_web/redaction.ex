@@ -40,7 +40,7 @@ defmodule SymphonyElixirWeb.Redaction do
       |> update_in([:upcoming, :ready], &scrub.(&1, fn item -> %{item | title: @hidden} end))
       |> update_in([:upcoming, :waiting], &scrub.(&1, fn item -> %{item | title: @hidden, reason: "Work held by admission policy"} end))
       |> update_in([:pull_requests, :items], &scrub.(&1, fn pull -> pull(pull) end))
-      |> update_in([:usage, :activity], &scrub.(&1, fn event -> Map.drop(event, [:summary, :title, :startup, :run_id, :parent_run_id, :source_sha, :worker_pid]) end))
+      |> update_in([:usage, :activity], &scrub.(&1, fn event -> Map.drop(event, [:summary, :title, :startup, :run_id, :parent_run_id, :source_sha, :worker_pid, :route]) end))
       |> update_in([:usage], &redact_external(&1, redacted))
       |> update_in([:usage, :images], &drop_projects(&1, redacted))
       |> update_in([:usage], &redact_deliveries(&1, redacted))
@@ -50,7 +50,7 @@ defmodule SymphonyElixirWeb.Redaction do
   defp redact_external(usage, redacted) do
     Map.update(usage, :external, %{}, fn external ->
       Map.update(external, :observations, [], fn observations ->
-        scrub(observations, redacted, &Map.drop(&1, [:run_id, :parent_run_id, :parent_issue_id, :source_sha]))
+        scrub(observations, redacted, &Map.drop(&1, [:run_id, :parent_run_id, :parent_issue_id, :source_sha, :route_decision]))
       end)
     end)
   end
@@ -89,6 +89,7 @@ defmodule SymphonyElixirWeb.Redaction do
       research: entry[:research] && Map.take(entry.research, [:channel]),
       workspace: @empty_workspace
     })
+    |> Map.drop([:route, :routing_decision])
     |> Map.replace(:transcript, [])
   end
 

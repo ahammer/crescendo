@@ -73,3 +73,11 @@ attribution.
 Ordinary work can use Luna, Terra and Sol by task size. Astra is an explicit operator-selected
 route requiring timed smartass permission. More agents overlap reasoning and inspection; heavy
 GPU/build/test work continues to share one machine lease. See [operations](docs/crescendo.md).
+
+
+### Shared intelligence gain
+
+An opt-in service-wide gain applies task-based model and reasoning selection to every role.
+Gain 0 selects Luna, 1 uses a Terra baseline, and 2 requests Astra subject to separate timed
+smartass permission. Profiles, native settings and acceptance-linked usage are recorded.
+See [the operating policy](docs/crescendo.md#intelligence-gain).

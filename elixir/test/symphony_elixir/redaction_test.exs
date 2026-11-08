@@ -21,7 +21,9 @@ defmodule SymphonyElixirWeb.RedactionTest do
       workspace: %{files: [%{path: "billing.ts"}]},
       transcript: [%{text: "secret"}],
       tokens: %{total_tokens: 10},
-      model: "gpt-6-sol"
+      model: "gpt-6-sol",
+      route: %{profile: %{reason: "Secret owner evidence"}},
+      routing_decision: %{identity: ["private", "run"]}
     }
 
     blocked = %{
@@ -65,7 +67,7 @@ defmodule SymphonyElixirWeb.RedactionTest do
           ]
         },
         activity: [
-          %{project: "nubu3d", kind: "pr_opened", summary: "Secret PR", title: "Secret issue", startup: %{context: "secret"}, run_id: "run"},
+          %{project: "nubu3d", kind: "pr_opened", route: %{profile: "Secret"}, summary: "Secret PR", title: "Secret issue", startup: %{context: "secret"}, run_id: "run"},
           %{project: "metalrain", kind: "dispatch", summary: "s"}
         ],
         images: [%{project: "nubu3d", src: "/artifacts/a/1.png"}, %{project: "metalrain", src: "/artifacts/b/1.png"}]
@@ -81,6 +83,7 @@ defmodule SymphonyElixirWeb.RedactionTest do
     assert %{run_id: nil, transcript: [], last_message: nil, recent_events: [], pull_request: nil} = private
     assert %{research: %{channel: "qa"}, model: "gpt-6-sol", tokens: %{total_tokens: 10}} = private
     assert private.workspace.files == []
+    refute Map.has_key?(private, :route) or Map.has_key?(private, :routing_decision)
     assert public.title == "Secret feature"
 
     assert [%{error: nil, workspace_path: nil}] = scrubbed.retrying
@@ -94,7 +97,7 @@ defmodule SymphonyElixirWeb.RedactionTest do
     assert [%{title: "Private work", number: 7, url: "u"} = pull] = scrubbed.pull_requests.items
     refute Map.has_key?(pull, :head_ref)
     assert [%{kind: "pr_opened"} = event, %{summary: "s"}] = scrubbed.usage.activity
-    refute Map.has_key?(event, :summary) or Map.has_key?(event, :title)
+    refute Map.has_key?(event, :summary) or Map.has_key?(event, :title) or Map.has_key?(event, :route)
     refute Map.has_key?(event, :startup) or Map.has_key?(event, :run_id)
     assert [%{project: "metalrain"}] = scrubbed.usage.images
     assert [%{project: "metalrain"}] = scrubbed.usage.delivery_metrics.issue_associations

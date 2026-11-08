@@ -387,3 +387,11 @@ journeys and measurements. Increase the workflow admission cap from one to two t
 only after the documented accepted-delivery comparison; no simultaneous heavy GPU work
 is authorized. Current Standard short-context API estimates include Terra and updated
 Sol/Astra/Luna rates; historical atomic allocations retain their recorded prices.
+
+
+### Shared intelligence gain
+
+An opt-in service-wide gain applies task-based model and reasoning selection to every role.
+Gain 0 selects Luna, 1 uses a Terra baseline, and 2 requests Astra subject to separate timed
+smartass permission. Profiles, native settings and acceptance-linked usage are recorded.
+See [the operating policy](../docs/crescendo.md#intelligence-gain).

@@ -50,6 +50,145 @@ defmodule SymphonyElixir.Operations do
 
   defp usd_micro(usd), do: round(usd * 1_000_000)
 
+  @doc "Cache one grounded classification per task contract, independent of gain or checkout."
+  @spec cached_routing_profile(Issue.t()) :: map() | nil
+  def cached_routing_profile(issue) do
+    with {:ok, bytes} <- File.read(routing_profile_file(issue)),
+         {:ok, profile} <- Jason.decode(bytes),
+         :ok <- SymphonyElixir.IntelligencePolicy.validate_profile(profile),
+         do: profile,
+         else: (_ -> nil)
+  end
+
+  defp routing_profile_file(issue) do
+    alias SymphonyElixir.{IntelligencePolicy, Project, Service}
+    key = IntelligencePolicy.digest({"profile-v1", Project.current(), issue.id, issue.title, issue.description})
+    Path.join([Service.state_root(Service.current()), "routing-profiles", key <> ".json"])
+  end
+
+  @spec routing_profile(Issue.t(), (-> {:ok, map()} | {:error, term()})) :: {:ok, map()} | {:error, term()}
+  def routing_profile(issue, classify) do
+    alias SymphonyElixir.{IntelligencePolicy, Project, Service}
+    key = IntelligencePolicy.digest({"profile-v1", Project.current(), issue.id, issue.title, issue.description})
+    file = Path.join([Service.state_root(Service.current()), "routing-profiles", key <> ".json"])
+
+    :global.trans({{__MODULE__, key}, self()}, fn -> cached_or_classify(file, classify) end)
+  end
+
+  defp cached_or_classify(file, classify) do
+    alias SymphonyElixir.IntelligencePolicy
+    cached = with {:ok, data} <- File.read(file), {:ok, value} <- Jason.decode(data), do: value
+
+    cond do
+      is_map(cached) and IntelligencePolicy.validate_profile(cached) == :ok -> {:ok, cached}
+      deferred_classification?(cached) -> {:error, :classification_deferred}
+      true -> purchase_classification(file, classify)
+    end
+  end
+
+  defp deferred_classification?(value),
+    do: is_map(value) and is_integer(value["retry_after"]) and value["retry_after"] > System.os_time(:second)
+
+  defp purchase_classification(file, classify) do
+    alias SymphonyElixir.IntelligencePolicy
+
+    result = persist_classification(file, classify.())
+
+    if not match?({:ok, _}, result) do
+      failure = %{"classification_error" => inspect(result), "retry_after" => System.os_time(:second) + 300}
+      IntelligencePolicy.write_json(file, failure)
+    end
+
+    result
+  end
+
+  defp persist_classification(file, {:ok, profile}) do
+    alias SymphonyElixir.IntelligencePolicy, as: Policy
+    with :ok <- Policy.validate_profile(profile), :ok <- Policy.write_json(file, profile), do: {:ok, profile}
+  end
+
+  defp persist_classification(_file, error), do: error
+
+  @spec routing_decision(handle(), String.t(), map()) :: :ok
+  def routing_decision(table, run_id, route) do
+    safe_write(fn ->
+      for key <- [{:run, run_id}, {:lineage_run, run_id}] do
+        run = lookup(table, key, %{})
+        :dets.insert(table, {key, run |> Map.put(:routing_decision, route) |> Map.update(:routing_decisions, %{route["decision_id"] => route}, &Map.put(&1, route["decision_id"], route))})
+      end
+
+      event(table, "routing_decision", %{run_id: run_id, model: route["model"], effort: route["effort"], route: route})
+    end)
+  end
+
+  @spec hold_run(handle(), String.t(), map()) :: :ok | {:error, term()}
+  def hold_run(table, run_id, budget) do
+    checked_write(table, fn ->
+      run = lookup(table, {:lineage_run, run_id}, %{})
+      held = run |> Map.put(:gain_budget, budget) |> Map.put(:status, "held") |> Map.delete(:finished_s)
+      :ok = :dets.insert(table, [{{:run, run_id}, held}, {{:lineage_run, run_id}, held}])
+      :dets.sync(table)
+    end)
+  end
+
+  @spec resume_run(handle(), String.t()) :: :ok | {:error, term()}
+  def resume_run(table, run_id) do
+    checked_write(table, fn ->
+      case lookup(table, {:lineage_run, run_id}, nil) do
+        %{status: "held", gain_budget: _} = run ->
+          resumed = Map.put(run, :status, "running")
+          :ok = :dets.insert(table, [{{:run, run_id}, resumed}, {{:lineage_run, run_id}, resumed}])
+          :dets.sync(table)
+
+        _ ->
+          {:error, :run_not_held}
+      end
+    end)
+  end
+
+  @spec routing_feedback(handle(), String.t(), String.t() | nil) :: map()
+  def routing_feedback(table, issue_id, contract), do: lookup(table, {:routing_feedback, issue_id, contract}, %{})
+
+  defp retain_routing_feedback(table, parent, report) do
+    feedback = report["routing_feedback"]
+    contract = get_in(parent, [:routing_decision, "profile", "contract"])
+
+    if report["role"] == "reviewer" and report["review_approved"] == false and is_binary(contract) and valid_feedback?(feedback) do
+      store_feedback(table, {:routing_feedback, parent.issue_id, contract}, report["run_id"], feedback)
+    end
+  end
+
+  defp valid_feedback?(value) when is_map(value) do
+    value["kind"] in ["insufficient_model", "insufficient_reasoning"] and
+      is_binary(value["reason"]) and value["reason"] != "" and
+      is_list(value["evidence_refs"]) and value["evidence_refs"] != [] and
+      Enum.all?(value["evidence_refs"], &is_binary/1)
+  end
+
+  defp valid_feedback?(_), do: false
+
+  defp store_feedback(table, key, id, feedback) do
+    prior = lookup(table, key, %{})
+    ids = prior["receipts"] || []
+
+    if id not in ids do
+      steps = if feedback["kind"] == "insufficient_model", do: "model_steps", else: "reasoning_steps"
+      value = prior |> Map.merge(feedback) |> Map.put(steps, min(3, (prior[steps] || 0) + 1)) |> Map.put("receipts", [id | ids])
+      :dets.insert(table, {key, value})
+    end
+  end
+
+  @spec bound_run(handle(), String.t()) :: map() | nil
+  def bound_run(table, id), do: lookup(table, {:lineage_run, id}, nil)
+
+  @spec latest_item_run(handle(), String.t()) :: map() | nil
+  def latest_item_run(table, identifier) do
+    case lookup(table, {:item_run, identifier}, nil) do
+      %{run_id: id} -> with %{} = run <- bound_run(table, id), do: Map.put(run, :run_id, id)
+      _ -> nil
+    end
+  end
+
   @spec open(Path.t(), atom()) :: {:ok, handle()} | {:error, term()}
   def open(path, table \\ @table) when is_binary(path) and is_atom(table) do
     with :ok <- File.mkdir_p(Path.dirname(path)),
@@ -99,16 +238,39 @@ defmodule SymphonyElixir.Operations do
   def finish_run(_table, nil, _kind, _details), do: :ok
 
   def finish_run(table, id, kind, details) do
-    safe_write(fn ->
-      if :dets.lookup(table, {:task, id}) == [],
-        do: do_finish_run(table, id, kind, Map.put(details, :run_id, id))
-    end)
+    safe_write(fn -> finish_or_hold_run(table, id, kind, details) end)
+  end
+
+  defp finish_or_hold_run(table, id, kind, details) do
+    case {kind, lookup(table, {:lineage_run, id}, %{})} do
+      {"startup_failed", %{gain_budget: budget}} ->
+        hold_run(table, id, budget)
+
+      _ ->
+        if :dets.lookup(table, {:task, id}) == [],
+          do: do_finish_run(table, id, kind, Map.put(details, :run_id, id))
+    end
   end
 
   # A finished run leaves a task record (model, category, time and cost) for
   # the per-task averages, and its finish event carries the same figures.
+  defp run_category(run, kind, details) do
+    run[:role] || if(kind == "startup_failed", do: "startup", else: task_category(details[:issue_identifier]))
+  end
+
+  defp clear_gain_budget(table, id, kind) do
+    if kind not in ["gain_policy_hold", "startup_failed"] do
+      for key <- [{:run, id}, {:lineage_run, id}] do
+        previous = lookup(table, key, %{})
+        :dets.insert(table, {key, Map.delete(previous, :gain_budget)})
+      end
+    end
+  end
+
   defp do_finish_run(table, id, kind, details) do
     now = System.os_time(:second)
+
+    clear_gain_budget(table, id, kind)
     run = lookup(table, {:run, id}, %{})
     checkpoint = checkpoint(table, run[:issue_id])
 
@@ -123,7 +285,7 @@ defmodule SymphonyElixir.Operations do
       end
 
     cost = run_usage(table, id)
-    category = if kind == "startup_failed", do: "startup", else: task_category(details[:issue_identifier])
+    category = run_category(run, kind, details)
     seconds = if started, do: max(now - started, 0)
     model = details[:model] || "unknown"
 
@@ -256,15 +418,17 @@ defmodule SymphonyElixir.Operations do
   end
 
   defp external_observation(table, report, id) do
-    with %{"run_id" => ^id, "parent_run_id" => parent, "role" => role, "model" => "gpt-6.1-sol", "effort" => "max", "source_sha" => sha, "observed_at_epoch" => epoch} <- report,
+    with %{"run_id" => ^id, "parent_run_id" => parent, "role" => role, "model" => model, "effort" => effort, "source_sha" => sha, "observed_at_epoch" => epoch} <- report,
+         true <- model in ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra"] and effort in ~w(low medium high xhigh max),
          true <- role in ["reviewer", "planner"] and is_binary(sha) and Regex.match?(~r/\A[a-f0-9]{40}\z/, sha),
          true <- recent_report_time?(epoch),
          {:ok, at} <- DateTime.from_unix(trunc(epoch)),
          %{issue_id: issue_id} = parent_run <- lookup(table, {:lineage_run, parent}, nil),
          false <- :dets.member(table, {:lineage_run, id}) do
+      retain_routing_feedback(table, parent_run, report)
       usage = external_terminal_usage(report)
       rates = get_in(parent_run, [:accounting, :rates]) || @rates
-      price = external_price(usage, rates)
+      price = external_price(usage, rates, model)
       duration = report["elapsed_seconds"]
 
       {:ok,
@@ -273,8 +437,12 @@ defmodule SymphonyElixir.Operations do
          parent_run_id: parent,
          parent_issue_id: issue_id,
          role: role,
-         model: "gpt-6.1-sol",
-         effort: "max",
+         model: model,
+         effort: effort,
+         route_decision: report["route_decision"],
+         observed_model: report["observed_model"],
+         observed_effort: report["observed_effort"],
+         native_verification: report["native_verification"] || "unknown",
          source_sha: sha,
          observed_at: DateTime.to_iso8601(at),
          observed_s: trunc(epoch),
@@ -298,10 +466,10 @@ defmodule SymphonyElixir.Operations do
 
   defp external_duration(seconds) when is_number(seconds) and seconds >= 0 and seconds <= 86_400, do: seconds
   defp external_duration(_seconds), do: nil
-  defp external_price(nil, _rates), do: nil
+  defp external_price(nil, _rates, _model), do: nil
 
-  defp external_price(usage, rates),
-    do: price_numerator(rates, "gpt-6.1-sol", usage.input_tokens, usage.cached_input_tokens, usage.output_tokens)
+  defp external_price(usage, rates, model),
+    do: price_numerator(rates, model, usage.input_tokens, usage.cached_input_tokens, usage.output_tokens)
 
   defp external_terminal_usage(%{"accounting_status" => "terminal_observed", "terminal_event" => terminal, "thread_id" => thread, "usage" => usage})
        when terminal in ["turn.completed", "turn.failed"] and is_binary(thread) and byte_size(thread) in 1..256 and is_map(usage) do
@@ -778,7 +946,7 @@ defmodule SymphonyElixir.Operations do
 
     attempts =
       for {{:lineage_run, id}, run} <- runs,
-          do: Map.put(Map.take(run, [:item_attempt, :status, :started_s, :finished_s, :delivery_key]), :run_id, id)
+          do: Map.put(Map.take(run, [:item_attempt, :status, :started_s, :finished_s, :delivery_key, :routing_decision, :routing_decisions, :accounting_status]), :run_id, id)
 
     proof = delivery_proof(table, issue, sources, reports)
     disposition = delivery_disposition(issue, proof)
