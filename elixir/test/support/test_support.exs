@@ -31,6 +31,12 @@ defmodule SymphonyElixir.TestSupport do
         ]
 
       setup do
+        for key <- ~w(CRESCENDO_EVIDENCE_ROOT METALRAIN_SYMPHONY_EVIDENCE_ROOT) do
+          previous = System.get_env(key)
+          System.delete_env(key)
+          on_exit(fn -> restore_env(key, previous) end)
+        end
+
         workflow_root =
           Path.join(
             System.tmp_dir!(),
