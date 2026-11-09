@@ -20,8 +20,9 @@ hooks:
   timeout_ms: 1800000
   after_create: |
     set -eu
-    git clone --filter=blob:none git@github.com:<%= @repo %>.git .
-    git checkout <%= @base_branch %>
+    gh repo clone <%= @repo %> . -- --filter=blob:none
+    gh repo set-default <%= @repo %>
+    git checkout '<%= String.replace(@base_branch, "'", "'\\''") %>'
   before_run: |
     set -eu
     git fetch --prune origin
@@ -37,30 +38,14 @@ codex:
   # Toolchains the project needs go in front of codex, e.g. `mise exec java@21 -- codex ...`,
   # so the agent and everything it runs have them on PATH.
   command: <%= @codex_command %>
-  routing:
-    # One model; the ladder is its reasoning effort. Failed attempts climb one step:
-    # issues run medium, high, xhigh; issues sized tiny or small run low, medium, high.
-    ladder:
-      - {model: "gpt-6.1-sol", effort: "low"}
-      - {model: "gpt-6.1-sol", effort: "medium"}
-      - {model: "gpt-6.1-sol", effort: "high"}
-      - {model: "gpt-6.1-sol", effort: "xhigh"}
-      - {model: "gpt-6.1-sol", effort: "max"}
-    escalation: [0, 1, 2]
-    default: {model: "gpt-6.1-sol", effort: "medium"}
-    sizes:
-      tiny: {model: "gpt-6.1-sol", effort: "low"}
-      small: {model: "gpt-6.1-sol", effort: "low"}
-    # Model labels only choose a starting effort.
-    labels:
-      "<%= @prefix %>:model:sol": {model: "gpt-6.1-sol", effort: "medium"}
-      "<%= @prefix %>:model:astra": {model: "gpt-6.1-sol", effort: "xhigh"}
+  # Inherit the operator's Codex defaults; routing and intelligence gain are opt-in.
   approval_policy: never
   thread_sandbox: danger-full-access
   turn_sandbox_policy:
     type: dangerFullAccess
 autopilot:
-  enabled: true
+  enabled: false
+  # Enable explicitly for autonomous research and PR review/merge.
   # A `.crescendo/autopilot/` folder in the repository replaces these channels with its own
   # tasks and guidelines (see `crescendo autopilot check`); `repo_tasks: false` ignores it.
   channels:
@@ -88,8 +73,6 @@ autopilot:
   # Every research run files at least three evidence-backed issues.
   min_issues_per_channel: 3
   max_issues_per_channel: 5
-  research_route: {model: gpt-6.1-sol, effort: max}
-  review_route: {model: gpt-6.1-sol, effort: max}
   max_open_issues: 10
   research_cooldown_ms: 1800000
   max_pr_runs: 5
@@ -132,11 +115,10 @@ commands, and any blocker. Create it on your first attempt and edit it afterward
 2. Reproduce or confirm the problem first, then make the smallest change that fully solves the issue,
    with tests that prove it.
 3. Run the checks the repository's CI runs (see `.github/workflows/`), plus focused tests for your change.
-   Builds, test suites, emulators and desktop apps take the machine lease: run them as
-   `machine-lease run -- <command>`. Waiting for the lease is normal; do not kill a waiting command.
+   Follow the repository's documented resource limits for builds, tests, emulators and desktop apps.
 4. Open a pull request against `<%= @base_branch %>` whose body says `Closes #{{ issue.id }}` and lists
    the evidence (commands and results). Then add the label `<%= @prefix %>:in-review` to the issue and stop:
-   a reviewer run reviews, fixes and merges the pull request once CI is green.
+   the operator reviews and merges it. Automatic review/merge requires explicitly enabled autopilot.
 
 Keep scratch files inside the workspace under `.scratch/` (never commit it) and delete them before you
 finish. Stop every process you started.

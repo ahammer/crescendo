@@ -10,7 +10,9 @@ This directory contains Crescendo, an Elixir/OTP implementation of Symphony base
 
 ## Screenshot
 
-![Symphony Elixir screenshot](../.github/media/elixir-screenshot.png)
+![Crescendo web dashboard, real instance captured November 2026](../.github/media/crescendo-dashboard.png)
+
+[Issue history](../.github/media/crescendo-issue.png) · [Usage and routing](../.github/media/crescendo-usage.png)
 
 ## How it works
 
@@ -36,45 +38,31 @@ issue claimed and exposes it as blocked in the runtime state, JSON API, and dash
 entries are in memory only; restarting the orchestrator clears that blocked map, so any still-active
 tracker issue can become a dispatch candidate again after restart.
 
-## How to use it
+<a id="run"></a>
+<a id="prerequisites"></a>
+<a id="how-to-use-it"></a>
 
-1. Make sure your codebase is set up to work well with agents: see
-   [Harness engineering](https://openai.com/index/harness-engineering/).
-2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
-   set it as the `LINEAR_API_KEY` environment variable.
-3. Copy this directory's `WORKFLOW.md` to your repo.
-4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
-   - The `linear` skill expects Symphony's `linear_graphql` app-server tool for raw Linear GraphQL
-     operations such as comment editing or upload flows.
-5. Customize the copied `WORKFLOW.md` file for your project.
-   - To get your project's slug, right-click the project and copy its URL. The slug is part of the
-     URL.
-   - When creating a workflow based on this repo, note that it depends on non-standard Linear
-     issue statuses: "Rework", "Human Review", and "Merging". You can customize them in
-     Team Settings → Workflow in Linear.
-6. Follow the instructions below to install the required runtime dependencies and start the service.
+## Get started
 
-## Prerequisites
+Use the [root quick start](../README.md#quick-start) to build, then follow the
+[first-service walkthrough](../docs/crescendo.md#first-service) for GitHub Issues. It covers Codex/gh
+authentication, generating a project, writing the service file and synchronizing labels. New projects
+inherit Codex model settings and work only ready issues; autonomous intake and PR merge are opt-in.
 
-We recommend using [mise](https://mise.jdx.dev/) to manage Elixir/Erlang versions.
+For a single-workflow Linear installation, copy `WORKFLOW.md`, replace the project slug, export
+`LINEAR_API_KEY` and `CRESCENDO_TARGET_REPO` (your Git clone URL), and adapt the prompt to your
+repository's delivery conventions. The bundled file is a compatibility example; it does not target
+Symphony's repository or require an Elixir target project.
 
 ```bash
-mise install
-mise exec -- elixir --version
-```
-
-## Run
-
-```bash
-git clone https://github.com/ahammer/crescendo
-cd crescendo/elixir
-mise trust
-mise install
-mise exec -- mix setup
-mise exec -- mix build
-mise exec -- ./bin/crescendo ./WORKFLOW.md \
+./bin/crescendo /absolute/path/to/WORKFLOW.md \
   --i-understand-that-this-will-be-running-without-the-usual-guardrails
 ```
+
+The service requires an authenticated Codex CLI on PATH. Source builds use Elixir 1.19/OTP 28
+through mise. GitHub workflows also use Git and authenticated `gh`; optional quiet windows need
+Python 3 `zoneinfo` with installed IANA timezone data. Advanced helpers use Linux-specific `memfd`
+and `/proc` facilities. Adaptive classification/handoff currently requires local workers.
 
 ## Burrito releases
 
@@ -103,8 +91,10 @@ If no suitable artifact is published, follow the [source build steps above](#run
 After downloading a published executable for your platform:
 
 ```bash
-chmod +x ./symphony-v0.0.1-macos_arm64
-./symphony-v0.0.1-macos_arm64 ./WORKFLOW.md \
+# Set this to the exact downloaded filename (the historical artifact prefix is symphony).
+CRESCENDO_BINARY=./symphony-VERSION-macos_arm64
+chmod +x "$CRESCENDO_BINARY"
+"$CRESCENDO_BINARY" ./WORKFLOW.md \
   --i-understand-that-this-will-be-running-without-the-usual-guardrails
 ```
 
@@ -257,7 +247,7 @@ Notes:
 - `agent.max_attempts` optionally caps delivery failure retries. Once exceeded, the issue is blocked until
   its state or labels change. Unset means retry indefinitely with backoff.
 - `codex.routing` optionally selects a model and reasoning effort from explicit issue labels.
-  Example: `routing: {label_prefix: "symphony:model:", default: {model: "gpt-6.1-sol", effort: "medium"}, labels: {"symphony:model:astra": {model: "gpt-6.1-sol", effort: "xhigh"}}}`.
+  Example: `routing: {label_prefix: "symphony:model:", default: {model: "gpt-6.1-sol", effort: "medium"}, labels: {"symphony:model:sol": {model: "gpt-6.1-sol", effort: "medium"}}}`.
   With no matching route label, `default` applies. Unknown or conflicting labels under the
   prefix stop the run. Priority does not affect routing. A run keeps its selected route across
   continuation turns; a label change takes effect on a new run. Without `routing`, existing
@@ -771,228 +761,35 @@ Launch `codex` in your repo, give it the URL to the [Crescendo repository](https
 which is based on [OpenAI's Symphony](https://github.com/openai/symphony), and ask it to set things
 up for you.
 
+## Advanced operations
+
+The [operator guide](../docs/crescendo.md) owns service-wide policy and accounting contracts:
+
+<a id="shared-intelligence-gain"></a>
+<a id="model-tiers-and-timed-astra-permission"></a>
+
+- [Task-based intelligence gain](../docs/crescendo.md#intelligence-gain) and
+  [legacy routes / timed Astra permission](../docs/crescendo.md#model-tiers-and-timed-astra-permission).
+<a id="shared-helper-and-quiet-acceptance-policy"></a>
+<a id="service-wide-openai-fast-mode"></a>
+
+- [Helpers and quiet acceptance](../docs/crescendo.md#additional-read-only-capacity-and-quiet-windows),
+  [evidence integration](../docs/crescendo.md#evidence-integration), and
+  [Fast mode](../docs/crescendo.md#openai-fast-mode).
+<a id="durable-outcome-facts"></a>
+<a id="bounded-codex-notification-transport"></a>
+<a id="terminal-thread-usage-reconciliation"></a>
+<a id="canonical-final-attempt-handoffs-crescendo-extension"></a>
+
+- [Durable outcomes](../docs/crescendo.md#durable-outcome-facts),
+  [terminal usage reconciliation](../docs/crescendo.md#terminal-thread-usage-reconciliation), and
+  [canonical handoffs](../docs/crescendo.md#canonical-final-attempt-handoffs-crescendo-extension).
+
+The optional workflow setting `evidence.root` resolves relative to its workflow, ahead of generic
+and legacy environment defaults. Missing proof remains unknown. Quiet windows accept installed
+IANA zones; existing omitted zones keep the Vancouver default. Existing project workflows are not
+rewritten when starter templates change.
+
 ## License
 
-This project is licensed under the [Apache License 2.0](../LICENSE).
-
-
-### Durable outcome facts
-
-`operations.dets` preserves run endings separately from blocked item attempts and scoped delivery
-or retirement. The dashboard's turn completion rate measures normal worker endings, not product
-acceptance. Stopped workers retain their recorded duration/cost and are not classified as failures.
-PR closes/reopens remain transitions, not abandoned deliveries.
-
-Daily state API rows add `stopped`, `blocked_attempts`, `accepted_deliveries`, `retirements` and
-`unknown_dispositions`. New attempt/disposition events retain their work item, attempt and last
-recorded run ID; missing historical attribution is `unknown`. Counts cover the retained event ring;
-durable idempotency keys survive restart. Keys for blocked attempts include run IDs, so resetting
-the retry budget on PR reopening retains new attempts. Issue budgets persist across closure.
-Plain issue closure has unknown acceptance.
-For accepted issue work without a merged PR, apply `<prefix>:delivery:verified-existing` or
-`<prefix>:delivery:split` after validation and document scoped evidence in the workpad; `not_planned`
-is retirement. See [the detailed semantics](../docs/crescendo.md#durable-outcome-facts).
-
-### Bounded Codex notification transport
-
-Codex stdio input uses a 16 MiB frame assembly ceiling and a separate 4 MiB RPC/control
-payload ceiling. Partial turn-frame assembly has an absolute `codex.read_timeout_ms` deadline
-from its first fragment, while complete stream updates retain the configured silence timeout.
-Ordinary notifications drain during RPC waits; tool/approval requests use their
-normal handlers, and terminal/input events and startup cumulative usage remain in the bounded
-control queue (4 MiB / 1,024 entries). Codex 0.160.0 generated schema excerpts are checked in under
-`test/fixtures/codex-0.160.0-output-schema.json`. Diagnostic copies of supported text deltas,
-agent message text, command `aggregatedOutput`, notification command text (including
-`commandActions` copies), file-change diffs and turn-level aggregated diffs retain at most 16 KiB
-per field with an explicit truncation marker; raw diagnostic copies are also bounded. Only passive
-notification copies are shortened: executable tool/approval requests retain their original commands
-and arguments. RPC results, usage, model reroutes, item identity/status and terminal status are never
-truncated. Existing dashboard transcript entry/output limits still apply.
-
-A frame over 16 MiB, a response or irreducible control payload over 4 MiB, or saturation of the
-control queue fails closed. Overflow diagnostics record the guard, observed bytes/count, phase,
-request identity/method, thread/turn identity and work item without payload contents. After overflow,
-the stream is unusable: account-usage RPC is skipped and the process group is closed during normal
-worker cleanup. Admitted transport overflow records an infrastructure interruption and retries
-after 30 seconds without advancing the implementation attempt; startup overflow retains startup
-admission recovery. Research interruptions use the durable channel schedule and preserve the
-channel's attempt count, rather than looking up synthetic IDs in the tracker. Optional native
-context and checkpoint reads propagate transport overflow; a failed transport rejects all later
-requests, including continuation turns. Native servers must split larger output into bounded delta
-frames; this client does not stream arbitrary JSON strings or accept unbounded controls. Output-only
-fields beyond the verified schema remain subject to the control payload ceiling. No billable model run is needed to
-verify this transport behavior.
-
-## Terminal thread usage reconciliation
-
-Operations reconciles supported cumulative usage even after completion, failure, interruption or
-force-stop. The existing 90-day run history retains credential-free attribution; late accounting
-cannot act on a replacement worker or grant checkpoint eligibility. Run history and dashboard
-summaries show corrected estimates and explicit `terminal_observed` / `incomplete` accounting.
-Terminal observation is evidence of a matching cumulative snapshot and terminal turn, not a
-promise of complete provider billing. Missing cache-write and helper/reviewer coverage stay unknown.
-Observed turn usage evidence survives older notifications, including before turn-start responses.
-
-The offline tests use the pinned Codex 0.160.0 schema and a synthetic sanitized reproduction of the
-reported aggregate gap. Graceful teardown flushes supported queued events; force termination can
-prevent observation. No new turn or token-usage RPC is used. See [reconciliation and coverage
-limits](../docs/crescendo.md#terminal-thread-usage-reconciliation) before replaying copied native
-records into an offline scratch ledger.
-
-## Canonical final-attempt handoffs (Crescendo extension)
-
-Final-attempt issue prompts append the [canonical handoff contract](../docs/crescendo.md#canonical-final-attempt-handoffs-crescendo-extension). Unchanged outcomes reuse
-one canonical root and its bounded attempt budget. Closed issue attempts and retirement dispositions
-survive polling and restarts; an issue number, diagnostic evidence or unmerged PR grants no renewal.
-Investigations and accepted reduced slices remain possible within the bounded policy.
-
-GitHub admits one successor only after matching authorization records on the closed root and successor,
-verified merged partial delivery or a newly completed native prerequisite. Root plus native proof owns
-the budget; proof replay cannot reset it. Running successors stop when authorization is removed or
-rebound, and final-attempt throttling uses that same budget. Held or otherwise unroutable successors
-cannot reserve an unbound proof budget; holding an already bound successor preserves its ownership.
-Closed PRs still clear their review runs, failed attempts and retirement markers so reopened PRs can
-resume review. An exhausted open PR retries failed retirement writes on subsequent polls.
-Invalid and legacy unproven replacements fail admission closed without retiring their PRs or altering
-evidence, labels, holds or native edges.
-Required capabilities, dependencies and unique source/evidence must survive worker/groomer disposition.
-A root ends delivered, explicitly declined, or retried within policy. Local prompt rollout remains
-the operator's responsibility; the dashboard stays read-only. No arbitrary prose equivalence or
-historical migration is inferred.
-Legacy replacement headings prevent an issue from declaring itself a canonical root, including
-when its record would otherwise authorize another successor.
-
-
-### Service-wide OpenAI Fast mode
-
-`crescendo mcp <crescendo.yml>` exposes local stdio MCP tools `crescendo_priority_mode_get`
-and `crescendo_priority_mode_set`. Set `{ "enabled": true }` for an indefinite service-wide
-Fast default, or `{ "enabled": false }` for standard speed. Optional `expires_at` is a future
-ISO 8601 timestamp with a timezone; omitting it clears any prior deadline. The setting is
-atomically persisted as `priority-mode.json` under the service's state root and survives restarts.
-Worker MCP sessions may read but cannot change the operator's preference.
-
-Issues, reviews, research and managed helpers read it at thread creation/resume and every turn
-start, so disable or expiry cannot leave a cached Fast default on later turns. Current turns
-finish normally. Native `serviceTier: fast` requests are acknowledged as `priority` on the
-pinned Codex 0.160.0 binary. Model/effort routes and helper isolation remain unchanged. Legacy
-single-workflow runs keep their existing defaults. Invalid/unreadable policy selects standard speed.
-
-The dashboard has a read-only Fast-mode indicator and per-agent native Fast-tier badges;
-`/api/v1/state` includes `priority_mode`. The public web interface provides no mutation control.
-See [service operation and usage accounting](../docs/crescendo.md#openai-fast-mode) for MCP setup
-and the distinction between account consumption and the dashboard's nominal API estimates.
-
-### Shared helper and quiet acceptance policy
-
-Local issue workers with a configured service quiet window receive `defer_quiet_acceptance`.
-After daytime preparation, commit the source and evidence, keep the existing PR draft and pass
-`reason`, exact `source_sha`, the existing `pull_request` URL, 1–12 committed `evidence` paths and
-1–12 `unmet_acceptance` descriptions. Include failed product gates (for example a p99 over its
-unchanged threshold). Operations synchronously saves the canonical issue, logical/final attempt,
-PR, commit, evidence digests and recurring active-window wake condition before success is returned.
-Then update the workpad and end the turn without a blocked label; the worker yields at that boundary.
-Untracked nonignored files make source dirty; ignored generated artifacts remain usable.
-Evidence must be committed regular files, not symlinks.
-
-One deferral is allowed per canonical logical attempt. Unknown/active/unconfigured windows, stale
-workers and missing evidence/persistence reject it. Independent work uses the released slot; no
-worker waits or polls the clock. Normal tracker polling restores the same issue after restart and
-admits it only in the configured active quiet window with dependencies, throttle, deployment drain
-and quiet exclusivity enforced. The resumed worker gets a fresh prompt, compares current commit
-and committed evidence digests, and must recheck task/environment applicability before reuse.
-Changed, dirty or missing source/evidence cannot establish acceptance. The same PR and logical
-budget remain; unsuccessful acceptance still follows reduced-scope/retirement rules on a final attempt.
-`/api/v1/state` exposes retained identities in `deferred` and reasons in `upcoming.waiting`;
-private-project fields are redacted. Deferral is recorded separately from completed/failed runs.
-Terminal or no-longer-visible issues, failed attempts and retired deliveries clear their saved
-continuation without resetting the attempt budget; tracker read failures keep it for reconciliation.
-If a restart removes the configured quiet window, the next successful observation of an active,
-routable canonical issue ends its deferral through the existing failure policy. Autopilot counts
-the original attempt once and uses its existing retry/retirement limit, preserving the canonical
-owner. Removing the wake condition does not pass quiet acceptance or failed product gates.
-A replacement project check-in releases the dead orchestrator's service slots and quiet reservation,
-even if its exit notification is still pending. Saved continuation identities and budgets remain intact,
-and the interrupted run cannot leave service admission held after its window.
-
-A service can keep three primary slots while adding up to five global read-only helpers.
-Set `helpers: {slots: 5, model: gpt-6-luna, effort: max, timeout_ms: 900000}` in `crescendo.yml`;
-helpers default to disabled. Leads receive `helper_start`, `helper_status` and `helper_cancel`.
-A request names a bounded question and optional text evidence keys relative to the external
-Metalrain evidence root. Read tools use the captured Git commit, reject replacement refs,
-links and pathspecs, and bound source/evidence files to 128 KiB and returned text to 16 KiB.
-The helper has no shell, edits, browser, apps, MCP, nested delegation or machine lease.
-Its native JavaScript dispatcher calls only curated reads; native approval requests fail closed.
-Inherited MCP servers are disabled through a nested `mcp_servers` map before native startup.
-CLI map values use TOML inline tables, and thread configuration uses the same nested JSON map.
-Literal server names preserve punctuation without creating extra dotted-path entries; existing
-transport definitions remain intact with `enabled=false`. Invalid configuration fails closed.
-Private, bounded catalogs in sealed anonymous memory remove model metadata that otherwise
-forces patch/delegation capabilities; the user's catalog stays intact. The pinned CLI needs a populated model cache.
-Helpers are supervised with a 15-minute absolute deadline, unique usage lineage and cleanup
-when their parent ends. Cancellation retains capacity until the process stops.
-
-Optional `quiet_window: {start: "03:00", end: "04:00", time_zone: America/Vancouver,
-drain_minutes: 60}` reserves the recurring local window only while otherwise eligible
-`<labels.prefix>:quiet` work is pending. The timezone follows installed IANA rules. Other
-work yields at turn boundaries before the window, quiet tasks wait for the shared pool and
-helpers to empty, and unfinished quiet work yields after the cutoff. Metalrain's measurement
-command also requires `machine-lease run --quiet-window -- <foreground command>`.
-Ordinary work remains available around the clock outside reserved windows.
-
-An autopilot task may use `exclusive: none` for planning alongside delivery, or `exclusive: global`
-for checks that need an idle machine. `skip_unchanged: true` compares fresh source, complete
-open dependency/PR inventories, findings, configuration and protected execution state before
-creating a workspace. Unknown inputs defer; unchanged inputs update only a check cursor,
-never audit coverage, with a full recheck at least daily. Existing maintenance due rules apply.
-Only verified deliveries establish skip eligibility. Versioned observation-only handoffs preserve
-substantive findings, publication, pending acceptance and protected capacity; legacy cohorts
-remain strict. Ledger failures defer worker startup; baseline invalidation must be synced first.
-Retained admission/defer/skip events expose bounded component reasons. See the
-[producer rollout and bounded normal-traffic canary](docs/planning_preflight.md). Execution drain does not
-clear pending coverage or authorize checks outside the quiet-performance policy.
-
-The state API separates managed helper usage from `usage.external` CLI observations. External
-review/planner reports have claimed identities and unknown account debits; they never affect
-native run usage or budget enforcement. `pacing` projects consumption toward a soft 90% reset
-window target with 10% interactive allowance. It reports uncertainty for stale/missing epochs
-and preserves the daily budget and weekly quota pause.
-
-The state API also serves `GET /api/v1/state?view=control` (optionally `&project=<id>`)
-for bounded live reconciliation. It excludes historical usage; see the [API contract](../docs/crescendo.md#dashboard-and-api).
-
-## Model tiers and timed Astra permission
-
-Ordinary delivery can start on Luna high for tiny work, Terra medium for small work,
-Sol high for medium/unclassified work, and Sol xhigh for large work. Explicit fixed
-model-label routes may live outside the automatic ladder and do not escalate. Size
-routes remain ladder starts. `SYMPHONY_SELECTED_SIZE` freezes size for delivery tools;
-model and size changes require a new run with the original logical budget.
-
-Astra requires explicit selection plus operator-owned timed smartass permission.
-`crescendo_smartass_mode_get/set` use local stdio MCP; enabling without `expires_at`
-expires after sixty minutes. Missing, invalid, unreadable or expired permission is off.
-The state API exposes `smartass_mode`; there is no HTTP mutation. Fast mode is separate.
-Dispatch and native thread/turn checks reject unselected/default Astra and ladder-derived
-Astra even when permission is on. Expiry lets the current turn finish, then yields
-without spending an implementation attempt, research round or PR review allowance.
-
-Managed leads disable native delegation; the separate helper pool remains read-only
-Luna max. Helper configuration errors identify command, inspection or catalog failure,
-and disable repeated requests for that parent lifetime. Agent environment selection
-must never run GPU preflight merely to inspect helper configuration.
-
-The initial rollout targets three primary workers and two helpers on one workstation.
-All heavy commands still serialize through the existing machine lease, including native
-journeys and measurements. Increase the workflow admission cap from one to two to three
-only after the documented accepted-delivery comparison; no simultaneous heavy GPU work
-is authorized. Current Standard short-context API estimates include Terra and updated
-Sol/Astra/Luna rates; historical atomic allocations retain their recorded prices.
-
-
-### Shared intelligence gain
-
-An opt-in service-wide gain applies task-based model and reasoning selection to every role.
-Gain 0 selects Luna, 1 uses a Terra baseline, and 2 requests Astra subject to separate timed
-smartass permission. Profiles, native settings and acceptance-linked usage are recorded.
-See [the operating policy](../docs/crescendo.md#intelligence-gain).
+[Apache License 2.0](../LICENSE). See [NOTICE](../NOTICE) for attribution.

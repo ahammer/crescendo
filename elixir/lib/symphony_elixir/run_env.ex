@@ -5,7 +5,7 @@ defmodule SymphonyElixir.RunEnv do
   and where the service's read-only state lives, so workstation tooling (the
   machine lease, reconcilers) can attribute work across projects.
 
-  `CRESCENDO_WORK_ITEM` is qualified by project (`metalrain/GH-12`) under a
+  `CRESCENDO_WORK_ITEM` is qualified by project (`app/GH-12`) under a
   service, and `CRESCENDO_LABEL_PREFIX` is the project's `labels.prefix`, so
   repository tooling follows a label migration. The `SYMPHONY_*` names stay
   for tools that predate the service.
@@ -17,11 +17,14 @@ defmodule SymphonyElixir.RunEnv do
   def vars(work_item, route_label \\ nil, run_id \\ nil, size \\ nil) do
     project = Project.current()
     state_url = state_url(HttpServer.bound_port())
+    evidence_root = Config.evidence_root()
 
     [
       pair("SYMPHONY_SELECTED_MODEL_LABEL", route_label),
       pair("SYMPHONY_SELECTED_SIZE", if(route_label, do: size || "")),
       pair("SYMPHONY_WORK_ITEM", work_item),
+      pair("CRESCENDO_EVIDENCE_ROOT", evidence_root || if(System.get_env("CRESCENDO_EVIDENCE_ROOT"), do: "")),
+      pair("METALRAIN_SYMPHONY_EVIDENCE_ROOT", if(System.get_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT"), do: evidence_root || "")),
       pair("CRESCENDO_RUN_ID", run_id),
       pair("CRESCENDO_WORK_ITEM", qualified(project, work_item)),
       pair("CRESCENDO_PROJECT", project),

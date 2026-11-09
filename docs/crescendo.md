@@ -8,6 +8,265 @@ multi-project control plane as out of scope; this document describes Crescendo's
 Everything is configured in local files on the machine that runs the service. The dashboard and
 the JSON API are read-only: nothing reachable over HTTP changes state.
 
+
+## First service
+
+Build from the [root quick start](../README.md#quick-start), authenticate the Codex CLI, and make
+`codex`, `gh`, Git and Python 3 available on the service's PATH. This walkthrough uses GitHub Issues.
+New projects inherit Codex's model and reasoning defaults; helpers and autonomous intake are off.
+Autopilot research and automatic PR review/merge require an explicit `autopilot.enabled: true` in
+the generated workflow and repository permissions to merge. Review the supplied prompts first.
+
+
+From `elixir/`, choose a configuration directory and a GitHub repository you can access. Replace
+`your-org/your-repo` with its `owner/name`; the generated workflow uses that repository and its
+default `main` branch (pass `--branch` to `project add` if yours differs).
+
+```bash
+CRESCENDO_DIR="${CRESCENDO_DIR:-$HOME/.config/crescendo}"
+REPO=your-org/your-repo
+mkdir -p "$CRESCENDO_DIR"
+mise exec -- ./bin/crescendo project add "$CRESCENDO_DIR/crescendo.yml" demo "$REPO"
+cat > "$CRESCENDO_DIR/crescendo.yml" <<'YAML'
+server: {host: 127.0.0.1, port: 4280}
+paths: {state: state}
+pool: {slots: 1}
+projects:
+  demo: {weight: 1}
+YAML
+```
+
+`project add` creates `projects/demo/WORKFLOW.md` and three prompt files, then prints the entry to
+put under `projects:`. It does not create or update `crescendo.yml`; the `cat` command creates it.
+The relative `state` path keeps state under `$CRESCENDO_DIR/state`. Change the loopback port if
+4280 is already in use.
+
+The generated GitHub workflow needs a `GITHUB_TOKEN` with permission to read and write issues,
+pull requests and contents. Authenticate `gh` on this host; the generated clone hook uses its
+configured Git transport and explicitly selects your repository, including when it is a fork. Create its required labels before launching:
+
+```bash
+gh auth status
+export GITHUB_TOKEN="$(gh auth token)"
+mise exec -- ./bin/crescendo labels sync "$CRESCENDO_DIR/crescendo.yml" demo
+mise exec -- ./bin/crescendo "$CRESCENDO_DIR/crescendo.yml" --logs-root "$CRESCENDO_DIR/logs" \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails
+```
+
+Open `http://127.0.0.1:4280`. With no ready issues, the new service has no work to dispatch.
+Add `crescendo:ready` to one open issue with clear acceptance criteria. The agent opens a PR and
+adds `crescendo:in-review`; you review/merge it and close the issue if your merge process does not.
+Remove the in-review label only when you deliberately authorize another implementation run.
+
+Start the service with the service file instead of a `WORKFLOW.md`. Project workflows and their
+prompt files hot-reload as before. Adding, removing or reweighting a project, or changing the
+service file, needs a service restart. A project whose workflow cannot load is reported on the
+dashboard (its filter pill is marked) and the other projects still run.
+
+## `crescendo.yml`
+
+```yaml
+server: {host: 0.0.0.0, port: 4280}
+paths: {state: ~/.local/state/crescendo}
+pool: {slots: 3}
+throttle:
+  daily_budget_usd: 200
+  backoff:
+    - {window: weekly, remaining_below_percent: 3, pause: true}
+pricing: {as_of: "2026-10-01", models: {gpt-6.1-sol: {input: 1.0, cached_input: 0.1, output: 5.0}}}
+defaults:
+  codex:
+    routing: {...}          # anything a project's front matter may hold
+projects:
+  app: {weight: 1, research_exclusive: global}
+  private-api: {workflow: projects/private-api/WORKFLOW.md, cap: 1}
+  docs: {enabled: false}
+```
+
+- `server` binds the dashboard and the state API for the whole service. A project's own `server`
+  setting is ignored.
+- `pool.slots` is the number of agent runs the whole service runs at once. A project's own
+  `agent.max_concurrent_agents` still limits that project.
+- `throttle` and `pricing` are service-wide (see [Throttling](#throttling)). A project's own
+  `throttle` is ignored; its `pricing` is replaced by the service's.
+- `defaults` is merged under every project's front matter: nested maps merge key by key and the
+  project's own values win, so shared routing or agent limits live once.
+- `projects` maps an id (lowercase letters, digits and dashes) to:
+  - `workflow`: path to its `WORKFLOW.md`; default `projects/<id>/WORKFLOW.md` next to this file.
+  - `weight` (default 1): its share of contested slots.
+  - `cap`: the most slots it may hold at once.
+  - `research_exclusive`: `none`, `project` (default) or `global` (see below).
+  - `enabled` (default true).
+  - `redact` (default false): keep a private repository's work off the public dashboard and API.
+    Its items show only identifiers, links, kind, state, model, attempts, tokens and cost; titles,
+    descriptions, messages, transcripts, plans, files, images, branches, errors and run ids are
+    dropped.
+
+Relative paths resolve against the service file's directory. Pricing values above are illustrative;
+configure rates for your actual models before relying on USD budget estimates.
+
+## Sharing slots
+
+A Governor owns everything projects share. Orchestrators check in every poll, reporting their spend
+today and how many runs they could start, and they get back the dispatch policy. They acquire a
+slot right before a run starts and release it when the run ends. The Governor monitors each
+orchestrator and frees the slots of one that stops.
+
+- **Weights.** While several projects have work waiting, the next free slot goes to the project with
+  the lowest *pass*. Each grant advances a project's pass by `1 / weight`, so over time grants
+  follow the weights. A project returning from idle rejoins at the active projects' pass rather than
+  spending credit it banked while idle. When a slot is kept for a project, that project is told to
+  poll immediately.
+- **Caps** limit a project on top of the shared slots.
+- **Research exclusivity.**
+  - `none`: research is an ordinary run.
+  - `project`: research runs when its project is idle, and nothing else in that project starts
+    until it finishes.
+  - `global`: research needs the whole service idle and holds every slot while it runs. A global
+    research request that finds other runs in flight reserves the service, so nothing new starts
+    elsewhere until the research gets its turn. A reservation that is not renewed within 90 seconds
+    lapses.
+- **Drain.** While `<state>/drain` exists, nothing new starts. Service issue workers consult the
+  Governor after successful native turn completion and checkpoint persistence, yielding before
+  another turn. Normal cleanup runs and the orchestrator releases the slot once. The distinct
+  `deployment_drain` interruption reason preserves source/workpad, logical attempt and retry count,
+  including zero; it records no failed attempt, retirement or accepted delivery. Ordinary weighted scheduling
+  resumes the issue after the hold ends, without requiring native thread reuse. Failed turns and checkpoint failures
+  keep normal retry semantics. Standalone workflows, reload, stale-run updates, reconciliation and
+  shutdown keep their existing behavior. Deploys use this hold; long in-progress turns and unknown
+  observations continue waiting under the existing deadlines.
+
+Waiting for a slot, the throttle or a backed-off route is never a failed attempt: a held retry keeps
+its attempt number and checks again every 30 seconds.
+
+## Labels
+
+`labels.prefix` in a project's `WORKFLOW.md` (default `symphony`) names the labels Crescendo reads
+or applies itself, unless they are set explicitly:
+
+- `<prefix>:model:*` and `<prefix>:size:*` routing labels;
+- `<prefix>:blocked`;
+- the `<prefix>:research` and `<prefix>:channel:<name>` labels on research runs.
+
+Tracker `required_labels` and `excluded_labels` (for example `<prefix>:ready` and `<prefix>:hold`)
+stay explicit.
+
+## Intelligence gain
+
+Enable the shared policy explicitly in the service file:
+
+```yaml
+intelligence_policy: {enabled: true}
+```
+
+The shipped adaptive profile requires access to `gpt-6-luna`, `gpt-6.1-terra`, `gpt-6.1-sol`
+and, when authorized, `gpt-6-astra`. Check access in your Codex installation before opting in.
+The profile is fixed in this version; arbitrary configured legacy routes remain available separately.
+Local helpers use Linux `memfd` and `/proc` facilities; published macOS builds do not establish
+support for these advanced features. Until enabled, existing routes retain their legacy behavior. The operator MCP tools
+`crescendo_intelligence_gain_get` and `crescendo_intelligence_gain_set` read/set `gain`
+from 0 to 2 (default 1). The atomic operator state is `intelligence-policy.json` in the
+service state directory. The public dashboard displays the policy; mutations remain
+operator-only MCP operations, so public viewers cannot change model spend.
+
+| Base work at gain 1 | Model | Effort ceiling |
+| --- | --- | --- |
+| Routine extraction | Luna low | medium |
+| Bounded known-pattern, low risk | Terra low | medium |
+| Ordinary implementation, review or coordination | Terra medium | medium |
+| Complex causal/invariant reasoning | Sol high | xhigh |
+| Exceptional mental difficulty | Sol xhigh | max |
+
+High-risk mechanical work has a Terra/medium baseline. Risk is not complexity, and
+GPU involvement, file count, failed builds and lease waits do not establish mental difficulty.
+Only grounded, independently reported capability feedback can promote retries. Promotions
+happen before gain; no retry or explicit baseline label bypasses gain zero or two.
+
+For model rank b (Luna=0, Terra=1, Sol=2, Astra=3), gain g maps to b*g below one and
+b+(g-1)*(3-b) above one. Stable task/role hashing rounds fractional scores; gain 0.75
+moves about a quarter of ordinary Terra work to Luna without rerolling on retries.
+Reasoning follows the same transform within each profile ceiling. High-risk reasoning
+retains a medium floor even at gain zero. Every role follows gain, including classifiers,
+helpers, reviews and standalone planners. Built-in delegation and ultra effort remain disabled.
+
+Smartass permission is separate. Without it, requested Astra is visibly capped to Sol;
+gain never grants permission or Fast mode. Unsupported or quota-avoided routes defer
+rather than silently switching model. Work without a profile receives one cached, bounded,
+read-only classification; malformed or failed classification defers without spending delivery
+attempts, with a five-minute failure cache. Cache identity follows task acceptance/scope,
+not gain, retry number or checkout SHA.
+
+Local agent sessions adopt changes after a completed turn and outstanding owned commands.
+Model changes create a fresh sealed session with full task/handoff context while retaining the
+logical run and turn budget. Same-model effort changes reuse the thread. Failed replacements
+keep the original session until a replacement succeeds. Once quiescent, bounded policy waits
+can release their slot through a synced held-run record; restart resumes the original run,
+attempt and next turn without creating a completed-task record. Background jobs retain their
+existing absolute command deadline. Policy status updates never renew native progress. Unverified child
+state keeps the change pending; current adaptive classification/handoff requires local workers.
+SSH-only projects must remain on legacy policy until their remote boundary can be verified.
+
+External reviewers/planners use the loopback-only read interface
+`GET /api/v1/projects/:project/runs/:identity/route?role=reviewer|planner&source_sha=SHA`.
+Review identities bind to a live parent; standalone planners can bind to a retained issue
+lifecycle such as GH-12. The endpoint only resolves existing profiles and never invokes a model.
+Returned decisions include base profile, gain revision, requested/effective settings and cap
+reason. Native launchers resolve immediately before execution and retain that receipt. Native
+observations remain separate from requested settings; unavailable actual CLI settings stay
+unknown. External prices follow the selected model's retained rate snapshot and remain estimates,
+not account debits. Classifier/helper/reviewer lineage and failed attempts remain associated with
+the delivery; process completion does not prove acceptance or counterfactual model quality.
+
+Deploy both coordinator and repository tooling before activation. A cached repository workspace
+with an old launcher is held at startup; merge the accepted tooling changes normally without
+resetting its source, PR, evidence or deadlines. Keep gain disabled until every active launch
+path is compatible. Start at gain 1.0 with capacity suited to your host; the first-service example uses one primary
+slot and no helpers. Repository tooling owns heavy-command serialization. Compare outcomes within
+task classes before making claims about quality or cost savings.
+
+## Model tiers and timed Astra permission
+
+With explicit legacy label routing, delivery can start on Luna high for tiny work, Terra medium for small work,
+Sol high for medium/unclassified work, and Sol xhigh for large work. Explicit fixed
+model-label routes may live outside the automatic ladder and do not escalate. Size
+routes remain ladder starts. `SYMPHONY_SELECTED_SIZE` freezes size for delivery tools;
+model and size changes require a new run with the original logical budget.
+
+Astra requires explicit selection plus operator-owned timed smartass permission.
+`crescendo_smartass_mode_get/set` use local stdio MCP; enabling without `expires_at`
+expires after sixty minutes. Missing, invalid, unreadable or expired permission is off.
+The state API exposes `smartass_mode`; there is no HTTP mutation. Fast mode is separate.
+Dispatch and native thread/turn checks reject unselected/default Astra and ladder-derived
+Astra even when permission is on. Expiry lets the current turn finish, then yields
+without spending an implementation attempt, research round or PR review allowance.
+
+Managed leads disable native delegation; the separate helper pool remains read-only. Legacy helpers use Luna max; adaptive helpers
+follow their task profile. Helper configuration errors identify command, inspection or catalog failure,
+and disable repeated requests for that parent lifetime. Agent environment selection
+must never run GPU preflight merely to inspect helper configuration.
+
+Capacity and hardware limits are operator choices. Increasing primary slots overlaps reasoning and
+inspection; it does not grant parallel GPU/build capacity. Integrate your repository's own resource
+controls when heavy commands must serialize. Metalrain's rollout and lease are one installation,
+not requirements supplied by Crescendo.
+
+## Throttling
+
+- **Budget.** `throttle.daily_budget_usd` enforces estimated spend per UTC day across all projects.
+  Over it, only `over_budget_allow` classes start. The default is `[pull_request, final_attempt,
+  continuation]`; the other classes are `issue` and `research`. Open work keeps closing while
+  nothing new begins.
+- **Quota back-off.** Each `backoff` rule watches one Codex quota window (`weekly`, `daily`, `5h`,
+  ...).
+  - `avoid` swaps the listed models for the strongest allowed ladder step, never below the item's own
+    or the default start. If no step is allowed, the run waits.
+  - `pause: true` holds every new run until the window resets.
+
+  Quota older than `quota_stale_ms` (default two hours), or never seen, counts as unknown. With
+  `on_unknown_quota: restrict` (the default), unknown quota still avoids models but never pauses.
+- **Pricing.** `pricing.models` overrides or adds model prices in USD per million tokens (`input`,
+  `cached_input`, `output`). Unlisted models keep the built-in prices.
+
 ## OpenAI Fast mode
 
 The local operator MCP server runs with `crescendo mcp <crescendo.yml>` and exposes
@@ -35,16 +294,16 @@ when Codex reported that tier at thread startup. The read-only state API exposes
 thread provenance retains the native acknowledgement. No HTTP mutation or dashboard toggle exists.
 Unreadable or corrupt policies select standard speed and expose a policy error.
 
-[Official OpenAI speed documentation](https://learn.chatgpt.com/docs/agent-configuration/speed#fast-mode)
-lists supported Sol, Astra and Luna models. Included subscription allowance is consumed at 2.5x
-the Standard rate, while purchased credits use 2x; these are not guaranteed speed multipliers.
-Dashboard API-equivalent USD estimates continue to use configured model rates and do not measure
-subscription debits or include a service-tier surcharge.
+See [OpenAI speed documentation](https://learn.chatgpt.com/docs/agent-configuration/speed#fast-mode)
+for current supported models and account billing terms. Fast mode can change usage consumption;
+the dashboard's API-equivalent USD estimates use configured model rates and do not measure
+subscription debits or service-tier surcharges.
 
 ## Additional read-only capacity and quiet windows
 
 Primary capacity remains `pool.slots`. Optional `helpers` adds a separate global pool (0–5,
-default 0) of `gpt-6-luna` / `max` read-only leaf agents, with `timeout_ms` at most 900000.
+default 0) of read-only leaf agents. Legacy policy uses `gpt-6-luna` / `max`; enabled
+intelligence gain selects their model and effort by task, with `timeout_ms` at most 900000.
 Use `helper_start` for a bounded question, poll `helper_status` while doing independent work,
 and cancel unused work with `helper_cancel`. Helpers consume account usage but no primary
 slot or machine lease. Parent exit cancels them; capacity releases only after process exit.
@@ -58,19 +317,22 @@ Server names remain literal keys, preserving punctuation and existing transport 
 Catalogs are passed in sealed anonymous memory files; no mutable catalog path or per-run file accumulates.
 Native approval and user-input requests are answered without contacting a human.
 
-Optional `quiet_window` supports an owner-confirmed, same-day America/Vancouver window:
+Optional `quiet_window` supports an owner-confirmed, same-day window in any installed IANA timezone:
 
 ```yaml
 pool: {slots: 3}
 helpers: {slots: 5, model: gpt-6-luna, effort: max, timeout_ms: 900000}
-quiet_window: {start: "03:00", end: "04:00", time_zone: America/Vancouver, drain_minutes: 60}
+quiet_window: {start: "03:00", end: "04:00", time_zone: UTC, drain_minutes: 60}
 ```
 
 Only otherwise admitted `<prefix>:quiet` work reserves that window. Primary work and helpers
 yield before it; a quiet run holds global exclusivity, and unfinished work yields at its end.
 The native scheduling clock is cached per local day and follows installed timezone rules.
-A missing/failed clock does not admit quiet work. Metalrain's lease independently verifies
-the clock, complete service snapshot and sole owning run, and enforces the cutoff.
+Python 3 with `zoneinfo` and installed timezone data is required when this feature is enabled.
+Invalid zones are rejected; clock failures and ambiguous or nonexistent DST boundaries do not admit
+quiet work. Drain minutes measure elapsed time. Omitted zones retain the legacy America/Vancouver
+default; new configurations should name their zone explicitly. Overnight windows are unsupported.
+Repository hardware tooling must independently enforce any command-level lease or cutoff it needs.
 
 Autopilot task fields `exclusive: none|global` override project research exclusivity.
 `skip_unchanged: true` performs a native preflight before workspace/model startup. It requires
@@ -125,6 +387,104 @@ ordinary accepted deliveries by elapsed time, lease wait/held time, retries, val
 managed helper cost and separately reported review/planning cost. Leave conclusions pending
 until that cohort exists; do not run duplicate benchmarks to consume spare quota.
 
+## Research channels
+
+When GitHub delivery attempts are exhausted, retirement closes the issue as not planned and
+closes its owned drafts. Ownership requires a body line starting with `Closes #N`, `Fixes #N`,
+`Resolves #N` (including singular/past forms), `Symphony issue: #N` or `Crescendo issue: #N`,
+or an `issue-N` branch segment with an optional hyphenated suffix. The number must match exactly;
+mentioning a prerequisite or baseline failure does not make a draft belong to that issue.
+Non-draft PRs remain available for independent review.
+
+A channel under `autopilot.channels` is its focus text, or an object:
+
+```yaml
+channels:
+  qa:
+    focus: "User-visible defects found by exercising the app on Linux desktop."
+    prompt: prompts/research/qa.md     # this channel's own prompt (else prompts.research)
+    min_issues: 2
+    max_issues: 4
+    route: {model: gpt-6.1-sol, effort: xhigh}
+    every: 1d          # schedule: 30m, 6h, 1d, 2w (default research_cooldown_ms)
+    at: "06:00"        # optional UTC calendar anchor (interval rounds up to days)
+    when: idle         # idle: only when nothing else runs or waits; anytime: whenever a slot is free
+```
+
+Each channel (task) runs on its own schedule; the most overdue due task goes first. Without `at`,
+`every` is measured from completion. With `at`, the first run is due at the latest UTC anchor at
+or before now. After completion, the next due time is the latest anchor at or before the finish
+plus `every` rounded up to whole UTC calendar days, with a minimum of one day. A daily 06:00 task
+finishing October 1 at 19:12 stays due October 2 at 06:00. Finishing before 06:00 leaves that day's
+06:00 due; finishing exactly at 06:00 leaves tomorrow due. Sub-day intervals with `at` run once
+daily; `36h` rounds up to two days. Delays do not replay a backlog of missed occurrences.
+
+A running task cannot dispatch again. Tasks requiring at least one PR also wait while an open PR
+(including a draft) has their `<prefix>:channel:<name>` label, until it closes or merges. The hold
+also applies to retries and does not mark the task completed or consume an attempt.
+
+After a run, Crescendo counts the issues and pull requests it opened with their channel label.
+A run that falls short of its minimums, or fails, is retried 30 minutes later behind other work.
+The last allowed attempt (`max_item_attempts`) ends the task until it is next due, so nothing is
+parked. The timeline shows each outcome as "delivered" or "fell short".
+
+## Per-repo autopilot (`.crescendo/autopilot/`)
+
+A repository can carry its own autopilot, which travels with its code:
+
+```
+.crescendo/autopilot/
+  autopilot.yml      # optional: defaults: {every, when, effort}; guidelines: guidelines.md
+  guidelines.md      # maintenance guidelines appended to EVERY agent prompt for this repo
+  tasks/<name>.md    # one task: YAML front matter + its seed prompt
+```
+
+```markdown
+---
+focus: User-facing docs that are accurate, clear and sell the project
+every: 1d
+when: idle
+effort: max                       # a rung of the project's local ladder; the model stays local
+delivers:
+  issues: {min: 0, max: 2}
+  pull_requests: {min: 0, max: 3, paths: ["README.md", "docs/**"]}
+expectations:
+  - Run the documented quick start from a clean clone
+---
+You are the marketing lead for {{ issue.title }} ...
+```
+
+- **Mirroring:** the service reads the folder from the repository's default branch every five
+  minutes (conditional requests, so an unchanged folder is free). It mirrors the folder into
+  `<state>/projects/<id>/repo-autopilot/` and reloads the project when anything changes. The
+  folder is read the same way as `WORKFLOW.md` prompt files.
+- **Precedence:** when the folder has tasks, they **replace** the project's local
+  `autopilot.channels`. Local config keeps what the service owns: the model and effort ladder,
+  routes, budget, trust, tracker and `enabled`. Set `autopilot.repo_tasks: false` to ignore the
+  folder, or `autopilot.disabled_tasks: [name]` to skip single tasks. Repositories without the
+  folder keep their local channels.
+- **Prompts:** the task body is the prompt, with the same variables as research prompts. Crescendo
+  appends:
+  - a `## Deliverables` section (counts, label, allowed pull request paths, expectations);
+  - `## Repository guidelines` from `guidelines.md`, which reaches issue, review and task prompts
+    alike.
+
+  A pull request carrying a task's label is reviewed against that task's `paths`; the reviewer
+  closes it as out of scope if it touches anything else.
+- **Invalid folder:** an invalid folder keeps the last good configuration, and the error is logged.
+  The dashboard's Autopilot card marks each project's tasks as `repo` or `local`, and flags a
+  failed repository read.
+- **Who can change it:** agents may change the folder through normal reviewed pull requests. The
+  reviewer runs `crescendo autopilot check` on them.
+
+### Marketing dept
+
+Projects written by `project add` get a `marketing` channel with its own prompt
+(`prompts/marketing.md`) and `min_issues: 0`. Instead of filing issues it reviews the user-facing
+documentation (README, guides, examples, descriptions) against the current code, and opens
+documentation-only pull requests that make it clearer, current and more persuasive. The reviewer
+autopilot merges or closes them like any other pull request. "Nothing to change" is a valid outcome.
+
 ## Layout
 
 ```
@@ -140,85 +500,37 @@ until that cohort exists; do not run duplicate benchmarks to consume spare quota
   deploy-drain.lock                     # kernel lock retained by deploy and swap children
 ```
 
-## First service
+## Commands
 
-From `elixir/`, choose a configuration directory and a GitHub repository you can access. Replace
-`your-org/your-repo` with its `owner/name`; the generated workflow uses that repository and its
-default `main` branch (pass `--branch` to `project add` if yours differs).
-
-```bash
-CRESCENDO_DIR="${CRESCENDO_DIR:-$HOME/.config/crescendo}"
-REPO=your-org/your-repo
-mkdir -p "$CRESCENDO_DIR"
-mise exec -- ./bin/crescendo project add "$CRESCENDO_DIR/crescendo.yml" demo "$REPO"
-cat > "$CRESCENDO_DIR/crescendo.yml" <<'YAML'
-server: {host: 127.0.0.1, port: 4280}
-paths: {state: state}
-pool: {slots: 1}
-projects:
-  demo: {weight: 1}
-YAML
-```
-
-`project add` creates `projects/demo/WORKFLOW.md` and two prompt files, then prints the entry to
-put under `projects:`. It does not create or update `crescendo.yml`; the `cat` command creates it.
-The relative `state` path keeps state under `$CRESCENDO_DIR/state`. Change the loopback port if
-4280 is already in use.
-
-The generated GitHub workflow needs a `GITHUB_TOKEN` with permission to read and write issues,
-pull requests and contents, and to merge. Authenticate `gh` on this host and ensure SSH can clone
-the repository in the generated `after_create` hook. Create its required labels before launching:
+These change local files, or a project's own repository through your `gh` login, never the
+running service:
 
 ```bash
-gh auth status
-export GITHUB_TOKEN="$(gh auth token)"
-mise exec -- ./bin/crescendo labels sync "$CRESCENDO_DIR/crescendo.yml" demo
-mise exec -- ./bin/crescendo "$CRESCENDO_DIR/crescendo.yml" --logs-root "$CRESCENDO_DIR/logs" \
-  --i-understand-that-this-will-be-running-without-the-usual-guardrails
+crescendo project add ~/.config/crescendo/crescendo.yml private-api your-org/private-api [--branch main] [--prefix crescendo] [--tools node@22,rust@1.82]
+crescendo labels sync ~/.config/crescendo/crescendo.yml [private-api]
+crescendo labels migrate ~/.config/crescendo/crescendo.yml app --from symphony
+crescendo drain on|off ~/.config/crescendo/crescendo.yml
+crescendo autopilot check .crescendo/autopilot [--workflow ~/.config/crescendo/projects/<id>/WORKFLOW.md]
 ```
 
-Start the service with the service file instead of a `WORKFLOW.md`. Project workflows and their
-prompt files hot-reload as before. Adding, removing or reweighting a project, or changing the
-service file, needs a service restart. A project whose workflow cannot load is reported on the
-dashboard (its filter pill is marked) and the other projects still run.
-
-Workspace hooks use each project's `hooks.timeout_ms`, independently of Codex inactivity.
-The orchestrator tracks workspace preparation, Codex startup/execution, and `after_run` cleanup;
-`codex.stall_timeout_ms` applies only during Codex startup/execution, with a fresh deadline after
-preparation. Startup also retains `codex.read_timeout_ms`. Mandatory hook failures use startup admission retries;
-cleanup failures are best effort. Slots remain occupied through cleanup and are released once
-on worker exit or reconciliation. Workflow reloads preserve phases; runtime restarts cancel
-workers together with their scheduler before redispatch.
-Due retries and retries held for admission stay in weighted slot demand, while future backoff
-does not reserve a slot. Retry timers refresh the slot policy before checking capacity.
-
-Startup admission failures have their own budget, with or without autopilot. Workspace preparation,
-mandatory `after_create`/`before_run` hooks, app-server session initialization and worker spawn
-failures occur before model admission. They never advance `agent.max_attempts`, the logical item
-attempt/effort ladder, research delivery attempts or the PR review cap, and never retire tracker
-items or their dependencies. Zero tokens alone does not establish startup failure; once the
-session is admitted, delivery and independent acceptance policies apply normally.
-
-The first two failed starts retry after 10 and 20 seconds. After the third, the dashboard shows a
-startup block and the scheduler permits one recovery probe every 30 minutes. Failed probes stay
-blocked; successful admission clears startup accounting. Backoff and the capped failure count are
-stored in `operations.dets` using wall-clock deadlines and survive restart. No worker slot or claim
-is held during backoff. Fixing the environment allows recovery at the next probe; changing the
-project's hooks, workspace, worker or Codex configuration permits an immediate controlled retry.
-Keep the issue ready and preserve its dependency graph; no dashboard write endpoint is involved.
-Configuration reloads and stale worker/run/timer identity checks prevent duplicate workers.
-
-Existing workflows need no new settings. Startup admission uses this policy even when
-`agent.max_attempts` is unset or `autopilot.max_item_attempts` is one. Mandatory hooks still abort
-on failure; `after_run` remains best effort, with its separate hook deadline. Local hooks and SSH
-transport subprocesses use Erlang port process groups so timeout/cancellation terminates their
-children. Remote hooks require the standard GNU `timeout` utility (including `-k`) to enforce the
-hook deadline on the worker; missing utilities fail visibly before model work.
-
-History records `startup_failed`, `startup_retry` and `startup_blocked` separately from delivery
-failures, with phase, hook, exit/timeout status, run/worker identity and bounded sanitized context.
-Captured empty output is explicitly marked, without attributing a root cause. Timeout diagnostics
-say when no output was captured. Private-project redaction also removes these diagnostics.
+- `project add` writes `projects/<id>/` (a `WORKFLOW.md`, a pull request review prompt and a research
+  prompt) from the built-in templates. It never overwrites, and it prints the line to add under
+  `projects:`. `--prefix` follows the workflow's `labels.prefix` rules: it is trimmed and lowercased,
+  then must contain only lowercase letters, digits or dashes. `--tools` puts mise tools in front of
+  Codex, so the agent and everything it runs have them.
+- `labels sync` creates every label a project's workflow uses that its repository lacks: ready,
+  hold, in-review, blocked, one per research channel, sizes and model routes. It exits with an error
+  if a requested project is unknown or GitHub cannot list or create the labels.
+- `labels migrate` moves every open issue and pull request from each `<old>:` label to its twin under
+  the project's `labels.prefix` (run `labels sync` first). Old labels stay for history. Runs get
+  the prefix as `CRESCENDO_LABEL_PREFIX`, so repository tooling can follow the switch. It exits with
+  an error if GitHub cannot list items or add/remove a label.
+- `drain on` stops new runs; active issue workers yield at successful completed-turn boundaries.
+  `drain off` removes only the manual/legacy flag; managed and quiet holds remain independent.
+- `autopilot check` validates a repository's `.crescendo/autopilot/` folder: task front matter,
+  schedules, deliveries and prompt templates. It prints one line per task. With `--workflow` it
+  loads the folder exactly as the service would load it for that project, including task efforts
+  against its ladder. Agents and the pull request reviewer run it on changes to the folder.
 
 ## Install and deploy
 
@@ -331,240 +643,6 @@ Owner tokens, flag contents and paths stay private. Missing/legacy reasons remai
 These read-only current signals
 do not establish hold ownership, intended duration or the cause of historical unused capacity.
 
-## Commands
-
-These change local files, or a project's own repository through your `gh` login, never the
-running service:
-
-```bash
-crescendo project add ~/.config/crescendo/crescendo.yml nubu3d ahammer/Nubu3D [--branch main] [--prefix crescendo] [--tools node@22,rust@1.82]
-crescendo labels sync ~/.config/crescendo/crescendo.yml [nubu3d]
-crescendo labels migrate ~/.config/crescendo/crescendo.yml metalrain --from symphony
-crescendo drain on|off ~/.config/crescendo/crescendo.yml
-crescendo autopilot check .crescendo/autopilot [--workflow ~/.config/crescendo/projects/<id>/WORKFLOW.md]
-```
-
-- `project add` writes `projects/<id>/` (a `WORKFLOW.md`, a pull request review prompt and a research
-  prompt) from the built-in templates. It never overwrites, and it prints the line to add under
-  `projects:`. `--prefix` follows the workflow's `labels.prefix` rules: it is trimmed and lowercased,
-  then must contain only lowercase letters, digits or dashes. `--tools` puts mise tools in front of
-  Codex, so the agent and everything it runs have them.
-- `labels sync` creates every label a project's workflow uses that its repository lacks: ready,
-  hold, in-review, blocked, one per research channel, sizes and model routes. It exits with an error
-  if a requested project is unknown or GitHub cannot list or create the labels.
-- `labels migrate` moves every open issue and pull request from each `<old>:` label to its twin under
-  the project's `labels.prefix` (run `labels sync` first). Old labels stay for history. Runs get
-  the prefix as `CRESCENDO_LABEL_PREFIX`, so repository tooling can follow the switch. It exits with
-  an error if GitHub cannot list items or add/remove a label.
-- `drain on` stops new runs; active issue workers yield at successful completed-turn boundaries.
-  `drain off` removes only the manual/legacy flag; managed and quiet holds remain independent.
-- `autopilot check` validates a repository's `.crescendo/autopilot/` folder: task front matter,
-  schedules, deliveries and prompt templates. It prints one line per task. With `--workflow` it
-  loads the folder exactly as the service would load it for that project, including task efforts
-  against its ladder. Agents and the pull request reviewer run it on changes to the folder.
-
-## `crescendo.yml`
-
-```yaml
-server: {host: 0.0.0.0, port: 4280}
-paths: {state: ~/.local/state/crescendo}
-pool: {slots: 3}
-throttle:
-  daily_budget_usd: 200
-  backoff:
-    - {window: weekly, remaining_below_percent: 3, pause: true}
-pricing: {as_of: "2026-10-01", models: {gpt-6.1-sol: {input: 1.0, cached_input: 0.1, output: 5.0}}}
-defaults:
-  codex:
-    routing: {...}          # anything a project's front matter may hold
-projects:
-  metalrain: {weight: 1, research_exclusive: global}
-  nubu3d: {workflow: projects/nubu3d/WORKFLOW.md, cap: 1}
-  shimmer: {enabled: false}
-```
-
-- `server` binds the dashboard and the state API for the whole service. A project's own `server`
-  setting is ignored.
-- `pool.slots` is the number of agent runs the whole service runs at once. A project's own
-  `agent.max_concurrent_agents` still limits that project.
-- `throttle` and `pricing` are service-wide (see [Throttling](#throttling)). A project's own
-  `throttle` is ignored; its `pricing` is replaced by the service's.
-- `defaults` is merged under every project's front matter: nested maps merge key by key and the
-  project's own values win, so shared routing or agent limits live once.
-- `projects` maps an id (lowercase letters, digits and dashes) to:
-  - `workflow`: path to its `WORKFLOW.md`; default `projects/<id>/WORKFLOW.md` next to this file.
-  - `weight` (default 1): its share of contested slots.
-  - `cap`: the most slots it may hold at once.
-  - `research_exclusive`: `none`, `project` (default) or `global` (see below).
-  - `enabled` (default true).
-  - `redact` (default false): keep a private repository's work off the public dashboard and API.
-    Its items show only identifiers, links, kind, state, model, attempts, tokens and cost; titles,
-    descriptions, messages, transcripts, plans, files, images, branches, errors and run ids are
-    dropped.
-
-Relative paths resolve against the service file's directory.
-
-## Sharing slots
-
-A Governor owns everything projects share. Orchestrators check in every poll, reporting their spend
-today and how many runs they could start, and they get back the dispatch policy. They acquire a
-slot right before a run starts and release it when the run ends. The Governor monitors each
-orchestrator and frees the slots of one that stops.
-
-- **Weights.** While several projects have work waiting, the next free slot goes to the project with
-  the lowest *pass*. Each grant advances a project's pass by `1 / weight`, so over time grants
-  follow the weights. A project returning from idle rejoins at the active projects' pass rather than
-  spending credit it banked while idle. When a slot is kept for a project, that project is told to
-  poll immediately.
-- **Caps** limit a project on top of the shared slots.
-- **Research exclusivity.**
-  - `none`: research is an ordinary run.
-  - `project`: research runs when its project is idle, and nothing else in that project starts
-    until it finishes.
-  - `global`: research needs the whole service idle and holds every slot while it runs. A global
-    research request that finds other runs in flight reserves the service, so nothing new starts
-    elsewhere until the research gets its turn. A reservation that is not renewed within 90 seconds
-    lapses.
-- **Drain.** While `<state>/drain` exists, nothing new starts. Service issue workers consult the
-  Governor after successful native turn completion and checkpoint persistence, yielding before
-  another turn. Normal cleanup runs and the orchestrator releases the slot once. The distinct
-  `deployment_drain` interruption reason preserves source/workpad, logical attempt and retry count,
-  including zero; it records no failed attempt, retirement or accepted delivery. Ordinary weighted scheduling
-  resumes the issue after the hold ends, without requiring native thread reuse. Failed turns and checkpoint failures
-  keep normal retry semantics. Standalone workflows, reload, stale-run updates, reconciliation and
-  shutdown keep their existing behavior. Deploys use this hold; long in-progress turns and unknown
-  observations continue waiting under the existing deadlines.
-
-Waiting for a slot, the throttle or a backed-off route is never a failed attempt: a held retry keeps
-its attempt number and checks again every 30 seconds.
-
-## Throttling
-
-- **Budget.** `throttle.daily_budget_usd` enforces estimated spend per UTC day across all projects.
-  Over it, only `over_budget_allow` classes start. The default is `[pull_request, final_attempt,
-  continuation]`; the other classes are `issue` and `research`. Open work keeps closing while
-  nothing new begins.
-- **Quota back-off.** Each `backoff` rule watches one Codex quota window (`weekly`, `daily`, `5h`,
-  ...).
-  - `avoid` swaps the listed models for the strongest allowed ladder step, never below the item's own
-    or the default start. If no step is allowed, the run waits.
-  - `pause: true` holds every new run until the window resets.
-
-  Quota older than `quota_stale_ms` (default two hours), or never seen, counts as unknown. With
-  `on_unknown_quota: restrict` (the default), unknown quota still avoids models but never pauses.
-- **Pricing.** `pricing.models` overrides or adds model prices in USD per million tokens (`input`,
-  `cached_input`, `output`). Unlisted models keep the built-in prices.
-
-## Labels
-
-`labels.prefix` in a project's `WORKFLOW.md` (default `symphony`) names the labels Crescendo reads
-or applies itself, unless they are set explicitly:
-
-- `<prefix>:model:*` and `<prefix>:size:*` routing labels;
-- `<prefix>:blocked`;
-- the `<prefix>:research` and `<prefix>:channel:<name>` labels on research runs.
-
-Tracker `required_labels` and `excluded_labels` (for example `<prefix>:ready` and `<prefix>:hold`)
-stay explicit.
-
-## Research channels
-
-When GitHub delivery attempts are exhausted, retirement closes the issue as not planned and
-closes its owned drafts. Ownership requires a body line starting with `Closes #N`, `Fixes #N`,
-`Resolves #N` (including singular/past forms), `Symphony issue: #N` or `Crescendo issue: #N`,
-or an `issue-N` branch segment with an optional hyphenated suffix. The number must match exactly;
-mentioning a prerequisite or baseline failure does not make a draft belong to that issue.
-Non-draft PRs remain available for independent review.
-
-A channel under `autopilot.channels` is its focus text, or an object:
-
-```yaml
-channels:
-  qa:
-    focus: "User-visible defects found by exercising the app on Linux desktop."
-    prompt: prompts/research/qa.md     # this channel's own prompt (else prompts.research)
-    min_issues: 2
-    max_issues: 4
-    route: {model: gpt-6.1-sol, effort: xhigh}
-    every: 1d          # schedule: 30m, 6h, 1d, 2w (default research_cooldown_ms)
-    at: "06:00"        # optional UTC calendar anchor (interval rounds up to days)
-    when: idle         # idle: only when nothing else runs or waits; anytime: whenever a slot is free
-```
-
-Each channel (task) runs on its own schedule; the most overdue due task goes first. Without `at`,
-`every` is measured from completion. With `at`, the first run is due at the latest UTC anchor at
-or before now. After completion, the next due time is the latest anchor at or before the finish
-plus `every` rounded up to whole UTC calendar days, with a minimum of one day. A daily 06:00 task
-finishing October 1 at 19:12 stays due October 2 at 06:00. Finishing before 06:00 leaves that day's
-06:00 due; finishing exactly at 06:00 leaves tomorrow due. Sub-day intervals with `at` run once
-daily; `36h` rounds up to two days. Delays do not replay a backlog of missed occurrences.
-
-A running task cannot dispatch again. Tasks requiring at least one PR also wait while an open PR
-(including a draft) has their `<prefix>:channel:<name>` label, until it closes or merges. The hold
-also applies to retries and does not mark the task completed or consume an attempt.
-
-After a run, Crescendo counts the issues and pull requests it opened with their channel label.
-A run that falls short of its minimums, or fails, is retried 30 minutes later behind other work.
-The last allowed attempt (`max_item_attempts`) ends the task until it is next due, so nothing is
-parked. The timeline shows each outcome as "delivered" or "fell short".
-
-## Per-repo autopilot (`.crescendo/autopilot/`)
-
-A repository can carry its own autopilot, which travels with its code:
-
-```
-.crescendo/autopilot/
-  autopilot.yml      # optional: defaults: {every, when, effort}; guidelines: guidelines.md
-  guidelines.md      # maintenance guidelines appended to EVERY agent prompt for this repo
-  tasks/<name>.md    # one task: YAML front matter + its seed prompt
-```
-
-```markdown
----
-focus: User-facing docs that are accurate, clear and sell the project
-every: 1d
-when: idle
-effort: max                       # a rung of the project's local ladder; the model stays local
-delivers:
-  issues: {min: 0, max: 2}
-  pull_requests: {min: 0, max: 3, paths: ["README.md", "docs/**"]}
-expectations:
-  - Run the documented quick start from a clean clone
----
-You are the marketing lead for {{ issue.title }} ...
-```
-
-- **Mirroring:** the service reads the folder from the repository's default branch every five
-  minutes (conditional requests, so an unchanged folder is free). It mirrors the folder into
-  `<state>/projects/<id>/repo-autopilot/` and reloads the project when anything changes. The
-  folder is read the same way as `WORKFLOW.md` prompt files.
-- **Precedence:** when the folder has tasks, they **replace** the project's local
-  `autopilot.channels`. Local config keeps what the service owns: the model and effort ladder,
-  routes, budget, trust, tracker and `enabled`. Set `autopilot.repo_tasks: false` to ignore the
-  folder, or `autopilot.disabled_tasks: [name]` to skip single tasks. Repositories without the
-  folder keep their local channels.
-- **Prompts:** the task body is the prompt, with the same variables as research prompts. Crescendo
-  appends:
-  - a `## Deliverables` section (counts, label, allowed pull request paths, expectations);
-  - `## Repository guidelines` from `guidelines.md`, which reaches issue, review and task prompts
-    alike.
-
-  A pull request carrying a task's label is reviewed against that task's `paths`; the reviewer
-  closes it as out of scope if it touches anything else.
-- **Invalid folder:** an invalid folder keeps the last good configuration, and the error is logged.
-  The dashboard's Autopilot card marks each project's tasks as `repo` or `local`, and flags a
-  failed repository read.
-- **Who can change it:** agents may change the folder through normal reviewed pull requests. The
-  reviewer runs `crescendo autopilot check` on them.
-
-### Marketing dept
-
-Projects written by `project add` get a `marketing` channel with its own prompt
-(`prompts/marketing.md`) and `min_issues: 0`. Instead of filing issues it reviews the user-facing
-documentation (README, guides, examples, descriptions) against the current code, and opens
-documentation-only pull requests that make it clearer, current and more persuasive. The reviewer
-autopilot merges or closes them like any other pull request. "Nothing to change" is a valid outcome.
-
 ## What runs see
 
 Every agent command and workspace hook of a run gets these variables:
@@ -572,7 +650,7 @@ Every agent command and workspace hook of a run gets these variables:
 | Variable | Meaning |
 | --- | --- |
 | `CRESCENDO_PROJECT` | The project id (unset for a single workflow). |
-| `CRESCENDO_WORK_ITEM` | The qualified work item, e.g. `metalrain/GH-12`. |
+| `CRESCENDO_WORK_ITEM` | The qualified work item, e.g. `app/GH-12`. |
 | `CRESCENDO_CONTROL_STATE_URL` | Bounded live state (`view=control`) for leases, reconciliation and deployment. |
 | `CRESCENDO_RUN_ID` | Identity of this run; a later run of the same issue is distinct. |
 | `CRESCENDO_STATE_URL` | The service's read-only state API. |
@@ -1023,99 +1101,59 @@ deliver an accepted reduced slice, explicitly decline the remainder, or use boun
 grooming may admit one successor after verified accepted partial delivery or a newly completed
 native prerequisite, using the matching `crescendo:handoff` record on root and successor.”
 
-## Model tiers and timed Astra permission
+## Evidence integration
 
-Ordinary delivery can start on Luna high for tiny work, Terra medium for small work,
-Sol high for medium/unclassified work, and Sol xhigh for large work. Explicit fixed
-model-label routes may live outside the automatic ladder and do not escalate. Size
-routes remain ladder starts. `SYMPHONY_SELECTED_SIZE` freezes size for delivery tools;
-model and size changes require a new run with the original logical budget.
+Evidence is optional. Set `evidence: {root: ./evidence}` in a project's workflow to resolve a root
+relative to that workflow, with `~` and whole-value `$ENV_NAME` expansion. Resolution prefers the
+project setting, then `CRESCENDO_EVIDENCE_ROOT`, then the legacy
+`METALRAIN_SYMPHONY_EVIDENCE_ROOT` compatibility alias. A configured but unresolved environment
+reference does not fall through to another root. Environment-only relative paths resolve against
+the service working directory; absolute paths are recommended for environment defaults.
 
-Astra requires explicit selection plus operator-owned timed smartass permission.
-`crescendo_smartass_mode_get/set` use local stdio MCP; enabling without `expires_at`
-expires after sixty minutes. Missing, invalid, unreadable or expired permission is off.
-The state API exposes `smartass_mode`; there is no HTTP mutation. Fast mode is separate.
-Dispatch and native thread/turn checks reject unselected/default Astra and ladder-derived
-Astra even when permission is on. Expiry lets the current turn finish, then yields
-without spending an implementation attempt, research round or PR review allowance.
+Helpers resolve the requesting project's root and capture bounded immutable text; auxiliary usage,
+planning inputs and delivery observations use the same resolver. Worker commands receive the
+resolved `CRESCENDO_EVIDENCE_ROOT`; an inherited legacy alias is kept aligned. New installations
+need not define the legacy name. External producer reports must still meet their documented
+identity, freshness and verification contracts. Missing evidence stays unknown; a root is not
+proof of acceptance or verified account cost. Give projects separate roots when their producers
+and receipts must be isolated. Existing absolute legacy roots need no migration.
 
-Managed leads disable native delegation; the separate helper pool remains read-only
-Luna max. Helper configuration errors identify command, inspection or catalog failure,
-and disable repeated requests for that parent lifetime. Agent environment selection
-must never run GPU preflight merely to inspect helper configuration.
+## Workspace startup and recovery
 
-The initial rollout targets three primary workers and two helpers on one workstation.
-All heavy commands still serialize through the existing machine lease, including native
-journeys and measurements. Increase the workflow admission cap from one to two to three
-only after the documented accepted-delivery comparison; no simultaneous heavy GPU work
-is authorized. Current Standard short-context API estimates include Terra and updated
-Sol/Astra/Luna rates; historical atomic allocations retain their recorded prices.
+Workspace hooks use each project's `hooks.timeout_ms`, independently of Codex inactivity.
+The orchestrator tracks workspace preparation, Codex startup/execution, and `after_run` cleanup;
+`codex.stall_timeout_ms` applies only during Codex startup/execution, with a fresh deadline after
+preparation. Startup also retains `codex.read_timeout_ms`. Mandatory hook failures use startup admission retries;
+cleanup failures are best effort. Slots remain occupied through cleanup and are released once
+on worker exit or reconciliation. Workflow reloads preserve phases; runtime restarts cancel
+workers together with their scheduler before redispatch.
+Due retries and retries held for admission stay in weighted slot demand, while future backoff
+does not reserve a slot. Retry timers refresh the slot policy before checking capacity.
 
+Startup admission failures have their own budget, with or without autopilot. Workspace preparation,
+mandatory `after_create`/`before_run` hooks, app-server session initialization and worker spawn
+failures occur before model admission. They never advance `agent.max_attempts`, the logical item
+attempt/effort ladder, research delivery attempts or the PR review cap, and never retire tracker
+items or their dependencies. Zero tokens alone does not establish startup failure; once the
+session is admitted, delivery and independent acceptance policies apply normally.
 
-## Intelligence gain
+The first two failed starts retry after 10 and 20 seconds. After the third, the dashboard shows a
+startup block and the scheduler permits one recovery probe every 30 minutes. Failed probes stay
+blocked; successful admission clears startup accounting. Backoff and the capped failure count are
+stored in `operations.dets` using wall-clock deadlines and survive restart. No worker slot or claim
+is held during backoff. Fixing the environment allows recovery at the next probe; changing the
+project's hooks, workspace, worker or Codex configuration permits an immediate controlled retry.
+Keep the issue ready and preserve its dependency graph; no dashboard write endpoint is involved.
+Configuration reloads and stale worker/run/timer identity checks prevent duplicate workers.
 
-Enable the shared policy explicitly in the service file:
+Existing workflows need no new settings. Startup admission uses this policy even when
+`agent.max_attempts` is unset or `autopilot.max_item_attempts` is one. Mandatory hooks still abort
+on failure; `after_run` remains best effort, with its separate hook deadline. Local hooks and SSH
+transport subprocesses use Erlang port process groups so timeout/cancellation terminates their
+children. Remote hooks require the standard GNU `timeout` utility (including `-k`) to enforce the
+hook deadline on the worker; missing utilities fail visibly before model work.
 
-```yaml
-intelligence_policy: {enabled: true}
-```
-
-Until enabled, existing routes retain their legacy behavior. The operator MCP tools
-`crescendo_intelligence_gain_get` and `crescendo_intelligence_gain_set` read/set `gain`
-from 0 to 2 (default 1). The atomic operator state is `intelligence-policy.json` in the
-service state directory. The public dashboard displays the policy; mutations remain
-operator-only MCP operations, so public viewers cannot change model spend.
-
-| Base work at gain 1 | Model | Effort ceiling |
-| --- | --- | --- |
-| Routine extraction | Luna low | medium |
-| Bounded known-pattern, low risk | Terra low | medium |
-| Ordinary implementation, review or coordination | Terra medium | medium |
-| Complex causal/invariant reasoning | Sol high | xhigh |
-| Exceptional mental difficulty | Sol xhigh | max |
-
-High-risk mechanical work has a Terra/medium baseline. Risk is not complexity, and
-GPU involvement, file count, failed builds and lease waits do not establish mental difficulty.
-Only grounded, independently reported capability feedback can promote retries. Promotions
-happen before gain; no retry or explicit baseline label bypasses gain zero or two.
-
-For model rank b (Luna=0, Terra=1, Sol=2, Astra=3), gain g maps to b*g below one and
-b+(g-1)*(3-b) above one. Stable task/role hashing rounds fractional scores; gain 0.75
-moves about a quarter of ordinary Terra work to Luna without rerolling on retries.
-Reasoning follows the same transform within each profile ceiling. High-risk reasoning
-retains a medium floor even at gain zero. Every role follows gain, including classifiers,
-helpers, reviews and standalone planners. Built-in delegation and ultra effort remain disabled.
-
-Smartass permission is separate. Without it, requested Astra is visibly capped to Sol;
-gain never grants permission or Fast mode. Unsupported or quota-avoided routes defer
-rather than silently switching model. Work without a profile receives one cached, bounded,
-read-only classification; malformed or failed classification defers without spending delivery
-attempts, with a five-minute failure cache. Cache identity follows task acceptance/scope,
-not gain, retry number or checkout SHA.
-
-Local agent sessions adopt changes after a completed turn and outstanding owned commands.
-Model changes create a fresh sealed session with full task/handoff context while retaining the
-logical run and turn budget. Same-model effort changes reuse the thread. Failed replacements
-keep the original session until a replacement succeeds. Once quiescent, bounded policy waits
-can release their slot through a synced held-run record; restart resumes the original run,
-attempt and next turn without creating a completed-task record. Background jobs retain their
-existing absolute command deadline. Policy status updates never renew native progress. Unverified child
-state keeps the change pending; current adaptive classification/handoff requires local workers.
-SSH-only projects must remain on legacy policy until their remote boundary can be verified.
-
-External reviewers/planners use the loopback-only read interface
-`GET /api/v1/projects/:project/runs/:identity/route?role=reviewer|planner&source_sha=SHA`.
-Review identities bind to a live parent; standalone planners can bind to a retained issue
-lifecycle such as GH-12. The endpoint only resolves existing profiles and never invokes a model.
-Returned decisions include base profile, gain revision, requested/effective settings and cap
-reason. Native launchers resolve immediately before execution and retain that receipt. Native
-observations remain separate from requested settings; unavailable actual CLI settings stay
-unknown. External prices follow the selected model's retained rate snapshot and remain estimates,
-not account debits. Classifier/helper/reviewer lineage and failed attempts remain associated with
-the delivery; process completion does not prove acceptance or counterfactual model quality.
-
-Deploy both coordinator and repository tooling before activation. A cached Metalrain workspace
-with an old launcher is held at startup; merge the accepted tooling changes normally without
-resetting its source, PR, evidence or deadlines. Keep gain disabled until every active launch
-path is compatible. Start at 1.0 with three primary slots, two helpers and one heavy-command
-lease; compare outcomes within task classes before making claims about quality or cost savings.
+History records `startup_failed`, `startup_retry` and `startup_blocked` separately from delivery
+failures, with phase, hook, exit/timeout status, run/worker identity and bounded sanitized context.
+Captured empty output is explicitly marked, without attributing a root cause. Timeout diagnostics
+say when no output was captured. Private-project redaction also removes these diagnostics.

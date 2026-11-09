@@ -42,12 +42,17 @@ defmodule SymphonyElixir.CommandsTest do
     assert settings.autopilot.blocked_label == "crescendo:blocked"
     assert settings.autopilot.trusted_authors == ["ahammer"]
     assert settings.codex.command == "mise exec java@21 gradle@8 -- codex --config shell_environment_policy.inherit=all app-server"
-    assert settings.codex.routing["label_prefix"] == "crescendo:model:"
+    assert settings.codex.routing == nil
+    refute settings.autopilot.enabled
+    assert settings.autopilot.review_route == nil
     assert Map.keys(settings.autopilot.channels) == ["cleanup", "docs", "marketing", "qa", "testing"]
     assert %{"prompt" => "prompts/marketing.md", "min_issues" => 0} = settings.autopilot.channels["marketing"]
     assert workflow.prompt_templates["research:marketing"] =~ "`crescendo:channel:marketing`"
-    assert settings.autopilot.research_route == %{"model" => "gpt-6.1-sol", "effort" => "max"}
-    assert settings.codex.routing["default"] == %{"model" => "gpt-6.1-sol", "effort" => "medium"}
+    assert settings.autopilot.research_route == nil
+    assert workflow.config["hooks"]["after_create"] =~ "gh repo clone ahammer/BabelFit"
+    assert workflow.config["hooks"]["after_create"] =~ "gh repo set-default ahammer/BabelFit"
+    refute workflow.prompt =~ "machine-lease"
+    assert workflow.prompt =~ "the operator reviews and merges it"
     assert workflow.prompt =~ "`ahammer/BabelFit`"
     assert workflow.prompt_templates["research"] =~ "`crescendo:channel:{{ issue.research.channel }}`"
     assert workflow.prompt =~ "## Required native prerequisites"
@@ -98,7 +103,7 @@ defmodule SymphonyElixir.CommandsTest do
 
     {:ok, workflow} = Workflow.load(Path.join([root, "projects", "dartboard", "WORKFLOW.md"]))
     assert {:ok, settings} = Schema.parse(workflow.config)
-    assert workflow.config["hooks"]["after_create"] =~ "git checkout master"
+    assert workflow.config["hooks"]["after_create"] =~ "git checkout 'master'"
     assert workflow.config["labels"] == %{"prefix" => "board"}
     assert settings.labels.prefix == "board"
     assert settings.tracker.required_labels == ["board:ready"]
@@ -130,6 +135,46 @@ defmodule SymphonyElixir.CommandsTest do
     assert settings.tracker.required_labels == ["true:ready"]
   end
 
+  test "clone hooks preserve literal branch names through the shell", %{root: root, service: service} do
+    branch = "release/o'clock;literal"
+    capture_io(fn -> assert :ok = Commands.run(["project", "add", service, "quoted", "example/app", "--branch", branch], &no_gh/1) end)
+    {:ok, workflow} = Workflow.load(Path.join([root, "projects", "quoted", "WORKFLOW.md"]))
+    File.write!(Path.join(root, "gh"), "#!/bin/sh\nexit 0\n")
+    File.write!(Path.join(root, "git"), "#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
+    for file <- ["gh", "git"], do: File.chmod!(Path.join(root, file), 0o755)
+    assert {output, 0} = System.cmd("/bin/bash", ["-c", workflow.config["hooks"]["after_create"]], env: [{"PATH", root}])
+    assert output == "checkout\n" <> branch <> "\n"
+  end
+
+  test "label synchronization still supports explicitly configured model routes", %{service: service} do
+    capture_io(fn -> Commands.run(["project", "add", service, "demo", "example/app"], &no_gh/1) end)
+
+    File.write!(service, """
+    defaults:
+      codex:
+        routing:
+          default: {model: gpt-6.1-terra, effort: low}
+          labels:
+            crescendo:model:custom: {model: gpt-6.1-sol, effort: high}
+    projects: {demo: {}}
+    """)
+
+    parent = self()
+
+    gh = fn
+      ["label", "list" | _] ->
+        {"", 0}
+
+      ["label", "create", name | args] ->
+        send(parent, {:created_route_label, name, args})
+        {"", 0}
+    end
+
+    capture_io(fn -> assert :ok = Commands.run(["labels", "sync", service, "demo"], gh) end)
+    assert_received {:created_route_label, "crescendo:model:custom", args}
+    assert Enum.any?(args, &String.contains?(&1, "gpt-6.1-sol high"))
+  end
+
   test "labels sync creates the labels a project's workflow uses that its repository lacks", %{root: root, service: service} do
     capture_io(fn -> Commands.run(["project", "add", service, "shimmer", "ahammer/Shimmer"], &no_gh/1) end)
     File.write!(service, "paths: {state: state}\nprojects: {shimmer: {}, other: {enabled: false}}")
@@ -154,9 +199,11 @@ defmodule SymphonyElixir.CommandsTest do
     refute "crescendo:ready" in created
     refute "crescendo:hold" in created
 
-    for label <- ["crescendo:in-review", "crescendo:blocked", "crescendo:channel:retro", "crescendo:size:small", "crescendo:model:sol"],
+    for label <- ["crescendo:in-review", "crescendo:blocked", "crescendo:channel:retro"],
         do: assert(label in created)
 
+    refute "crescendo:model:sol" in created
+    refute "crescendo:size:small" in created
     assert output =~ "shimmer: created crescendo:blocked"
     assert Enum.count(created, &(&1 == "crescendo:blocked")) == 1
 

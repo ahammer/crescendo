@@ -142,7 +142,7 @@ defmodule SymphonyElixir.Helpers do
          nil <- context[:worker_host],
          {sha, 0} <- git(%{context: context}, ["rev-parse", "--verify", "HEAD^{commit}"]),
          true <- Regex.match?(~r/\A[0-9a-f]{40,64}\n?\z/, sha),
-         {:ok, evidence} <- evidence_files(args["evidence_keys"] || [], System.get_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT")) do
+         {:ok, evidence} <- evidence_files(args["evidence_keys"] || [], SymphonyElixir.Config.evidence_root(context[:project])) do
       {:ok, %{context: context, question: question, source_sha: String.trim(sha), evidence: evidence}}
     else
       _ -> {:error, :invalid_helper_request}

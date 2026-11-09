@@ -10,8 +10,7 @@ Focus: {{ issue.research.focus }}
 1. Read what a user sees first: `README.md`, `docs/`, guides, examples, package or store descriptions,
    the repository description and `CHANGELOG`. Note when each was last changed (`git log -- <path>`).
 2. Compare it with the project as it is now: read what changed since the docs were last touched
-   (`git log --since`), and follow the documented quick start and examples yourself, taking the machine
-   lease for heavy commands (`machine-lease run -- <command>`). Capture screenshots when there is a UI.
+   (`git log --since`), and follow the documented quick start and examples yourself, following the repository's resource rules for heavy commands. Capture screenshots when there is a UI.
 3. Critique it as a demanding reader would:
    - Does the first screen say what this is, who it is for, why it matters, and how to start?
    - Is every claim, command and example true today? What recent work is missing or misdescribed?

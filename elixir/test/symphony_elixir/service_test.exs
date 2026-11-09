@@ -12,7 +12,7 @@ defmodule SymphonyElixir.ServiceTest do
     assert Service.QuietWindow.observe(window, ~U[2025-12-08 11:00:00Z]).phase == "active"
     assert Service.QuietWindow.observe(nil, DateTime.utc_now()) == %{phase: "idle"}
 
-    for invalid <- [%{"start" => "25:00"}, %{"end" => "02:00"}, %{"start" => "05:00"}, %{"time_zone" => "UTC"}, %{"drain_minutes" => 121}] do
+    for invalid <- [%{"start" => "25:00"}, %{"end" => "02:00"}, %{"start" => "05:00"}, %{"time_zone" => "Not/AZone"}, %{"drain_minutes" => 121}] do
       assert {:error, _} = Service.parse(%{base | "quiet_window" => invalid}, "/tmp/service.yml")
     end
 
@@ -21,10 +21,28 @@ defmodule SymphonyElixir.ServiceTest do
     System.put_env("PATH", "/missing-python")
 
     try do
+      assert {:error, _} = Service.parse(%{base | "quiet_window" => %{"time_zone" => "UTC"}}, "/tmp/service.yml")
       assert Service.QuietWindow.observe(window, DateTime.utc_now()).phase == "unknown"
     after
       System.put_env("PATH", prior)
     end
+  end
+
+  test "quiet windows accept IANA zones and reject DST gaps and folds" do
+    for zone <- ["UTC", "Asia/Kolkata", "Europe/London"] do
+      assert {:ok, %{quiet_window: window}} = Service.parse(%{"projects" => %{"a" => %{}}, "quiet_window" => %{"time_zone" => zone}}, "/tmp/service.yml")
+      assert Service.QuietWindow.observe(window, ~U[2026-10-08 03:30:00Z]).phase in ~w(idle preparing active)
+    end
+
+    window = %Service.QuietWindow{start: "01:30", end: "02:30", time_zone: "America/New_York"}
+    assert Service.QuietWindow.observe(window, ~U[2026-03-08 06:00:00Z]).phase == "unknown"
+    assert Service.QuietWindow.observe(window, ~U[2026-11-01 05:45:00Z]).phase == "unknown"
+    midnight = %Service.QuietWindow{start: "00:30", end: "01:30", time_zone: "UTC"}
+    assert Service.QuietWindow.observe(midnight, ~U[2026-11-09 23:45:00Z]).phase == "preparing"
+    # After the fall-back, preparation is measured in elapsed minutes, not wall-clock minutes.
+    window = %{window | start: "02:30", end: "03:30", drain_minutes: 120}
+    assert Service.QuietWindow.observe(window, ~U[2026-11-01 05:45:00Z]).phase == "preparing"
+    assert Service.QuietWindow.observe(%{window | time_zone: "UTC"}, ~U[2026-11-01 02:30:00Z]).phase == "active"
   end
 
   test "gain rollout is explicit and rejects policy values in static configuration" do
@@ -154,6 +172,33 @@ defmodule SymphonyElixir.ServiceTest do
     end
 
     assert Project.current() == nil
+  end
+
+  test "project evidence resolution is explicit, isolated and survives workflow reload", %{root: root} do
+    for id <- ["alpha", "beta"] do
+      write_project!(root, id, extra_config: %{"evidence" => %{"root" => "evidence"}})
+    end
+
+    File.write!(Path.join(root, "crescendo.yml"), "projects: {alpha: {}, beta: {}}")
+    {:ok, service} = Service.load(Path.join(root, "crescendo.yml"))
+    start_supervised!({Projects, service})
+
+    for id <- ["alpha", "beta"], do: assert_eventually(fn -> GenServer.whereis(Project.via(id, :workflow_store)) != nil end)
+
+    results =
+      for id <- ["alpha", "beta"] do
+        Task.async(fn -> {id, Config.evidence_root(id)} end)
+      end
+
+    for task <- results do
+      {id, resolved} = Task.await(task)
+      assert resolved == Path.join([root, "projects", id, "evidence"])
+      assert Project.current() == nil
+    end
+
+    write_project!(root, "alpha", extra_config: %{"evidence" => %{"root" => "new-evidence"}})
+    assert Config.evidence_root("alpha") == Path.join([root, "projects", "alpha", "new-evidence"])
+    assert Config.evidence_root("beta") == Path.join([root, "projects", "beta", "evidence"])
   end
 
   test "service defaults fill in what a project leaves out", %{root: root} do

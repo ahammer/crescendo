@@ -10,8 +10,8 @@ defmodule SymphonyElixir.Service do
       pricing: {...}
       defaults: {codex: {routing: ...}}      # merged under every project's front matter
       projects:
-        metalrain: {weight: 1, research_exclusive: global}
-        nubu3d: {workflow: projects/nubu3d/WORKFLOW.md, redact: true}
+        app: {weight: 1, research_exclusive: global}
+        private-api: {workflow: projects/private-api/WORKFLOW.md, redact: true}
 
   A project's workflow defaults to `projects/<id>/WORKFLOW.md` next to this
   file. `throttle` and `pricing` apply service-wide; `defaults` fills in
@@ -77,9 +77,18 @@ defmodule SymphonyElixir.Service do
       |> validate_required([:start, :end, :time_zone, :drain_minutes])
       |> validate_format(:start, ~r/\A(?:[01][0-9]|2[0-3]):[0-5][0-9]\z/)
       |> validate_format(:end, ~r/\A(?:[01][0-9]|2[0-3]):[0-5][0-9]\z/)
-      |> validate_inclusion(:time_zone, ["America/Vancouver"])
+      |> validate_change(:time_zone, &validate_zone/2)
       |> validate_number(:drain_minutes, greater_than_or_equal_to: 0, less_than_or_equal_to: 120)
       |> validate_order()
+    end
+
+    defp validate_zone(field, zone) do
+      case System.cmd("python3", ["-c", "from zoneinfo import ZoneInfo; import sys; ZoneInfo(sys.argv[1])", zone], stderr_to_stdout: true) do
+        {_, 0} -> []
+        _ -> [{field, "must name an installed IANA timezone"}]
+      end
+    rescue
+      _ -> [{field, "requires Python 3 with installed IANA timezone data"}]
     end
 
     defp validate_order(changeset) do
@@ -99,9 +108,19 @@ defmodule SymphonyElixir.Service do
       now = datetime.datetime.fromtimestamp(int(epoch), ZoneInfo(zone))
       begin = datetime.datetime.combine(now.date(), datetime.time.fromisoformat(start), now.tzinfo)
       finish = datetime.datetime.combine(now.date(), datetime.time.fromisoformat(end), now.tzinfo)
-      phase = 'active' if begin <= now < finish else 'preparing' if begin - datetime.timedelta(minutes=int(drain)) <= now < begin else 'idle'
+      if int(epoch) >= int(finish.timestamp()):
+          begin += datetime.timedelta(days=1)
+          finish += datetime.timedelta(days=1)
+      # Round trips reject gaps; different fold offsets reject ambiguous boundaries.
+      for boundary in (begin, finish):
+          roundtrip = datetime.datetime.fromtimestamp(boundary.timestamp(), now.tzinfo)
+          if roundtrip != boundary or boundary.replace(fold=0).utcoffset() != boundary.replace(fold=1).utcoffset():
+              print(json.dumps(dict(phase='unknown')))
+              sys.exit(0)
+      current, begins, ends = int(epoch), int(begin.timestamp()), int(finish.timestamp())
+      phase = 'active' if begins <= current < ends else 'preparing' if begins - int(drain) * 60 <= current < begins else 'idle'
       midnight = datetime.datetime.combine(now.date() + datetime.timedelta(days=1), datetime.time(), now.tzinfo)
-      print(json.dumps(dict(phase=phase, starts_at=int(begin.timestamp()), ends_at=int(finish.timestamp()), refresh_at=int(midnight.timestamp()), time_zone=zone)))
+      print(json.dumps(dict(phase=phase, starts_at=int(begin.timestamp()), ends_at=int(finish.timestamp()), refresh_at=min(int(midnight.timestamp()), ends), time_zone=zone)))
       """
 
       with {json, 0} <- System.cmd("python3", ["-c", script, to_string(DateTime.to_unix(now)), window.start, window.end, window.time_zone, to_string(window.drain_minutes)], stderr_to_stdout: true),

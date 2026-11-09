@@ -92,6 +92,42 @@ defmodule SymphonyElixir.Config do
     Path.expand(settings!().workspace.root, workflow_dir)
   end
 
+  @doc "Optional evidence root, resolved in the owning project's workflow context."
+  @spec evidence_root(SymphonyElixir.Project.id() | nil) :: Path.t() | nil
+  def evidence_root(project \\ SymphonyElixir.Project.current()) do
+    SymphonyElixir.Project.with_project(project, &resolve_evidence_root/0)
+  end
+
+  defp resolve_evidence_root do
+    configured =
+      case settings() do
+        {:ok, settings} -> settings.evidence.root
+        _ -> nil
+      end
+
+    root = configured || System.get_env("CRESCENDO_EVIDENCE_ROOT") || System.get_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT")
+
+    root =
+      case root do
+        "$" <> name -> System.get_env(name)
+        value -> value
+      end
+
+    expand_evidence_root(root, configured)
+  end
+
+  defp expand_evidence_root(root, configured) do
+    if is_binary(root) and String.trim(root) != "" do
+      directory =
+        case Workflow.current() do
+          {:ok, %{path: path}} when not is_nil(configured) -> Path.dirname(path)
+          _ -> File.cwd!()
+        end
+
+      Path.expand(root, directory)
+    end
+  end
+
   @spec validate!() :: :ok | {:error, term()}
   def validate! do
     WorkflowStore.force_reload()

@@ -28,6 +28,7 @@ defmodule SymphonyElixir.Workflow do
   end
 
   @type loaded_workflow :: %{
+          path: Path.t(),
           config: map(),
           prompt: String.t(),
           prompt_template: String.t(),
@@ -61,7 +62,7 @@ defmodule SymphonyElixir.Workflow do
              config = deep_merge(defaults, workflow.config),
              {:ok, config, overlay_paths} <- apply_overlay(config, overlay),
              {:ok, loaded} <- load_prompt_files(%{workflow | config: config}, Path.dirname(Path.expand(path))) do
-          {:ok, %{loaded | prompt_paths: overlay_paths ++ loaded.prompt_paths}}
+          {:ok, Map.merge(loaded, %{path: Path.expand(path), prompt_paths: overlay_paths ++ loaded.prompt_paths})}
         end
 
       {:error, reason} ->

@@ -731,7 +731,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_dispatch(%State{} = state) do
-    delta = Operations.import_auxiliary(state.operations, System.get_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT"))
+    delta = Operations.import_auxiliary(state.operations, SymphonyElixir.Config.evidence_root())
     state = apply_codex_token_delta(state, delta)
 
     state =
@@ -2630,7 +2630,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp fresh_planning_input?(_at), do: false
 
   defp planning_findings do
-    case System.get_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT") do
+    case SymphonyElixir.Config.evidence_root() do
       nil ->
         {:ok, nil}
 
