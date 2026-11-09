@@ -17,7 +17,7 @@ defmodule SymphonyElixirWeb.Timeline do
   @done_limit 60
   # Finished work worth a row; dispatches show as running, and turn or
   # retry bookkeeping would drown the rest.
-  @done_kinds ~w(startup_failed startup_retry startup_blocked completed failed stopped interrupted pr_merged pr_closed pr_opened pr_reopened item_disposition attempt_failed issue_terminal retired blocked task_delivered task_short)
+  @done_kinds ~w(startup_failed startup_retry startup_blocked completed failed stopped interrupted pr_merged pr_closed pr_opened pr_reopened item_disposition attempt_failed issue_terminal retired blocked task_delivered task_no_output task_unverified task_short)
   @run_kinds ~w(completed failed stopped interrupted)
 
   attr(:payload, :map, required: true)
@@ -293,6 +293,8 @@ defmodule SymphonyElixirWeb.Timeline do
   defp event_label(%{kind: "blocked"}), do: "Blocked"
   defp event_label(%{kind: "completed"} = event), do: event_name(event) <> " turn completed"
   defp event_label(%{kind: "task_delivered"} = event), do: event_name(event) <> " delivered"
+  defp event_label(%{kind: "task_no_output"} = event), do: event_name(event) <> ": no new issues or PRs observed"
+  defp event_label(%{kind: "task_unverified"} = event), do: event_name(event) <> ": publication unverified"
   defp event_label(%{kind: "task_short"} = event), do: event_name(event) <> " fell short"
   defp event_label(%{kind: "failed"} = event), do: event_name(event) <> " failed"
   defp event_label(event), do: event_name(event) <> " " <> event.kind

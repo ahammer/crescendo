@@ -183,7 +183,7 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
     File.write!(Path.join(root, "recovered"), "")
     :sys.replace_state(ctx.orchestrator, &put_in(&1.autopilot.tasks["fixture"].retry_at, DateTime.add(DateTime.utc_now(), -1, :second)))
     send(ctx.orchestrator, :run_poll_cycle)
-    await(fn -> get_in(state(ctx).autopilot, [:tasks, "fixture", :last]) == :delivered end)
+    await(fn -> get_in(state(ctx).autopilot, [:tasks, "fixture", :last]) == :no_output end)
     assert state(ctx).autopilot.tasks["fixture"].attempts == 0
     assert File.read!(Path.join(root, "sessions")) == "start\nstart\n"
     assert %{busy: 0} = Governor.snapshot()
@@ -645,7 +645,7 @@ defmodule SymphonyElixir.WorkerDeadlineTest do
     :sys.replace_state(ctx.orchestrator, &put_in(&1.startup_failures[id].due_at_ms, 0))
     send(ctx.orchestrator, :run_poll_cycle)
     send(ctx.orchestrator, :run_poll_cycle)
-    await(fn -> get_in(state(ctx).autopilot.tasks, ["fixture", :last]) == :delivered end)
+    await(fn -> get_in(state(ctx).autopilot.tasks, ["fixture", :last]) == :no_output end)
     refute Map.has_key?(state(ctx).startup_failures, id)
     assert state(ctx).autopilot.tasks["fixture"].attempts == 0
     assert File.read!(Path.join(root, "sessions")) == "start\n"

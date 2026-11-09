@@ -715,7 +715,7 @@ defmodule SymphonyElixir.AutopilotTest do
         System.put_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT", root)
 
         Application.put_env(:symphony_elixir, :task_deliveries_fun, fn _, _ ->
-          {:ok, %{issues: 0, pull_requests: 0}}
+          {:ok, %{issues: 1, pull_requests: 0}}
         end)
 
         on_exit(fn ->
@@ -1139,6 +1139,29 @@ defmodule SymphonyElixir.AutopilotTest do
       Application.put_env(:symphony_elixir, :task_deliveries_result, {:error, :boom})
       finish_running_research(pid, "research:cleanup")
       assert %{last: :unverified} = :sys.get_state(pid).autopilot.tasks["cleanup"]
+    end
+
+    test "zero-output research completes normally without publication or preflight coverage" do
+      write_autopilot_workflow!(autopilot: %{channels: %{"check" => %{"focus" => "Reconcile", "min_issues" => 0}}})
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+      Application.put_env(:symphony_elixir, :task_deliveries_fun, fn _, _ -> {:ok, %{issues: 0, pull_requests: 0}} end)
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :task_deliveries_fun) end)
+      path = Path.join(Path.dirname(Workflow.workflow_file_path()), "no-output.dets")
+      {pid, _name} = start_orchestrator!(operations_path: path, operations_table: :no_output_research_test)
+      wait_for_startup_poll(pid)
+      send(pid, :run_poll_cycle)
+      id = "research:check"
+      :sys.replace_state(pid, fn state -> put_in(state.running[id].issue.research[:input_key], %{evidence: "observed"}) end)
+      finish_running_research(pid, id)
+      state = :sys.get_state(pid)
+      assert %{last: :no_output, attempts: 0, finished_at: %DateTime{}} = state.autopilot.tasks["check"]
+      refute state.autopilot.tasks["check"][:preflight_run_at]
+      assert Operations.autopilot_state(state.operations).tasks["check"].last == :no_output
+      events = Operations.snapshot(state.operations).activity
+      assert Enum.any?(events, &(&1.kind == "task_no_output"))
+      refute Enum.any?(events, &(&1.kind == "task_delivered"))
+      send(pid, :run_poll_cycle)
+      assert :sys.get_state(pid).running == %{}
     end
 
     test "a delayed daily report waits for its open PR and dispatches only once after it closes" do

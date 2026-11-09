@@ -231,7 +231,8 @@ defmodule SymphonyElixir.Autopilot do
 
   @doc """
   Ends one task run. A delivered run (or one whose deliveries could not be
-  checked) starts the task's interval. A short or failed run is retried
+  checked) starts the task's interval. Zero-output runs use that interval
+  without establishing completed-work preflight coverage. A short or failed run is retried
   30 minutes later, behind other work; its last allowed attempt
   ends the task until it is next due. A transport interruption retries after
   30 seconds without spending an attempt. Nothing waits for an operator.
@@ -245,7 +246,7 @@ defmodule SymphonyElixir.Autopilot do
 
     task =
       cond do
-        outcome in [:delivered, :unverified] -> %{done(now) | last: outcome}
+        outcome in [:delivered, :no_output, :unverified] -> %{done(now) | last: outcome}
         attempts >= autopilot_settings.max_item_attempts and outcome != :interrupted -> %{done(now) | last: :gave_up}
         true -> retry(task, attempts, outcome, now)
       end

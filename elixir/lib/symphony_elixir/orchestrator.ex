@@ -2441,7 +2441,14 @@ defmodule SymphonyElixir.Orchestrator do
 
     cleanup_issue_workspace(running_entry.issue, running_entry)
 
-    event = if outcome in [:delivered, :unverified], do: "task_delivered", else: "task_short"
+    event =
+      case outcome do
+        :delivered -> "task_delivered"
+        :no_output -> "task_no_output"
+        :unverified -> "task_unverified"
+        _ -> "task_short"
+      end
+
     identifier = running_entry.identifier
 
     details = %{
@@ -2481,14 +2488,25 @@ defmodule SymphonyElixir.Orchestrator do
       {:ok, %{issues: issues, pull_requests: prs} = deliveries} ->
         evidence = Map.merge(deliveries, %{channel_label: label, started_at: since})
         Operations.record_lineage(table, "research", running_entry[:run_id], evidence)
-        summary = "#{issues} issues · #{prs} PRs"
-
-        if issues >= research.min_issues and prs >= min_prs,
-          do: {:delivered, summary},
-          else: {:short, summary <> " (asked for #{research.min_issues} issues, #{min_prs} PRs)"}
+        observed_publication(issues, prs, research.min_issues, min_prs)
 
       {:error, reason} ->
         {:unverified, "deliveries unchecked: #{inspect(reason)}"}
+    end
+  end
+
+  defp observed_publication(issues, prs, min_issues, min_prs) do
+    summary = "#{issues} issues · #{prs} PRs"
+
+    cond do
+      issues < min_issues or prs < min_prs ->
+        {:short, summary <> " (asked for #{min_issues} issues, #{min_prs} PRs)"}
+
+      issues == 0 and prs == 0 ->
+        {:no_output, summary <> " (no new issues or PRs observed)"}
+
+      true ->
+        {:delivered, summary}
     end
   end
 

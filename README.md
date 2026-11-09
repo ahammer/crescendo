@@ -17,7 +17,7 @@ usage budgets and Codex quota, while a read-only web dashboard shows work, histo
 - **Control resource use.** Daily API-equivalent budgets, quota back-off and optional read-only helpers.
   Repository tooling can serialize expensive builds, GPU work and acceptance checks separately.
 - **See the evidence.** Retained run history and delivery observations distinguish completed turns,
-  merged PRs, accepted deliveries and estimated usage.
+  merged PRs, accepted deliveries and estimated usage. Research with no new publication is shown separately.
 
 > [!WARNING]
 > Crescendo is an engineering preview for trusted environments. Generated GitHub workflows run

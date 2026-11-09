@@ -761,6 +761,14 @@ Launch `codex` in your repo, give it the URL to the [Crescendo repository](https
 which is based on [OpenAI's Symphony](https://github.com/openai/symphony), and ask it to set things
 up for you.
 
+## Research outcomes
+
+Research process completion is separate from observed publication. Zero-output runs meeting zero
+minimums retain their normal interval and report `no_output`; unknown observations report
+`unverified`. Neither is a delivered event, and zero counts do not establish preflight completion
+coverage. Positive output must meet both issue and PR minimums. Existing issue promotion can be
+useful progress without creating a publication. See the [operator guide](../docs/crescendo.md#research-channels).
+
 ## Advanced operations
 
 The [operator guide](../docs/crescendo.md) owns service-wide policy and accounting contracts:
