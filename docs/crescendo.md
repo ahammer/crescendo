@@ -411,6 +411,14 @@ channels:
     when: idle         # idle: only when nothing else runs or waits; anytime: whenever a slot is free
 ```
 
+Research completion reports observed publication separately from process exit. A run that meets
+zero minimums but creates no issues or PRs is `no_output` (`task_no_output`), with the normal task
+interval and no failed attempt. It does not establish completed-work preflight coverage. Unknown
+publication results are `unverified` (`task_unverified`), never a delivered event. Positive observed
+output meeting all minima is `delivered`; unmet minima remain short runs with the existing retry
+policy. Promoting existing issues may be useful work while still producing no new publications;
+these counts do not prove that assessment or reconciliation completed.
+
 Each channel (task) runs on its own schedule; the most overdue due task goes first. Without `at`,
 `every` is measured from completion. With `at`, the first run is due at the latest UTC anchor at
 or before now. After completion, the next due time is the latest anchor at or before the finish

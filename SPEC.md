@@ -3013,3 +3013,10 @@ whole-value environment-reference expansion. Project configuration takes precede
 overrides remain authoritative. Missing or unverifiable receipts do not establish acceptance.
 Quiet windows use installed IANA timezones and elapsed-time drain boundaries; ambiguous/nonexistent
 DST boundaries defer admission. Existing omitted zones retain America/Vancouver for compatibility.
+
+
+Research outcome observations distinguish positive publication (`delivered`), zero observed new
+issues and PRs with satisfied zero minima (`no_output`), and unavailable verification (`unverified`).
+Zero-output and unverified observations emit neutral `task_no_output` and `task_unverified` events;
+they retain the normal task interval. Zero counts do not certify reconciliation or establish
+completed-work preflight coverage. Unmet declared minimums remain short runs with bounded retries.

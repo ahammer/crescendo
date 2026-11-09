@@ -11,7 +11,7 @@ defmodule SymphonyElixirWeb.IssueBoard do
   @lanes [{"intake", "Intake"}, {"active", "Active"}, {"done", "Done"}]
   @shows ["delivery", "review", "autopilot", "prs"]
   @issue_events ["issue_terminal", "retired", "pr_merged", "pr_closed"]
-  @terminal_events @issue_events ++ ["task_delivered", "task_short"]
+  @terminal_events @issue_events ++ ["task_delivered", "task_no_output", "task_unverified", "task_short"]
   @lifecycle_events @terminal_events ++ ["dispatch", "pr_opened", "pr_reopened"]
   @run_outcomes ["completed", "failed", "stopped", "interrupted", "deferred"]
   @run_fields ~w(run_id status item_attempt started_s finished_s started_at model kind issue_identifier project)a
@@ -391,6 +391,8 @@ defmodule SymphonyElixirWeb.IssueBoard do
   defp terminal_label("pr_closed"), do: "PR closed; acceptance unavailable"
   defp terminal_label("retired"), do: "Retired"
   defp terminal_label("task_delivered"), do: "Task delivered"
+  defp terminal_label("task_no_output"), do: "No new issues or PRs observed"
+  defp terminal_label("task_unverified"), do: "Publication unverified"
   defp terminal_label("task_short"), do: "Task fell short"
   defp terminal_label(_kind), do: "Issue closed; acceptance unavailable"
 

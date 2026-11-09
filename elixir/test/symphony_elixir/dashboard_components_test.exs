@@ -12,6 +12,13 @@ defmodule SymphonyElixir.DashboardComponentsTest do
     assert timeline.describe_event(%{kind: "completed", issue_identifier: "GH-1"}).label == "Delivery turn completed"
     assert timeline.describe_event(%{kind: "item_disposition", disposition: "unknown"}).label == "Item disposition: unknown"
     assert timeline.describe_event(%{kind: "item_disposition", disposition: nil}).label == "Item disposition: unknown"
+
+    assert timeline.describe_event(%{kind: "task_no_output", issue_identifier: "research-scorecard"}).label ==
+             "Scorecard: no new issues or PRs observed"
+
+    assert timeline.describe_event(%{kind: "task_unverified", issue_identifier: "research-scorecard"}).label ==
+             "Scorecard: publication unverified"
+
     assert timeline.describe_event(%{kind: "task_short", issue_identifier: "research-scorecard"}).label == "Scorecard fell short"
     assert timeline.describe_event(%{kind: "pr_opened", summary: "Exact PR title"}).title == "Exact PR title"
     assert timeline.describe_event(%{kind: "startup_retry", summary: "Startup timeout"}).title == "Startup timeout"

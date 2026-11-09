@@ -254,16 +254,18 @@ defmodule SymphonyElixirWeb.IssueBoardTest do
       usage: %{
         activity: [
           event("research-scorecard", "task_delivered", @today),
-          event("research-grooming", "task_short", @today)
+          event("research-grooming", "task_short", @today),
+          event("research-no-output", "task_no_output", @today),
+          event("research-unverified", "task_unverified", @today)
         ]
       }
     }
 
     board = IssueBoard.build(payload, @day)
-    assert board.counts.done == 2
-    assert Enum.map(board.cards, & &1.phase) == ["Task fell short", "Task delivered"]
+    assert board.counts.done == 4
+    assert Enum.sort(Enum.map(board.cards, & &1.phase)) == Enum.sort(["Task fell short", "Task delivered", "No new issues or PRs observed", "Publication unverified"])
     assert Enum.all?(board.cards, &is_nil(&1.acceptance))
-    assert length(IssueBoard.filter(board, "autopilot").cards) == 2
+    assert length(IssueBoard.filter(board, "autopilot").cards) == 4
     assert IssueBoard.filter(board, "prs").cards == []
 
     current = %{project: "one", issue_identifier: "research-scorecard", last_message: "Starting another round"}
