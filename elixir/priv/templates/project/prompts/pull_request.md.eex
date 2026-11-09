@@ -23,8 +23,7 @@ You can push to the head branch: {{ issue.pull_request.can_push }}
    `git fetch origin pull/{{ issue.pull_request.number }}/head && git checkout --detach FETCH_HEAD && git reset --hard FETCH_HEAD && git clean -fdx`
 2. Read the description, the linked issue and every review comment and thread.
 3. Review the diff for correctness, tests, readability, API design and scope. Run the checks the
-   repository's CI runs, plus focused tests, taking the machine lease for heavy commands
-   (`machine-lease run -- <command>`).
+   repository's CI runs, plus focused tests, following the repository's documented resource rules for heavy commands.
    If the pull request changes `.crescendo/autopilot/` (this repository's autopilot tasks and
    guidelines), also run `~/.local/lib/crescendo/bin/crescendo autopilot check .crescendo/autopilot`;
    close the pull request with its output when the check reports errors. If the command cannot run (not found, or it prints only a usage line), that is a tooling problem, not a failed check: validate the folder by reading it against `docs/crescendo.md` in the crescendo repository and review it normally.

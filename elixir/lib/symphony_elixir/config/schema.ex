@@ -126,6 +126,22 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Evidence do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+    @primary_key false
+
+    embedded_schema do
+      field(:root, :string)
+    end
+
+    @spec changeset(struct(), map()) :: Ecto.Changeset.t()
+    def changeset(settings, attrs) do
+      settings |> cast(attrs, [:root], empty_values: []) |> validate_format(:root, ~r/\S/)
+    end
+  end
+
   defmodule Worker do
     @moduledoc false
     use Ecto.Schema
@@ -595,6 +611,7 @@ defmodule SymphonyElixir.Config.Schema do
   embedded_schema do
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:evidence, Evidence, on_replace: :update, defaults_to_struct: true)
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
@@ -694,6 +711,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast(attrs, [])
     |> cast_embed(:tracker, with: &Tracker.changeset/2)
     |> cast_embed(:polling, with: &Polling.changeset/2)
+    |> cast_embed(:evidence, with: &Evidence.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)

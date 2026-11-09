@@ -17,10 +17,9 @@ Channel focus: {{ issue.research.focus }}
 ## Do real work first
 
 1. Read `README.md`, `AGENTS.md`, `CONTRIBUTING.md` and the CI workflows in `.github/workflows/`.
-2. Build the project and run its test suite the way CI does, taking the machine lease for heavy
-   commands (`machine-lease run -- <command>`). Note failures, flaky or slow tests, and untested code.
-3. Use the product as a user would, on its Linux desktop target when it has one (under the machine
-   lease), otherwise through its CLI or library API. Capture screenshots or output as evidence.
+2. Build the project and run its test suite the way CI does, following the repository's resource rules for heavy
+   commands. Note failures, flaky or slow tests, and untested code.
+3. Use the product as a user would, on its Linux desktop target when it has one (following its resource rules), otherwise through its CLI or library API. Capture screenshots or output as evidence.
 4. Trace what you observed to the code and look for your channel's classes of problems across it.
 
 Keep scratch files under `.scratch/` in the workspace and delete them before finishing. Stop every

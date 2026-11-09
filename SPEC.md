@@ -2998,3 +2998,18 @@ An opt-in service-wide gain applies task-based model and reasoning selection to 
 Gain 0 selects Luna, 1 uses a Terra baseline, and 2 requests Astra subject to separate timed
 smartass permission. Profiles, native settings and acceptance-linked usage are recorded.
 See [the operating policy](docs/crescendo.md#intelligence-gain).
+
+
+## Crescendo portability and project scaffolding
+
+Crescendo extends the Symphony-derived contract with a multi-project service. New generated GitHub
+projects inherit native Codex model/effort settings, admit explicitly ready-labeled issues, and leave
+autonomous research and PR review/merge disabled until configured. Existing workflows are not migrated.
+The separate adaptive gain profile remains an explicit opt-in with its shipped model catalog.
+
+Optional workflow `evidence.root` resolves relative to the owning workflow, with home-directory and
+whole-value environment-reference expansion. Project configuration takes precedence over
+`CRESCENDO_EVIDENCE_ROOT`, then the legacy `METALRAIN_SYMPHONY_EVIDENCE_ROOT` alias. Explicit caller
+overrides remain authoritative. Missing or unverifiable receipts do not establish acceptance.
+Quiet windows use installed IANA timezones and elapsed-time drain boundaries; ambiguous/nonexistent
+DST boundaries defer admission. Existing omitted zones retain America/Vancouver for compatibility.

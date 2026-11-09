@@ -149,6 +149,37 @@ defmodule SymphonyElixir.HelpersTest do
     assert {:error, :invalid_helper_request} = Helpers.prepare(context, %{"question" => "Inspect", "evidence_keys" => ["empty"]})
   end
 
+  test "helper evidence uses its explicit project rather than the governor caller", %{root: root, context: context} do
+    for id <- ["first", "second"] do
+      directory = Path.join([root, "projects", id])
+      File.mkdir_p!(Path.join(directory, "evidence"))
+      File.write!(Path.join(directory, "evidence/report"), id)
+
+      File.write!(Path.join(directory, "WORKFLOW.md"), """
+      ---
+      tracker: {kind: memory}
+      evidence: {root: evidence}
+      ---
+      Work
+      """)
+    end
+
+    for id <- ["first", "second"] do
+      child = {WorkflowStore, path: Path.join([root, "projects", id, "WORKFLOW.md"]), project: id, name: SymphonyElixir.Project.via(id, :workflow_store)}
+      start_supervised!(Supervisor.child_spec(child, id: {:evidence_store, id}))
+
+      assert SymphonyElixir.Project.with_project(id, &Config.evidence_root/0) ==
+               Path.join([root, "projects", id, "evidence"])
+    end
+
+    {:ok, prepared} =
+      SymphonyElixir.Project.with_project("second", fn ->
+        Helpers.prepare(%{context | project: "first"}, %{"question" => "Inspect", "evidence_keys" => ["report"]})
+      end)
+
+    assert %{"text" => "first"} = result(Helpers.read_tool("read_evidence", %{"evidence_id" => "1"}, prepared))
+  end
+
   test "helper session exposes only curated reads, rejects native approval, and retains a bounded report", %{root: root, context: context} do
     start_supervised!({WorkflowStore, name: SymphonyElixir.Project.via("test", :workflow_store), project: "test", path: Workflow.workflow_file_path()})
     {:ok, service} = Service.parse(%{"paths" => %{"state" => root}, "projects" => %{"test" => %{}}}, Path.join(root, "service.yml"))

@@ -20,6 +20,32 @@ defmodule SymphonyElixir.RunEnvTest do
     refute Enum.any?(vars, &match?({"CRESCENDO_LABEL_PREFIX", _}, &1))
   end
 
+  test "evidence roots prefer project config, expand paths, and retain the legacy alias" do
+    keys = ~w(CRESCENDO_EVIDENCE_ROOT METALRAIN_SYMPHONY_EVIDENCE_ROOT CRESCENDO_TEST_EVIDENCE)
+    previous = Map.new(keys, &{&1, System.get_env(&1)})
+    on_exit(fn -> Enum.each(previous, fn {key, value} -> restore_env(key, value) end) end)
+    Enum.each(keys, &System.delete_env/1)
+    assert Config.evidence_root() == nil
+    System.put_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT", "/tmp/legacy-evidence")
+    assert Config.evidence_root() == "/tmp/legacy-evidence"
+    System.put_env("CRESCENDO_EVIDENCE_ROOT", "/tmp/generic-evidence")
+    assert Config.evidence_root() == "/tmp/generic-evidence"
+    System.put_env("CRESCENDO_TEST_EVIDENCE", "relative-evidence")
+    write_workflow_file!(Workflow.workflow_file_path(), extra_config: %{"evidence" => %{"root" => "$CRESCENDO_TEST_EVIDENCE"}})
+    expected = Path.join(Path.dirname(Workflow.workflow_file_path()), "relative-evidence")
+    assert Config.evidence_root() == expected
+    assert {"CRESCENDO_EVIDENCE_ROOT", expected} in RunEnv.vars("GH-1")
+    assert {"METALRAIN_SYMPHONY_EVIDENCE_ROOT", expected} in RunEnv.vars("GH-1")
+    System.delete_env("CRESCENDO_TEST_EVIDENCE")
+    assert Config.evidence_root() == nil
+    {captured, 0} = System.cmd("python3", ["-c", "import json,os; print(json.dumps([os.getenv('CRESCENDO_EVIDENCE_ROOT'), os.getenv('METALRAIN_SYMPHONY_EVIDENCE_ROOT')]))"], env: RunEnv.vars("GH-1"))
+    assert Enum.all?(Jason.decode!(captured), &(&1 in [nil, ""]))
+    write_workflow_file!(Workflow.workflow_file_path(), extra_config: %{"evidence" => %{"root" => "~/evidence"}})
+    assert Config.evidence_root() == Path.expand("~/evidence")
+    System.delete_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT")
+    refute Enum.any?(RunEnv.vars("GH-1"), fn {key, _} -> key == "METALRAIN_SYMPHONY_EVIDENCE_ROOT" end)
+  end
+
   test "with the dashboard serving, runs learn where the state lives" do
     {:ok, pid} = SymphonyElixir.HttpServer.start_link(host: "127.0.0.1", port: 0)
     Process.unlink(pid)

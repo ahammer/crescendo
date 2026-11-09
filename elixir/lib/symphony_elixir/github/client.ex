@@ -260,7 +260,7 @@ defmodule SymphonyElixir.GitHub.Client do
          {:ok, timeline} <- delivery_timeline(settings, request_fun, id, 1, []),
          {:ok, sources} <- delivery_sources(timeline, settings, request_fun, id) do
       issue = normalize_issue(raw, settings.repo)
-      root = Keyword.get(opts, :evidence_root, System.get_env("METALRAIN_SYMPHONY_EVIDENCE_ROOT"))
+      root = Keyword.get_lazy(opts, :evidence_root, &SymphonyElixir.Config.evidence_root/0)
       lifecycle = timeline |> Enum.filter(&(&1["event"] in ["closed", "reopened"])) |> List.last() || %{}
 
       lifecycle_id =
