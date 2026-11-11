@@ -192,9 +192,9 @@ helpers, reviews and standalone planners. Built-in delegation and ultra effort r
 Smartass permission is separate. Without it, requested Astra is visibly capped to Sol;
 gain never grants permission or Fast mode. Unsupported or quota-avoided routes defer
 rather than silently switching model. Work without a profile receives one cached, bounded,
-read-only classification; malformed or failed classification defers without spending delivery
-attempts, with a five-minute failure cache. Cache identity follows task acceptance/scope,
-not gain, retry number or checkout SHA.
+read-only classification, including scorecard research tasks. Malformed or failed classification
+defers without spending delivery attempts, with a five-minute failure cache. Cache identity follows
+task acceptance/scope, including the rendered research prompt, not gain, retry number or checkout SHA.
 
 Local agent sessions adopt changes after a completed turn and outstanding owned commands.
 Model changes create a fresh sealed session with full task/handoff context while retaining the

@@ -58,18 +58,21 @@ defmodule SymphonyElixir.Operations do
          :ok <- SymphonyElixir.IntelligencePolicy.validate_profile(profile),
          do: profile,
          else: (_ -> nil)
+  rescue
+    # Invalid task templates are reported by worker startup, not scheduler cache reads.
+    _ -> nil
   end
 
   defp routing_profile_file(issue) do
     alias SymphonyElixir.{IntelligencePolicy, Project, Service}
-    key = IntelligencePolicy.digest({"profile-v1", Project.current(), issue.id, issue.title, issue.description})
+    key = IntelligencePolicy.digest({"profile-v1", Project.current(), issue.id, issue.title, IntelligencePolicy.task_contract(issue)})
     Path.join([Service.state_root(Service.current()), "routing-profiles", key <> ".json"])
   end
 
   @spec routing_profile(Issue.t(), (-> {:ok, map()} | {:error, term()})) :: {:ok, map()} | {:error, term()}
   def routing_profile(issue, classify) do
     alias SymphonyElixir.{IntelligencePolicy, Project, Service}
-    key = IntelligencePolicy.digest({"profile-v1", Project.current(), issue.id, issue.title, issue.description})
+    key = IntelligencePolicy.digest({"profile-v1", Project.current(), issue.id, issue.title, IntelligencePolicy.task_contract(issue)})
     file = Path.join([Service.state_root(Service.current()), "routing-profiles", key <> ".json"])
 
     :global.trans({{__MODULE__, key}, self()}, fn -> cached_or_classify(file, classify) end)

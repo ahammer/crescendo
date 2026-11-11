@@ -127,12 +127,46 @@ defmodule SymphonyElixir.IntelligencePolicyTest do
       assert %{"role" => "classifier", "needs_classification" => true} = selected
     end
 
-    assert {:ok, %{"role" => "scorecard"}} = ModelRouting.select_for_run(nil, %{}, %{issue | kind: :research, labels: []}, 1)
     assert IntelligencePolicy.profile(%{issue | labels: ["crescendo:complexity:complex", "crescendo:risk:high"]}) == nil
     assert {:error, _} = IntelligencePolicy.resolve(%{}, "helper", "id")
     assert IntelligencePolicy.role_profile("helper")["complexity"] == "routine"
     assert IntelligencePolicy.role_profile("classifier")["risk"] == "low"
     assert {:ok, _} = ModelRouting.gain_route(profile("standard"), "delivery", "default", %{gain: 1, revision: "default"})
+  end
+
+  test "scorecard reuses grounded task complexity and reclassifies a changed contract" do
+    prompt = Path.join(Path.dirname(Workflow.workflow_file_path()), "research.md")
+    File.write!(prompt, "Assess all eleven dimensions and publish a dependency-safe batch")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      autopilot: %{
+        enabled: true,
+        channels: %{"scorecard" => "Assess production owners"},
+        prompts: %{research: "research.md", pull_request: "research.md"}
+      }
+    )
+
+    issue = Enum.find(SymphonyElixir.Autopilot.research_items(Config.settings!().autopilot), &(&1.research.channel == "scorecard"))
+    assert issue.description == nil
+    assert IntelligencePolicy.task_contract(issue) =~ "Assess all eleven dimensions"
+
+    assert {:ok, %{"needs_classification" => true}} = ModelRouting.select_for_run(nil, %{}, issue, 1)
+    assert {:ok, classified} = Operations.routing_profile(issue, fn -> {:ok, profile("complex", "high")} end)
+    assert {:ok, selected} = ModelRouting.select_for_run(nil, %{}, issue, 1)
+    assert selected["role"] == "scorecard"
+    assert selected["model"] == "gpt-6.1-sol"
+    assert selected["effort"] == "high"
+    assert selected["profile"] == classified
+    refute selected["needs_classification"]
+    assert {:ok, ^classified} = Operations.routing_profile(issue, fn -> flunk("scorecard classification repeated") end)
+    File.write!(prompt, "A different assessment contract")
+    assert :ok = WorkflowStore.force_reload()
+    assert IntelligencePolicy.task_contract(issue) =~ "A different assessment contract"
+    assert {:ok, %{"needs_classification" => true}} = ModelRouting.select_for_run(nil, %{}, issue, 1)
+    File.write!(prompt, "{{ missing_task_variable }}")
+    assert :ok = WorkflowStore.force_reload()
+    assert {:ok, %{"needs_classification" => true}} = ModelRouting.select_for_run(nil, %{}, issue, 1)
   end
 
   test "unreadable state and unsupported native capabilities fail closed", %{root: root} do
