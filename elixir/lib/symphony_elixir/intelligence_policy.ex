@@ -68,6 +68,11 @@ defmodule SymphonyElixir.IntelligencePolicy do
     end
   end
 
+  @doc "Research tasks carry their acceptance in the rendered prompt, rather than an issue description."
+  @spec task_contract(Issue.t()) :: String.t() | nil
+  def task_contract(%Issue{kind: :research} = issue), do: SymphonyElixir.PromptBuilder.build_prompt(issue)
+  def task_contract(%Issue{} = issue), do: issue.description
+
   @spec role_profile(String.t()) :: map()
   def role_profile(role) do
     %{

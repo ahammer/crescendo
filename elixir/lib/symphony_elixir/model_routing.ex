@@ -176,7 +176,7 @@ defmodule SymphonyElixir.ModelRouting do
 
       published = SymphonyElixir.IntelligencePolicy.profile(issue)
       profile = published || SymphonyElixir.Operations.cached_routing_profile(issue)
-      needs_profile = is_nil(profile) and role in ["delivery", "reviewer"]
+      needs_profile = is_nil(profile)
       selected_role = if needs_profile, do: "classifier", else: role
 
       profile = profile || SymphonyElixir.IntelligencePolicy.role_profile(selected_role)

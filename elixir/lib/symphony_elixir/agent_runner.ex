@@ -224,8 +224,8 @@ defmodule SymphonyElixir.AgentRunner do
 
     identity = {Project.current(), issue.identifier}
 
-    with {:ok, profile} <- task_profile(issue, role, opts, session_opts),
-         contract = IntelligencePolicy.digest({issue.title, issue.description}),
+    with {:ok, profile} <- task_profile(issue, opts, session_opts),
+         contract = IntelligencePolicy.digest({issue.title, IntelligencePolicy.task_contract(issue)}),
          {:ok, profile} <- baseline_hints(Map.put(profile, "contract", contract), issue),
          feedback = difficulty_feedback(opts, issue, profile),
          {:ok, route} <- IntelligencePolicy.resolve(profile, role, identity, feedback: feedback) do
@@ -233,12 +233,11 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp task_profile(issue, role, opts, session_opts) do
+  defp task_profile(issue, opts, session_opts) do
     alias SymphonyElixir.{IntelligencePolicy, Operations}
 
     case IntelligencePolicy.profile(issue) do
       %{} = profile -> {:ok, profile}
-      nil when role == "scorecard" -> {:ok, IntelligencePolicy.role_profile(role)}
       nil -> Operations.routing_profile(issue, fn -> classify_profile(issue, opts, session_opts) end)
     end
   end
@@ -270,7 +269,7 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp add_task_contract(prepared, issue) do
-    contract = "Task: " <> issue.title <> "\n" <> (issue.description || "")
+    contract = "Task: " <> issue.title <> "\n" <> (SymphonyElixir.IntelligencePolicy.task_contract(issue) || "")
     evidence = %{content: contract, digest: SymphonyElixir.IntelligencePolicy.digest(contract)}
     %{prepared | evidence: Map.put(prepared.evidence, "task-contract", evidence)}
   end
