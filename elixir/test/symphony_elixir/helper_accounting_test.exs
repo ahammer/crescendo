@@ -113,7 +113,7 @@ defmodule SymphonyElixir.HelperAccountingTest do
       "run_id" => String.duplicate("a", 32),
       "parent_run_id" => "parent",
       "role" => "reviewer",
-      "model" => "gpt-6.1-sol",
+      "model" => "gpt-6.2-sol",
       "effort" => "max",
       "source_sha" => String.duplicate("b", 40),
       "thread_id" => "review-thread",
@@ -136,6 +136,8 @@ defmodule SymphonyElixir.HelperAccountingTest do
     assert snapshot.external.attribution == "unverified_cli_report"
     assert snapshot.external.reports == 1
     [observation] = snapshot.external.observations
+    assert observation.model == "gpt-6.2-sol"
+    assert observation.usd_micro == 462
     assert observation.parent_run_id == "parent"
     assert observation.source_sha == report["source_sha"]
     assert observation.accounting_date == Date.to_iso8601(Date.add(Date.utc_today(), -1))

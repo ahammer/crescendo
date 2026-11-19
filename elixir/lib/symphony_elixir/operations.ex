@@ -15,6 +15,7 @@ defmodule SymphonyElixir.Operations do
   # Standard, short-context API prices in micro-USD per million tokens
   # (input, cached input, output); `pricing.models` overrides or adds models.
   @rates %{
+    "gpt-6.2-sol" => {2_000_000, 100_000, 10_000_000},
     "gpt-6.1-sol" => {2_000_000, 100_000, 10_000_000},
     "gpt-6.1-terra" => {1_000_000, 50_000, 5_000_000},
     "gpt-6-astra" => {10_000_000, 1_000_000, 50_000_000},
@@ -422,7 +423,7 @@ defmodule SymphonyElixir.Operations do
 
   defp external_observation(table, report, id) do
     with %{"run_id" => ^id, "parent_run_id" => parent, "role" => role, "model" => model, "effort" => effort, "source_sha" => sha, "observed_at_epoch" => epoch} <- report,
-         true <- model in ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra"] and effort in ~w(low medium high xhigh max),
+         true <- model in ~w(gpt-6-luna gpt-6.1-terra gpt-6.1-sol gpt-6.2-sol gpt-6-astra) and effort in ~w(low medium high xhigh max),
          true <- role in ["reviewer", "planner"] and is_binary(sha) and Regex.match?(~r/\A[a-f0-9]{40}\z/, sha),
          true <- recent_report_time?(epoch),
          {:ok, at} <- DateTime.from_unix(trunc(epoch)),

@@ -26,7 +26,7 @@ defmodule SymphonyElixir.IntelligencePolicyTest do
       evidence = %{"kind" => "insufficient_model", "reason" => "Independent finding", "evidence_refs" => ["review:1"], "model_steps" => 3}
       assert {:ok, %{"model" => "gpt-6-luna"}} = route(p, role, "id", 0, smartass: true, feedback: evidence)
       assert {:ok, %{"model" => "gpt-6-astra"}} = route(p, role, "id", 2, smartass: true)
-      assert {:ok, %{"model" => "gpt-6.1-sol", "requested_model" => "gpt-6-astra", "cap_reason" => "smartass_off"}} = route(p, role, "id", 2)
+      assert {:ok, %{"model" => "gpt-6.2-sol", "requested_model" => "gpt-6-astra", "cap_reason" => "smartass_off"}} = route(p, role, "id", 2)
     end
   end
 
@@ -43,8 +43,15 @@ defmodule SymphonyElixir.IntelligencePolicyTest do
     end
   end
 
+  test "current and retained Sol baselines select the same model" do
+    for model <- ~w(gpt-6.1-sol gpt-6.2-sol) do
+      baseline = Map.put(profile("standard"), "baseline", %{"model" => model, "effort" => "medium"})
+      assert {:ok, %{"model" => "gpt-6.2-sol", "effort" => "medium"}} = route(baseline, "delivery", 1, 1)
+    end
+  end
+
   test "fractional gain is reproducible, gradual, and monotone for each task" do
-    models = ~w(gpt-6-luna gpt-6.1-terra gpt-6.1-sol gpt-6-astra)
+    models = ~w(gpt-6-luna gpt-6.1-terra gpt-6.2-sol gpt-6-astra)
 
     selected =
       for id <- 1..2000 do
@@ -73,7 +80,7 @@ defmodule SymphonyElixir.IntelligencePolicyTest do
       assert {:ok, ^original} = route(base, "delivery", 1, 1, feedback: %{"kind" => kind, "reason" => "failure", "evidence_refs" => ["log"]})
     end
 
-    assert {:ok, %{"model" => "gpt-6.1-sol", "effort" => "medium"}} =
+    assert {:ok, %{"model" => "gpt-6.2-sol", "effort" => "medium"}} =
              route(base, "delivery", 1, 1, feedback: %{"kind" => "insufficient_model", "reason" => "Repeated logic failure", "evidence_refs" => ["review:2"]})
 
     assert {:error, _} = route(base, "delivery", 1, -1)
@@ -155,7 +162,7 @@ defmodule SymphonyElixir.IntelligencePolicyTest do
     assert {:ok, classified} = Operations.routing_profile(issue, fn -> {:ok, profile("complex", "high")} end)
     assert {:ok, selected} = ModelRouting.select_for_run(nil, %{}, issue, 1)
     assert selected["role"] == "scorecard"
-    assert selected["model"] == "gpt-6.1-sol"
+    assert selected["model"] == "gpt-6.2-sol"
     assert selected["effort"] == "high"
     assert selected["profile"] == classified
     refute selected["needs_classification"]

@@ -20,7 +20,8 @@ defmodule SymphonyElixir.ModelRouting do
   @efforts ~w(minimal low medium high xhigh max)
   @fixed_labels %{research: "research", pull_request: "review"}
 
-  @models ~w(gpt-6-luna gpt-6.1-terra gpt-6.1-sol gpt-6-astra)
+  @sol_model "gpt-6.2-sol"
+  @models ["gpt-6-luna", "gpt-6.1-terra", @sol_model, "gpt-6-astra"]
   @gain_efforts ~w(low medium high xhigh max)
 
   @doc "Pure, repeatable gain transform. Promotions precede gain, never bypassing endpoints."
@@ -48,8 +49,9 @@ defmodule SymphonyElixir.ModelRouting do
   defp profile_levels(profile, feedback) do
     {model, effort, ceiling} = base_levels(profile)
     baseline = profile["baseline"] || %{}
+    baseline_model = if baseline["model"] == "gpt-6.1-sol", do: @sol_model, else: baseline["model"]
     floor = if profile["risk"] == "high", do: 1, else: 0
-    model = max(Enum.find_index(@models, &(&1 == baseline["model"])) || model, floor)
+    model = max(Enum.find_index(@models, &(&1 == baseline_model)) || model, floor)
     effort = min(Enum.find_index(@gain_efforts, &(&1 == baseline["effort"])) || effort, ceiling)
     {promote(model, 3, "model", feedback), promote(effort, ceiling, "reasoning", feedback), ceiling, floor}
   end
