@@ -73,7 +73,7 @@ throttle:
   daily_budget_usd: 200
   backoff:
     - {window: weekly, remaining_below_percent: 3, pause: true}
-pricing: {as_of: "2026-10-01", models: {gpt-6.1-sol: {input: 1.0, cached_input: 0.1, output: 5.0}}}
+pricing: {as_of: "2026-11-19", models: {gpt-6.2-sol: {input: 2.0, cached_input: 0.1, output: 10.0}}}
 defaults:
   codex:
     routing: {...}          # anything a project's front matter may hold
@@ -159,7 +159,7 @@ Enable the shared policy explicitly in the service file:
 intelligence_policy: {enabled: true}
 ```
 
-The shipped adaptive profile requires access to `gpt-6-luna`, `gpt-6.1-terra`, `gpt-6.1-sol`
+The shipped adaptive profile requires access to `gpt-6-luna`, `gpt-6.1-terra`, `gpt-6.2-sol`
 and, when authorized, `gpt-6-astra`. Check access in your Codex installation before opting in.
 The profile is fixed in this version; arbitrary configured legacy routes remain available separately.
 Local helpers use Linux `memfd` and `/proc` facilities; published macOS builds do not establish
@@ -174,8 +174,8 @@ operator-only MCP operations, so public viewers cannot change model spend.
 | Routine extraction | Luna low | medium |
 | Bounded known-pattern, low risk | Terra low | medium |
 | Ordinary implementation, review or coordination | Terra medium | medium |
-| Complex causal/invariant reasoning | Sol high | xhigh |
-| Exceptional mental difficulty | Sol xhigh | max |
+| Complex causal/invariant reasoning | GPT-6.2 Sol high | xhigh |
+| Exceptional mental difficulty | GPT-6.2 Sol xhigh | max |
 
 High-risk mechanical work has a Terra/medium baseline. Risk is not complexity, and
 GPU involvement, file count, failed builds and lease waits do not establish mental difficulty.
@@ -405,7 +405,7 @@ channels:
     prompt: prompts/research/qa.md     # this channel's own prompt (else prompts.research)
     min_issues: 2
     max_issues: 4
-    route: {model: gpt-6.1-sol, effort: xhigh}
+    route: {model: gpt-6.2-sol, effort: xhigh}
     every: 1d          # schedule: 30m, 6h, 1d, 2w (default research_cooldown_ms)
     at: "06:00"        # optional UTC calendar anchor (interval rounds up to days)
     when: idle         # idle: only when nothing else runs or waits; anytime: whenever a slot is free
