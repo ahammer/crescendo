@@ -563,7 +563,7 @@ defmodule SymphonyElixir.AutopilotTest do
 
         [research | _] = Autopilot.research_items(settings.autopilot)
         assert PromptBuilder.build_prompt(research) =~ "File **at least 3 and at most 5** issues"
-        assert settings.autopilot.research_route == %{"model" => "gpt-6.1-sol", "effort" => "max"}
+        assert settings.autopilot.research_route == %{"model" => "gpt-6.2-sol", "effort" => "max"}
       after
         {repo, token} = previous
         restore_env("GITHUB_REPO", repo)
