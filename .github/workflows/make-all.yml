@@ -29,10 +29,9 @@ jobs:
         with:
           path: |
             elixir/deps
-            elixir/_build
-          key: ${{ runner.os }}-mix-${{ hashFiles('elixir/mix.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-mix-
+            elixir/_build/*/lib/*
+          # Dialyzer tables are siblings of lib and rebuild on the current runner.
+          key: ${{ runner.os }}-mix-apps-${{ hashFiles('elixir/mise.toml', 'elixir/mix.lock') }}
 
       - name: Verify deployment recovery
         run: python3 -m unittest discover -s ../ops/tests -p 'test_deploy*.py'
