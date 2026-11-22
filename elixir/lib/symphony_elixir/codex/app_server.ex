@@ -71,7 +71,19 @@ defmodule SymphonyElixir.Codex.AppServer do
       end
 
     script = """
-    import json, os, sys, glob
+    import json, os, sys, glob, shutil
+
+    computer_use = shutil.which('computer-use-linux')
+    computer_use = os.path.realpath(computer_use) if computer_use else None
+
+    def native_transport(parent, child, args):
+        parent_exe = os.readlink(f'/proc/{parent}/exe')
+        if os.path.basename(parent_exe) != 'codex':
+            return False
+        child_exe = os.readlink(f'/proc/{child}/exe')
+        code_mode = os.path.join(os.path.dirname(parent_exe), 'codex-code-mode-host')
+        return child_exe == code_mode or (child_exe == computer_use and args[1:2] == [b'mcp'])
+
     def quiet(pid, transport=False):
         try:
             children = set()
@@ -90,7 +102,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             # Persistent managed MCP servers are transports, not running shell jobs.
             managed = b'mcp' in args and any(os.path.basename(a) in (b'crescendo', b'symphony', b'metalrain') for a in args)
             support = transport and os.path.basename(args[0]) in (b'erl_child_setup', b'inet_gethost')
-            if managed or support:
+            if managed or support or native_transport(pid, child, args):
                 if not quiet(child, transport=True):
                     return False
                 continue

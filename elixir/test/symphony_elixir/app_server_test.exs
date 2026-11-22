@@ -1,6 +1,53 @@
 defmodule SymphonyElixir.AppServerTest do
   use SymphonyElixir.TestSupport
 
+  @tag :tmp_dir
+  test "idle Codex transports permit yielding and a shell job below them prevents it", %{tmp_dir: dir} do
+    path = System.fetch_env!("PATH")
+    python = System.find_executable("python3")
+
+    for name <- ~w(codex codex-code-mode-host computer-use-linux) do
+      executable = Path.join(dir, name)
+      File.cp!(python, executable)
+      File.chmod!(executable, 0o700)
+    end
+
+    System.put_env("PATH", dir <> ":" <> path)
+    on_exit(fn -> System.put_env("PATH", path) end)
+    File.write!(Path.join(dir, "mcp"), "input()\n")
+
+    script = """
+    import subprocess
+    with subprocess.Popen(['./codex-code-mode-host', '-u', '-c',
+        "import subprocess; input(); child = subprocess.Popen(['/bin/sleep', '30']); "
+        "print('working', flush=True); input(); child.terminate(); child.wait()"],
+        stdin=subprocess.PIPE) as host, subprocess.Popen(['./computer-use-linux', 'mcp'],
+        stdin=subprocess.PIPE) as computer:
+        print('ready', flush=True)
+        input()
+        host.stdin.write(b'\\n')
+        host.stdin.flush()
+        input()
+        host.stdin.write(b'\\n')
+        host.stdin.flush()
+        computer.stdin.write(b'\\n')
+        computer.stdin.flush()
+    """
+
+    port = Port.open({:spawn_executable, Path.join(dir, "codex")}, [:binary, :exit_status, {:cd, dir}, {:args, ["-c", script]}])
+    session = %{port: port, worker_host: nil}
+
+    assert_receive {^port, {:data, "ready\n"}}, 2_000
+    idle = AppServer.quiescent?(session)
+    assert Port.command(port, "\n")
+    assert_receive {^port, {:data, "working\n"}}, 2_000
+    busy = AppServer.quiescent?(session)
+    assert Port.command(port, "\n")
+    assert_receive {^port, {:exit_status, 0}}, 2_000
+    assert idle
+    refute busy
+  end
+
   test "Astra requires explicit permission and expiry stops the next native turn" do
     root = Path.join(System.tmp_dir!(), "smartass-native-#{System.unique_integer([:positive])}")
     workspace = Path.join(root, "workspaces/ASTRA-1")
